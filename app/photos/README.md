@@ -19,7 +19,7 @@ Import from `app.photos`.
 - `list_photos(db_path=DEFAULT_DB_PATH)`: return all photo rows.
 - `list_changed_photos(db_path=DEFAULT_DB_PATH)`: return photos with status `new` or `updated`.
 - `get_photo(photo_id, db_path=DEFAULT_DB_PATH)`: return one row or `None`.
-- `get_or_create_thumbnail(photo_id, db_path=DEFAULT_DB_PATH, thumbnail_root="data/thumbnails", size=(512, 512))`: create/reuse a JPEG thumbnail and store `thumbnail_path`.
+- `get_or_create_thumbnail(photo_id, db_path=DEFAULT_DB_PATH, thumbnail_root="data/thumbnails", size=(256, 256))`: create/reuse a WebP thumbnail and store `thumbnail_path`.
 - `get_roots(db_path=DEFAULT_DB_PATH)`: return configured roots.
 - `save_roots(roots, db_path=DEFAULT_DB_PATH)`: replace root metadata and sort order without scanning.
 - `get_latest_update(db_path=DEFAULT_DB_PATH)`: return `photos_metadata`.
@@ -76,5 +76,5 @@ Primary key: `(root, relative_dir)`.
 ## Notes
 
 - Rebuild deletes thumbnail files under `data/thumbnails`.
-- Thumbnails are generated only when requested.
+- Thumbnails are generated as compressed WebP files only when requested.
 - Image URLs should include a version based on `root`, `relative_path`, `modified_at`, and `file_size`; versioned image responses are cacheable.

@@ -42,8 +42,9 @@
 
 .photo-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(180px, 220px));
   align-content: start;
+  justify-content: start;
   gap: 8px;
   height: 100%;
   padding: 10px;
@@ -52,6 +53,8 @@
 
 .photo-tile {
   display: grid;
+  content-visibility: auto;
+  contain-intrinsic-size: 230px;
   gap: 5px;
   min-width: 0;
   border: 1px solid transparent;

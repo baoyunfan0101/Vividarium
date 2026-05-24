@@ -101,10 +101,13 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     if (listRef.current) {
       listRef.current.scrollTop = listScrollTop;
     }
+  }, [state]);
+
+  useEffect(() => {
     if (gridRef.current) {
       gridRef.current.scrollTop = gridScrollTop;
     }
-  }, [state, photos, selected, listScrollTop, gridScrollTop]);
+  }, [state, photos, selected]);
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -200,6 +203,8 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
 
   function pushTaxonomyState(nextState: TaxonomyState) {
     selectPhoto(null);
+    setListScrollTop(0);
+    setGridScrollTop(0);
     setState(nextState);
   }
 

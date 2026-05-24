@@ -92,10 +92,13 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
     if (listRef.current) {
       listRef.current.scrollTop = listScrollTop;
     }
+  }, [listing]);
+
+  useEffect(() => {
     if (gridRef.current) {
       gridRef.current.scrollTop = gridScrollTop;
     }
-  }, [listing, selected, listScrollTop, gridScrollTop]);
+  }, [listing, selected]);
 
   useEffect(() => {
     const missingNames = Array.from(new Set(
@@ -153,6 +156,8 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
       return;
     }
     selectPhoto(null);
+    setListScrollTop(0);
+    setGridScrollTop(0);
     setPath(nextPath);
   }
 

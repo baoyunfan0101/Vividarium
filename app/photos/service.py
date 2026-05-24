@@ -149,7 +149,7 @@ def get_or_create_thumbnail(
     photo_id: int,
     db_path: str | Path = DEFAULT_DB_PATH,
     thumbnail_root: str | Path = "data/thumbnails",
-    size: tuple[int, int] = (512, 512),
+    size: tuple[int, int] = (256, 256),
 ) -> Path | None:
     with PhotosDatabase(db_path) as db:
         photo = db.get_photo_by_id(photo_id)
@@ -269,7 +269,7 @@ def _photo_file_path(photo: dict) -> Path:
 def _thumbnail_path(photo: dict, thumbnail_root: str | Path) -> Path:
     modified = int(photo.get("modified_at") or 0)
     file_size = int(photo.get("file_size") or 0)
-    filename = f"photo_{photo['photo_id']}_{modified}_{file_size}.jpg"
+    filename = f"photo_{photo['photo_id']}_{modified}_{file_size}.webp"
     return Path(thumbnail_root) / filename
 
 
@@ -298,7 +298,7 @@ def _create_thumbnail(
         image.thumbnail(size)
         if image.mode not in {"RGB", "L"}:
             image = image.convert("RGB")
-        image.save(output_path, "JPEG", quality=82, optimize=True)
+        image.save(output_path, "WEBP", quality=58, method=6)
 
 
 def _parent_dir(relative_path: str) -> str:

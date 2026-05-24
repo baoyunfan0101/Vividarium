@@ -275,12 +275,45 @@ export function PhotoGrid({
     <div className="photo-grid loading-scope" ref={scrollRef} onScroll={onScroll} onClick={(event) => event.currentTarget === event.target && onBlankClick?.()}>
       {photos.map((photo) => (
         <button key={photo.photo_id} disabled={loading} className={photo.photo_id === selectedPhotoId ? "photo-tile selected" : "photo-tile"} onClick={() => onPhotoClick?.(photo)}>
-          <img src={photoThumbnailUrl(photo)} alt={photo.filename} />
+          <LazyThumbnail photo={photo} />
           <strong>{photo.binomial_name ?? photo.filename}</strong>
           <span>{subtitleForPhoto?.(photo) ?? ""}</span>
         </button>
       ))}
       {loading && <LoadingOverlay label={loadingLabel} />}
     </div>
+  );
+}
+
+function LazyThumbnail({ photo }: { photo: Photo }) {
+  const [visible, setVisible] = useState(false);
+  const imageRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!image || visible) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "600px" },
+    );
+    observer.observe(image);
+    return () => observer.disconnect();
+  }, [visible]);
+
+  return (
+    <img
+      ref={imageRef}
+      src={visible ? photoThumbnailUrl(photo) : undefined}
+      alt={photo.filename}
+      loading="lazy"
+      decoding="async"
+    />
   );
 }
