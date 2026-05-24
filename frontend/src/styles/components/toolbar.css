@@ -1,0 +1,59 @@
+.toolbar {
+  display: flex;
+  gap: var(--control-gap);
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.toolbar input,
+.toolbar select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #c8d2ce;
+  border-radius: var(--control-radius);
+  padding: var(--field-padding-y) var(--field-padding-x);
+  background: #fbfcfb;
+  color: #17211f;
+}
+
+.toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control-size);
+  border: 1px solid #b8c5c0;
+  border-radius: var(--control-radius);
+  padding: var(--control-padding-y) var(--control-padding-x);
+  background: #ffffff;
+  color: #17211f;
+}
+
+.toolbar button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.toolbar > button {
+  width: var(--control-size);
+  height: var(--control-size);
+  flex: 0 0 var(--control-size);
+  padding: 0;
+}
+
+.icon-toolbar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.icon-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-control-size);
+  height: var(--icon-control-size);
+  border: 1px solid #b8c5c0;
+  border-radius: var(--control-radius);
+  background: #ffffff;
+  color: #17211f;
+}

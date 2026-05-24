@@ -1,72 +1,101 @@
-# API Module
+# API
 
-This module exposes the current `photos`, `taxa`, and `photos_taxa_mapping` services through FastAPI.
+FastAPI routes for photos, taxa, mapping, local path picking, and operation progress.
 
 ## Run
+
+From the repository root, `python main.py` starts both backend and frontend.
+
+Backend only:
 
 ```bash
 .venv/bin/uvicorn app.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Interactive API docs are available at:
+Docs: `http://127.0.0.1:8000/docs`.
 
-```text
-http://127.0.0.1:8000/docs
-```
+## Confirmation Responses
 
-## Confirmation Flow
-
-Some operations intentionally return a confirmation response instead of mutating the database. The frontend should show the message to the user and, if the user confirms, call the same endpoint again with `force: true`.
-
-Confirmation response shape:
+Some mutating endpoints may return:
 
 ```json
 {
   "needs_confirmation": true,
-  "reason": "knowledge_base_unchanged",
-  "message": "Knowledge-base file size and modified time are unchanged."
+  "reason": "...",
+  "message": "..."
 }
 ```
 
-Current confirmation reasons:
+Call the same endpoint again with `force: true` to continue.
 
-- `knowledge_base_unchanged`: returned by `POST /taxa/update` and `POST /taxa/rebuild` when the selected knowledge-base file has the same path, size, and modified time as the stored metadata.
-- `taxa_newer_than_photos`: returned by `POST /mapping/photos-taxa/update` when the taxa module was synced later than the photos module.
+Current reasons:
 
-## Photos Routes
+- `photos_rebuild_clears_thumbnails`: photos rebuild clears cached thumbnails and rebuilds ids.
+- `knowledge_base_unchanged`: selected taxa workbook path, size, and modified time match stored metadata.
+- `mapping_inputs_unchanged`: photos and taxa sync times match the last mapping sync.
+- `taxa_newer_than_photos`: taxa were synced later than photos.
 
-- `GET /photos/roots`: return recorded photo roots and root metadata.
-- `PUT /photos/roots`: replace the stored root list and order without scanning files. Body: `{"roots": ["..."]}`.
-- `GET /photos/browse?root=...&relative_dir=...`: browse directories and files under a root.
-- `GET /photos/all`: return the full `photos` table.
-- `GET /photos/changed`: return photos with `updated` or `new` status.
-- `GET /photos/latest-update`: return `photos_metadata`.
-- `GET /photos/file/{photo_id}`: return the original photo file for preview.
-- `GET /photos/{photo_id}`: return one photo row.
-- `POST /photos/update`: update one or more roots. Body: `{"root": "..."}` or `{"roots": ["..."]}`. If omitted, the API uses the only recorded root when exactly one exists.
-- `POST /photos/rebuild`: rebuild rows for the specified roots. Body: `{"roots": ["..."]}`. If omitted, the API uses recorded roots.
-- `GET /photos/export?table_name=...`: download `photos` or `photos_metadata` as CSV.
-- `POST /photos/export`: export `photos` or `photos_metadata` to a backend filesystem path.
+## Operation Responses
 
-## Taxa Routes
+Long-running update/rebuild endpoints return:
 
-- `GET /taxa/latest-update`: return `taxa_metadata`.
-- `PUT /taxa/knowledge-base`: save the configured knowledge-base path without importing taxa. Body: `{"knowledge_base_path": "..."}`.
-- `GET /taxa/by-id/{taxon_id}`: return one taxa row by id.
-- `GET /taxa/by-binomial?binomial_name=...`: return one taxa row by binomial name.
-- `POST /taxa/update`: update taxa. Body: `{"knowledge_base_path": "...", "force": false}`. Path may be omitted when metadata already stores one.
-- `POST /taxa/rebuild`: rebuild taxa. Body: `{"knowledge_base_path": "...", "force": false}`. Path may be omitted when metadata already stores one.
-- `GET /taxa/export?table_name=...`: download `taxa` or `taxa_metadata` as CSV.
-- `POST /taxa/export`: export `taxa` or `taxa_metadata` to a backend filesystem path.
+```json
+{
+  "operation": {
+    "module": "photos",
+    "task_id": "...",
+    "running": true,
+    "processed": 12,
+    "total": 102
+  }
+}
+```
 
-## Photos-Taxa Mapping Routes
+Poll `GET /operations/status` for progress and final result.
 
-- `GET /mapping/photos-taxa/latest-update`: return mapping metadata.
-- `GET /mapping/photos-taxa/root`: return top-level cached taxa nodes and photo ids.
-- `GET /mapping/photos-taxa/taxon/{taxon_id}`: return exact photo ids and child taxa rows.
-- `GET /mapping/photos-taxa/search-binomial?binomial_name=...`: same as above, found by binomial name.
-- `GET /mapping/photos-taxa/search?name=...`: same as above, found by display name.
-- `POST /mapping/photos-taxa/update`: update changed photos only. Body: `{"force": false}`.
-- `POST /mapping/photos-taxa/rebuild`: rebuild from all photos. Body: `{"force": false}`.
-- `GET /mapping/photos-taxa/export?table_name=...`: download a mapping table as CSV.
-- `POST /mapping/photos-taxa/export`: export a mapping table to a backend filesystem path.
+## Photos
+
+- `GET /photos/roots`: roots and `photos_metadata`.
+- `PUT /photos/roots`: replace roots. Body: `{"roots": ["..."]}`.
+- `GET /photos/browse?root=...&relative_dir=...`: direct child folders and files.
+- `GET /photos/all`: all photo rows.
+- `GET /photos/changed`: photos with status `new` or `updated`.
+- `GET /photos/latest-update`: `photos_metadata`.
+- `GET /photos/file/{photo_id}?v=...`: original photo. Versioned requests are long-cacheable.
+- `GET /photos/thumbnail/{photo_id}?v=...`: lazy thumbnail. Versioned requests are long-cacheable.
+- `GET /photos/{photo_id}`: one photo row.
+- `POST /photos/update`: update one or more roots. Body: `{"root": "..."}` or `{"roots": ["..."]}`.
+- `POST /photos/rebuild`: rebuild roots. Body: `{"roots": ["..."], "force": true}`.
+- `GET /photos/export?table_name=...`: download `photos`, `photos_dir`, or `photos_metadata`.
+- `POST /photos/export`: export one photos table to a backend path.
+
+## Taxa
+
+- `GET /taxa/latest-update`: `taxa_metadata` plus count.
+- `PUT /taxa/knowledge-base`: save workbook path without importing. Body: `{"knowledge_base_path": "..."}`.
+- `GET /taxa/by-id/{taxon_id}`: one taxon row.
+- `GET /taxa/by-binomial?binomial_name=...`: one taxon row by scientific name.
+- `POST /taxa/update`: update taxa. Body: `{"knowledge_base_path": "...", "force": false}`.
+- `POST /taxa/rebuild`: rebuild taxa. Body: `{"knowledge_base_path": "...", "force": false}`.
+- `GET /taxa/export?table_name=...`: download `taxa` or `taxa_metadata`.
+- `POST /taxa/export`: export one taxa table to a backend path.
+
+## Photos-Taxa Mapping
+
+- `GET /mapping/photos-taxa/latest-update`: metadata plus counts.
+- `GET /mapping/photos-taxa/root`: root taxonomy nodes.
+- `GET /mapping/photos-taxa/taxon/{taxon_id}`: exact photo ids and child taxa.
+- `GET /mapping/photos-taxa/search?name=...`: find cached taxon by Chinese/common name.
+- `GET /mapping/photos-taxa/search-binomial?binomial_name=...`: find cached taxon by scientific name.
+- `GET /mapping/photos-taxa/suggest?query=...&mode=name|binomial`: autocomplete cached taxa.
+- `POST /mapping/photos-taxa/update`: update changed/new photos.
+- `POST /mapping/photos-taxa/rebuild`: rebuild mapping from all photos.
+- `GET /mapping/photos-taxa/export?table_name=...`: download a mapping table.
+- `POST /mapping/photos-taxa/export`: export a mapping table to a backend path.
+
+## Local Paths
+
+- `GET /local/select-directory`: open a native directory picker when available.
+- `GET /local/select-file`: open a native file picker when available.
+
+These routes are for local desktop use.

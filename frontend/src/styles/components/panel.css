@@ -1,0 +1,61 @@
+.panel,
+.preview,
+.photo-grid {
+  background: #ffffff;
+  border: 1px solid #d8dfdc;
+  border-radius: var(--control-radius);
+}
+
+.panel {
+  min-width: 0;
+  padding: 10px;
+}
+
+.loading-scope {
+  position: relative;
+}
+
+.panel input,
+.panel select,
+.panel textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #c8d2ce;
+  border-radius: var(--control-radius);
+  padding: var(--field-padding-y) var(--field-padding-x);
+  background: #fbfcfb;
+  color: #17211f;
+}
+
+.panel textarea {
+  min-height: 86px;
+  resize: vertical;
+}
+
+.panel > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: var(--control-size);
+  margin-top: 8px;
+  border: 1px solid #245f4e;
+  border-radius: var(--control-radius);
+  padding: var(--control-padding-y) var(--control-padding-x);
+  background: #245f4e;
+  color: #ffffff;
+  gap: var(--control-gap);
+}
+
+.panel > button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.panel.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #65736e;
+}

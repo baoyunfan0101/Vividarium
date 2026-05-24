@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+from typing import Callable
 
 from app.photos import get_latest_update as get_photos_latest_update
 from app.photos import list_changed_photos, list_photos
@@ -20,18 +21,24 @@ from .db import (
 )
 
 
-def update_mapping(db_path: str | Path = DEFAULT_DB_PATH) -> dict:
+def update_mapping(
+    db_path: str | Path = DEFAULT_DB_PATH,
+    progress: Callable[[int, int | None, str | None], None] | None = None,
+) -> dict:
     """Map photos with status updated/new."""
 
     photos = list_changed_photos(db_path=db_path)
-    return _sync_photos(photos, db_path=db_path, rebuild=False)
+    return _sync_photos(photos, db_path=db_path, rebuild=False, progress=progress)
 
 
-def rebuild_mapping(db_path: str | Path = DEFAULT_DB_PATH) -> dict:
+def rebuild_mapping(
+    db_path: str | Path = DEFAULT_DB_PATH,
+    progress: Callable[[int, int | None, str | None], None] | None = None,
+) -> dict:
     """Rebuild mapping from all photo rows."""
 
     photos = list_photos(db_path=db_path)
-    return _sync_photos(photos, db_path=db_path, rebuild=True)
+    return _sync_photos(photos, db_path=db_path, rebuild=True, progress=progress)
 
 
 def get_by_taxon_id(
@@ -64,9 +71,23 @@ def get_by_name(
         return _result_for_taxon_id(db, int(taxa[0]["taxon_id"]))
 
 
+def suggest_taxa(
+    query: str,
+    mode: str,
+    limit: int = 10,
+    db_path: str | Path = DEFAULT_DB_PATH,
+) -> list[dict]:
+    field = "name" if mode == "name" else "binomial_name"
+    with PhotosTaxaMappingDatabase(db_path) as db:
+        return db.suggest_subtree_taxa(field, query, limit)
+
+
 def get_latest_update(db_path: str | Path = DEFAULT_DB_PATH) -> dict:
     with PhotosTaxaMappingDatabase(db_path) as db:
-        return db.get_metadata()
+        metadata = db.get_metadata()
+        metadata["mapped_photo_count"] = db.count_mapped_photos()
+        metadata["mapping_taxa_count"] = db.count_subtree_taxa()
+        return metadata
 
 
 def export_table_csv(
@@ -92,13 +113,19 @@ def _sync_photos(
     photos: list[dict],
     db_path: str | Path,
     rebuild: bool,
+    progress: Callable[[int, int | None, str | None], None] | None = None,
 ) -> dict:
     unmapped_photos = []
     mapped = 0
+    total = len(photos)
+    _report_progress(progress, 0, total, "Mapping photos")
 
     with PhotosTaxaMappingDatabase(db_path) as mapping_db, TaxaDatabase(db_path) as taxa_db:
         if rebuild:
             mapping_db.clear_all()
+            orphan_mappings_deleted = 0
+        else:
+            orphan_mappings_deleted = mapping_db.delete_orphan_mappings()
 
         for photo in photos:
             taxon_id = _taxon_id_for_photo(photo, mapping_db, taxa_db)
@@ -106,6 +133,7 @@ def _sync_photos(
                 unmapped_photos.append(photo)
             mapping_db.upsert_mapping(int(photo["photo_id"]), taxon_id)
             mapped += 1
+            _report_progress(progress, mapped, total, "Mapping photos")
 
         mapping_db.save_metadata(
             _photos_last_synced_at(db_path),
@@ -117,7 +145,18 @@ def _sync_photos(
         "mapped": mapped,
         "unmapped": len(unmapped_photos),
         "unmapped_photos": unmapped_photos,
+        "orphan_mappings_deleted": orphan_mappings_deleted,
     }
+
+
+def _report_progress(
+    progress: Callable[[int, int | None, str | None], None] | None,
+    processed: int,
+    total: int | None,
+    message: str | None,
+) -> None:
+    if progress is not None:
+        progress(processed, total, message)
 
 
 def _taxon_id_for_photo(

@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from app.operations import OperationBusyError, operation_manager
 from app.taxa import (
     export_table_csv,
     get_latest_update,
@@ -69,7 +70,30 @@ def api_update_taxa(request: TaxaSyncRequest) -> dict:
     confirmation = _knowledge_base_confirmation(request.knowledge_base_path)
     if confirmation and not request.force:
         return confirmation
-    return {"result": update_taxa(request.knowledge_base_path)}
+    try:
+        state = operation_manager.start(
+            "taxa",
+            "update",
+            lambda: update_taxa(
+                request.knowledge_base_path,
+                progress=lambda processed, total, message: operation_manager.progress(
+                    "taxa",
+                    processed,
+                    total,
+                    message,
+                ),
+            ),
+        )
+    except OperationBusyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_busy",
+                "module": exc.module,
+                "blocked_by": exc.blocked_by,
+            },
+        ) from exc
+    return {"operation": state}
 
 
 @router.post("/rebuild")
@@ -77,7 +101,30 @@ def api_rebuild_taxa(request: TaxaSyncRequest) -> dict:
     confirmation = _knowledge_base_confirmation(request.knowledge_base_path)
     if confirmation and not request.force:
         return confirmation
-    return {"result": rebuild_taxa(request.knowledge_base_path)}
+    try:
+        state = operation_manager.start(
+            "taxa",
+            "rebuild",
+            lambda: rebuild_taxa(
+                request.knowledge_base_path,
+                progress=lambda processed, total, message: operation_manager.progress(
+                    "taxa",
+                    processed,
+                    total,
+                    message,
+                ),
+            ),
+        )
+    except OperationBusyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_busy",
+                "module": exc.module,
+                "blocked_by": exc.blocked_by,
+            },
+        ) from exc
+    return {"operation": state}
 
 
 @router.post("/export")
@@ -111,7 +158,10 @@ def _knowledge_base_confirmation(path: Optional[str]) -> Optional[dict]:
     return {
         "needs_confirmation": True,
         "reason": "knowledge_base_unchanged",
-        "message": "Knowledge-base file size and modified time are unchanged.",
+        "message": (
+            "The selected knowledge-base file appears unchanged. Are you sure "
+            "you want to continue this update/rebuild anyway?"
+        ),
         "metadata": metadata,
         "file": signature,
     }

@@ -1,28 +1,95 @@
-"""Small local entry point for inspecting PhytoIndex data."""
+"""Local development launcher for PhytoIndex."""
 
 from __future__ import annotations
 
+import argparse
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
-from app.photos.db import DEFAULT_DB_PATH
-from app.taxa import export_table_csv
 
-
-TAXA_EXPORT_PATH = Path("data/taxa_export.csv")
-
-
-def export_taxa(
-    output_path: str | Path = TAXA_EXPORT_PATH,
-    db_path: str | Path = DEFAULT_DB_PATH,
-) -> int:
-    """Read taxa from the database and write them to a CSV file."""
-
-    return export_table_csv("taxa", output_path, db_path=db_path)
+ROOT = Path(__file__).resolve().parent
+FRONTEND = ROOT / "frontend"
 
 
 def main() -> None:
-    exported = export_taxa()
-    print(f"Exported {exported} taxa rows to {TAXA_EXPORT_PATH}")
+    args = parse_args()
+    processes: list[subprocess.Popen[bytes]] = []
+
+    try:
+        if not args.frontend_only:
+            processes.append(start_backend())
+        if not args.backend_only:
+            processes.append(start_frontend())
+
+        print("PhytoIndex is starting.")
+        if not args.frontend_only:
+            print("Backend:  http://127.0.0.1:8000")
+        if not args.backend_only:
+            print("Frontend: http://127.0.0.1:5173")
+        print("Press Ctrl+C to stop.")
+
+        wait_for_processes(processes)
+    except KeyboardInterrupt:
+        print("\nStopping PhytoIndex...")
+    finally:
+        stop_processes(processes)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Start the local PhytoIndex app.")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--backend-only", action="store_true", help="start only FastAPI")
+    group.add_argument("--frontend-only", action="store_true", help="start only Vite")
+    return parser.parse_args()
+
+
+def start_backend() -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.api.main:app",
+            "--reload",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8000",
+        ],
+        cwd=ROOT,
+    )
+
+
+def start_frontend() -> subprocess.Popen[bytes]:
+    npm = "npm.cmd" if os.name == "nt" else "npm"
+    return subprocess.Popen([npm, "run", "dev"], cwd=FRONTEND)
+
+
+def wait_for_processes(processes: list[subprocess.Popen[bytes]]) -> None:
+    while processes:
+        for process in list(processes):
+            code = process.poll()
+            if code is None:
+                continue
+            processes.remove(process)
+            if code != 0:
+                raise SystemExit(code)
+        time.sleep(0.5)
+
+
+def stop_processes(processes: list[subprocess.Popen[bytes]]) -> None:
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,32 @@
+@media (max-width: 900px) {
+  .app-header {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .app-header nav {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    margin-top: 0;
+    overflow-x: auto;
+  }
+
+  .app-header nav button {
+    justify-content: center;
+  }
+
+  .split,
+  .admin-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .resizable-split {
+    grid-template-columns: 1fr !important;
+  }
+
+  .split-resizer {
+    display: none;
+  }
+}

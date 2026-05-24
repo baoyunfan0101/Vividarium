@@ -4,6 +4,8 @@ export type Photo = {
   photo_id: number;
   root: string;
   relative_path: string;
+  parent_dir: string | null;
+  path_depth: number | null;
   filename: string;
   binomial_name: string | null;
   captured_at: string | null;
@@ -15,6 +17,7 @@ export type Photo = {
   modified_at: number | null;
   longitude: number | null;
   latitude: number | null;
+  exif_json: string | null;
   thumbnail_path: string | null;
   status: string;
 };
@@ -23,6 +26,7 @@ export type PhotoRootMetadata = {
   root: string;
   last_synced_at: string | null;
   sort_order: number;
+  photo_count: number;
 };
 
 export type TaxaMetadata = {
@@ -30,12 +34,15 @@ export type TaxaMetadata = {
   knowledge_base_size: number | null;
   knowledge_base_modified_at: string | null;
   last_synced_at: string | null;
+  taxa_count: number;
 };
 
 export type MappingMetadata = {
   last_synced_at: string | null;
   photos_last_synced_at: string | null;
   taxa_last_synced_at: string | null;
+  mapped_photo_count: number;
+  mapping_taxa_count: number;
 };
 
 export type DirectoryListing = {
@@ -59,14 +66,46 @@ export type MappingNode = {
   children: Taxon[];
 };
 
+export type TaxonSuggestion = Taxon;
+
 export type ConfirmationResponse = {
   needs_confirmation: true;
   reason: string;
   message: string;
 };
 
-export function photoFileUrl(photoId: number): string {
-  return `${API_BASE}/photos/file/${photoId}`;
+export type OperationState = {
+  module: "photos" | "taxa" | "mapping";
+  task_id: string | null;
+  operation: string | null;
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  message: string;
+  processed: number;
+  total: number | null;
+  result: unknown;
+  error: string | null;
+};
+
+export type OperationsStatus = Record<OperationState["module"], OperationState>;
+
+export function photoFileUrl(photo: Photo): string {
+  return `${API_BASE}/photos/file/${photo.photo_id}?${photoVersionParams(photo)}`;
+}
+
+export function photoThumbnailUrl(photo: Photo): string {
+  return `${API_BASE}/photos/thumbnail/${photo.photo_id}?${photoVersionParams(photo)}`;
+}
+
+function photoVersionParams(photo: Photo): string {
+  const version = [
+    photo.root,
+    photo.relative_path,
+    photo.modified_at ?? "",
+    photo.file_size ?? "",
+  ].join("|");
+  return new URLSearchParams({ v: version }).toString();
 }
 
 export async function getRoots(): Promise<string[]> {
@@ -107,6 +146,21 @@ export async function getMappingMetadata(): Promise<MappingMetadata> {
   return data.metadata;
 }
 
+export async function getOperationsStatus(): Promise<OperationsStatus> {
+  const data = await request<{ operations: OperationsStatus }>("/operations/status");
+  return data.operations;
+}
+
+export async function selectLocalDirectory(): Promise<string | null> {
+  const data = await request<{ path: string | null }>("/local/select-directory");
+  return data.path;
+}
+
+export async function selectLocalFile(): Promise<string | null> {
+  const data = await request<{ path: string | null }>("/local/select-file");
+  return data.path;
+}
+
 export async function browsePhotos(root: string, relativeDir = ""): Promise<DirectoryListing> {
   const params = new URLSearchParams({ root, relative_dir: relativeDir });
   return request<DirectoryListing>(`/photos/browse?${params.toString()}`);
@@ -145,6 +199,12 @@ export async function searchMappingByBinomial(binomialName: string): Promise<Map
   return request<MappingNode>(`/mapping/photos-taxa/search-binomial?${params.toString()}`);
 }
 
+export async function suggestMappingTaxa(query: string, mode: "name" | "binomial"): Promise<TaxonSuggestion[]> {
+  const params = new URLSearchParams({ query, mode });
+  const data = await request<{ suggestions: TaxonSuggestion[] }>(`/mapping/photos-taxa/suggest?${params.toString()}`);
+  return data.suggestions;
+}
+
 export async function runMutation(path: string, body: object): Promise<unknown> {
   const result = await request<unknown>(path, {
     method: "POST",
@@ -163,6 +223,28 @@ export async function runMutation(path: string, body: object): Promise<unknown> 
     });
   }
   return result;
+}
+
+export async function waitForOperation(operation: OperationState): Promise<unknown> {
+  if (!operation.task_id) {
+    return { result: operation.result };
+  }
+
+  while (true) {
+    await delay(700);
+    const operations = await getOperationsStatus();
+    const current = operations[operation.module];
+    if (current.task_id !== operation.task_id) {
+      throw new Error(`${operation.module} operation was replaced before it finished`);
+    }
+    if (current.running) {
+      continue;
+    }
+    if (current.error) {
+      throw new Error(current.error);
+    }
+    return { result: current.result };
+  }
 }
 
 export async function downloadTable(path: string, tableName: string): Promise<string> {
@@ -212,4 +294,21 @@ function isConfirmation(value: unknown): value is ConfirmationResponse {
       "needs_confirmation" in value &&
       (value as ConfirmationResponse).needs_confirmation
   );
+}
+
+export function operationFromResponse(value: unknown): OperationState | null {
+  if (
+    value &&
+    typeof value === "object" &&
+    "operation" in value &&
+    (value as { operation?: unknown }).operation &&
+    typeof (value as { operation?: unknown }).operation === "object"
+  ) {
+    return (value as { operation: OperationState }).operation;
+  }
+  return null;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

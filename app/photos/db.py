@@ -20,6 +20,8 @@ STATUS_NEW = "new"
 class PhotoRecord:
     root: str
     relative_path: str
+    parent_dir: str
+    path_depth: int
     filename: str
     binomial_name: str | None = None
     captured_at: str | None = None
@@ -57,15 +59,25 @@ class PhotosDatabase:
 
     def init_schema(self) -> None:
         self._ensure_photos_table()
+        self._ensure_dir_table()
         self._ensure_metadata_table()
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_root_path ON photos(root, relative_path)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_browse ON photos(root, parent_dir, status, filename)"
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status)"
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_binomial_name ON photos(binomial_name)"
+        )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_photos_dir_unique ON photos_dir(root, relative_dir)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_dir_browse ON photos_dir(root, parent_dir, name)"
         )
         self._conn.commit()
 
@@ -86,6 +98,8 @@ class PhotosDatabase:
             "photo_id",
             "root",
             "relative_path",
+            "parent_dir",
+            "path_depth",
             "filename",
             "binomial_name",
             "captured_at",
@@ -158,6 +172,8 @@ class PhotosDatabase:
                 photo_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 root TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
+                parent_dir TEXT NOT NULL,
+                path_depth INTEGER NOT NULL,
                 filename TEXT NOT NULL,
                 binomial_name TEXT,
                 captured_at TEXT,
@@ -173,6 +189,42 @@ class PhotosDatabase:
                 thumbnail_path TEXT DEFAULT NULL,
                 status TEXT NOT NULL,
                 UNIQUE(root, relative_path)
+            )
+            """
+        )
+
+    def _ensure_dir_table(self) -> None:
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'photos_dir'"
+        ).fetchone()
+        if row is None:
+            self._create_dir_table()
+            self.refresh_directories()
+            return
+
+        columns = [
+            column["name"]
+            for column in self._conn.execute("PRAGMA table_info(photos_dir)").fetchall()
+        ]
+        desired = ["root", "relative_dir", "parent_dir", "name", "path_depth"]
+        if columns == desired:
+            return
+
+        with self._conn:
+            self._conn.execute("DROP TABLE photos_dir")
+            self._create_dir_table()
+        self.refresh_directories()
+
+    def _create_dir_table(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE photos_dir (
+                root TEXT NOT NULL,
+                relative_dir TEXT NOT NULL,
+                parent_dir TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path_depth INTEGER NOT NULL,
+                PRIMARY KEY (root, relative_dir)
             )
             """
         )
@@ -251,9 +303,19 @@ class PhotosDatabase:
     def list_metadata(self) -> list[dict]:
         rows = self._conn.execute(
             """
-            SELECT root, last_synced_at, sort_order
+            SELECT
+                photos_metadata.root,
+                photos_metadata.last_synced_at,
+                photos_metadata.sort_order,
+                COALESCE(photo_counts.photo_count, 0) AS photo_count
             FROM photos_metadata
-            ORDER BY sort_order, root
+            LEFT JOIN (
+                SELECT root, COUNT(*) AS photo_count
+                FROM photos
+                GROUP BY root
+            ) AS photo_counts
+                ON photo_counts.root = photos_metadata.root
+            ORDER BY photos_metadata.sort_order, photos_metadata.root
             """
         ).fetchall()
         return [dict(row) for row in rows]
@@ -265,8 +327,10 @@ class PhotosDatabase:
         return int(row["next_order"])
 
     def export_rows(self, table_name: str) -> tuple[list[str], list[dict]]:
-        if table_name not in {"photos", "photos_metadata"}:
-            raise ValueError("table_name must be 'photos' or 'photos_metadata'")
+        if table_name not in {"photos", "photos_metadata", "photos_dir"}:
+            raise ValueError(
+                "table_name must be 'photos', 'photos_metadata', or 'photos_dir'"
+            )
         fieldnames = [
             column["name"]
             for column in self._conn.execute(f"PRAGMA table_info({table_name})")
@@ -277,6 +341,7 @@ class PhotosDatabase:
     def clear_photos(self) -> None:
         with self._conn:
             self._conn.execute("DELETE FROM photos")
+            self._conn.execute("DELETE FROM photos_dir")
             self._conn.execute("DELETE FROM sqlite_sequence WHERE name = 'photos'")
 
     def clear_photos_for_roots(self, roots: list[str]) -> None:
@@ -285,17 +350,22 @@ class PhotosDatabase:
                 "DELETE FROM photos WHERE root = ?",
                 ((root,) for root in roots),
             )
+            self._conn.executemany(
+                "DELETE FROM photos_dir WHERE root = ?",
+                ((root,) for root in roots),
+            )
 
     def insert_photo(self, record: PhotoRecord) -> int:
         with self._conn:
             cursor = self._conn.execute(
                 """
                 INSERT INTO photos (
-                    root, relative_path, filename, binomial_name, captured_at,
+                    root, relative_path, parent_dir, path_depth, filename,
+                    binomial_name, captured_at,
                     location, camera, width, height, file_size, modified_at,
                     longitude, latitude, exif_json, thumbnail_path, status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 _photo_values(record),
             )
@@ -308,6 +378,8 @@ class PhotosDatabase:
                 UPDATE photos
                 SET root = ?,
                     relative_path = ?,
+                    parent_dir = ?,
+                    path_depth = ?,
                     filename = ?,
                     binomial_name = ?,
                     captured_at = ?,
@@ -327,6 +399,8 @@ class PhotosDatabase:
                 (
                     record.root,
                     record.relative_path,
+                    record.parent_dir,
+                    record.path_depth,
                     record.filename,
                     record.binomial_name,
                     record.captured_at,
@@ -354,6 +428,29 @@ class PhotosDatabase:
                 WHERE photo_id = ?
                 """,
                 (status, photo_id),
+            )
+
+    def set_other_roots_unchanged(self, root: str) -> int:
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE photos
+                SET status = ?
+                WHERE root != ? AND status != ?
+                """,
+                (STATUS_UNCHANGED, root, STATUS_DELETED),
+            )
+        return cursor.rowcount
+
+    def set_thumbnail_path(self, photo_id: int, thumbnail_path: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE photos
+                SET thumbnail_path = ?
+                WHERE photo_id = ?
+                """,
+                (thumbnail_path, photo_id),
             )
 
     def get_photo_by_path(self, root: str, relative_path: str) -> dict | None:
@@ -397,45 +494,92 @@ class PhotosDatabase:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def refresh_directories(self) -> None:
+        roots = self._conn.execute(
+            "SELECT DISTINCT root FROM photos ORDER BY root"
+        ).fetchall()
+        self.refresh_directories_for_roots([row["root"] for row in roots])
+
+    def refresh_directories_for_roots(self, roots: list[str]) -> None:
+        for root in roots:
+            rows = self._conn.execute(
+                """
+                SELECT relative_path FROM photos
+                WHERE root = ? AND status != ?
+                """,
+                (root, STATUS_DELETED),
+            ).fetchall()
+            directories = _directory_rows_for_paths(
+                root,
+                [row["relative_path"] for row in rows],
+            )
+            with self._conn:
+                self._conn.execute("DELETE FROM photos_dir WHERE root = ?", (root,))
+                self._conn.executemany(
+                    """
+                    INSERT INTO photos_dir (
+                        root, relative_dir, parent_dir, name, path_depth
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    directories,
+                )
+
     def list_directory(self, root: str, relative_dir: str = "") -> dict:
         directory = _normalize_relative_path(relative_dir)
-        prefix = f"{directory}/" if directory else ""
-        rows = self._conn.execute(
+        dir_rows = self._conn.execute(
+            """
+            SELECT name FROM photos_dir
+            WHERE root = ? AND parent_dir = ?
+            ORDER BY name
+            """,
+            (root, directory),
+        ).fetchall()
+        file_rows = self._conn.execute(
             """
             SELECT * FROM photos
             WHERE root = ?
               AND status != ?
-              AND relative_path LIKE ?
-            ORDER BY relative_path
+              AND parent_dir = ?
+            ORDER BY filename
             """,
-            (root, STATUS_DELETED, f"{prefix}%"),
+            (root, STATUS_DELETED, directory),
         ).fetchall()
-
-        dirs: set[str] = set()
-        files: list[dict] = []
-        for row in rows:
-            photo = dict(row)
-            rest = photo["relative_path"][len(prefix) :]
-            if not rest:
-                continue
-            first, _, remainder = rest.partition("/")
-            if remainder:
-                dirs.add(first)
-            else:
-                files.append(photo)
 
         return {
             "root": root,
             "relative_dir": directory,
-            "directories": sorted(dirs),
-            "files": files,
+            "directories": [row["name"] for row in dir_rows],
+            "files": [dict(row) for row in file_rows],
         }
+
+    def _backfill_photo_paths(self) -> None:
+        rows = self._conn.execute(
+            "SELECT photo_id, relative_path FROM photos"
+        ).fetchall()
+        self._conn.executemany(
+            """
+            UPDATE photos
+            SET parent_dir = ?, path_depth = ?
+            WHERE photo_id = ?
+            """,
+            (
+                (
+                    _parent_dir(row["relative_path"]),
+                    _path_depth(_parent_dir(row["relative_path"])),
+                    row["photo_id"],
+                )
+                for row in rows
+            ),
+        )
 
 
 def _photo_values(record: PhotoRecord) -> tuple:
     return (
         record.root,
         record.relative_path,
+        record.parent_dir,
+        record.path_depth,
         record.filename,
         record.binomial_name,
         record.captured_at,
@@ -456,6 +600,40 @@ def _photo_values(record: PhotoRecord) -> tuple:
 def _normalize_relative_path(path: str | Path) -> str:
     text = Path(path).as_posix().strip("/")
     return "" if text == "." else text
+
+
+def _parent_dir(relative_path: str) -> str:
+    parent = Path(relative_path).parent.as_posix()
+    return "" if parent == "." else parent
+
+
+def _path_depth(relative_dir: str) -> int:
+    normalized = _normalize_relative_path(relative_dir)
+    return 0 if not normalized else len(normalized.split("/"))
+
+
+def _directory_rows_for_paths(
+    root: str,
+    relative_paths: list[str],
+) -> list[tuple[str, str, str, str, int]]:
+    directories: dict[str, tuple[str, str, str, str, int]] = {}
+    for relative_path in relative_paths:
+        parent_dir = _parent_dir(relative_path)
+        if not parent_dir:
+            continue
+
+        parts = parent_dir.split("/")
+        for index, name in enumerate(parts):
+            relative_dir = "/".join(parts[: index + 1])
+            parent = "/".join(parts[:index])
+            directories[relative_dir] = (
+                root,
+                relative_dir,
+                parent,
+                name,
+                index + 1,
+            )
+    return [directories[key] for key in sorted(directories)]
 
 
 def _now() -> str:

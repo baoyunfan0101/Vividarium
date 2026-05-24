@@ -83,6 +83,19 @@ class PhotosTaxaMappingDatabase:
             self._conn.execute(f"DELETE FROM {MAPPING_TABLE}")
             self._conn.execute(f"DELETE FROM {SUBTREE_TABLE}")
 
+    def delete_orphan_mappings(self) -> int:
+        with self._conn:
+            cursor = self._conn.execute(
+                f"""
+                DELETE FROM {MAPPING_TABLE}
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM photos
+                    WHERE photos.photo_id = {MAPPING_TABLE}.photo_id
+                )
+                """
+            )
+        return cursor.rowcount
+
     def upsert_mapping(self, photo_id: int, taxon_id: int) -> None:
         with self._conn:
             self._conn.execute(
@@ -147,6 +160,40 @@ class PhotosTaxaMappingDatabase:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def suggest_subtree_taxa(
+        self,
+        field: str,
+        query: str,
+        limit: int = 10,
+    ) -> list[dict]:
+        if field not in {"name", "binomial_name"}:
+            raise ValueError("field must be 'name' or 'binomial_name'")
+
+        escaped = (
+            query.strip()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        if not escaped:
+            return []
+
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM {SUBTREE_TABLE}
+            WHERE {field} IS NOT NULL
+              AND {field} LIKE ? ESCAPE '\\'
+            ORDER BY
+              CASE WHEN {field} LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END,
+              rank,
+              {field},
+              taxon_id
+            LIMIT ?
+            """,
+            (f"%{escaped}%", f"{escaped}%", limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def save_metadata(
         self,
         photos_last_synced_at: str | None,
@@ -181,6 +228,23 @@ class PhotosTaxaMappingDatabase:
             "photos_last_synced_at": None,
             "taxa_last_synced_at": None,
         }
+
+    def count_mapped_photos(self) -> int:
+        row = self._conn.execute(
+            f"""
+            SELECT COUNT(*) AS mapped_photo_count
+            FROM {MAPPING_TABLE}
+            WHERE taxon_id != ?
+            """,
+            (SPECIAL_UNMAPPED_TAXON_ID,),
+        ).fetchone()
+        return int(row["mapped_photo_count"])
+
+    def count_subtree_taxa(self) -> int:
+        row = self._conn.execute(
+            f"SELECT COUNT(*) AS mapping_taxa_count FROM {SUBTREE_TABLE}"
+        ).fetchone()
+        return int(row["mapping_taxa_count"])
 
     def export_rows(self, table_name: str) -> tuple[list[str], list[dict]]:
         valid = {METADATA_TABLE, MAPPING_TABLE, SUBTREE_TABLE}
@@ -225,4 +289,3 @@ class PhotosTaxaMappingDatabase:
                 (taxon_id,),
             ).fetchall()
         return [dict(row) for row in rows]
-

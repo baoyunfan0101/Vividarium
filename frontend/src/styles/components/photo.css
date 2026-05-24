@@ -1,0 +1,143 @@
+.preview {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.preview-image {
+  min-height: 0;
+  overflow: auto;
+  background: #ffffff;
+  cursor: zoom-in;
+}
+
+.preview-image.zoomed {
+  cursor: grab;
+}
+
+.preview-image.dragging {
+  cursor: grabbing;
+}
+
+.preview img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  min-height: 0;
+  background: #ffffff;
+  user-select: none;
+}
+
+.preview.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #65736e;
+}
+
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  align-content: start;
+  gap: 8px;
+  height: 100%;
+  padding: 10px;
+  overflow: auto;
+}
+
+.photo-tile {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  padding: 4px;
+  color: inherit;
+  text-align: left;
+}
+
+.photo-tile:focus {
+  outline: none;
+}
+
+.photo-tile:hover,
+.photo-tile.selected {
+  border-color: #437967;
+  background: #eef7f3;
+}
+
+.photo-tile.selected {
+  box-shadow: inset 0 0 0 1px #437967;
+}
+
+.photo-tile img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #111816;
+}
+
+.photo-tile strong,
+.photo-tile span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-tile span {
+  color: #6a7773;
+  font-size: 13px;
+}
+
+.photo-details {
+  overflow: auto;
+}
+
+.photo-detail-list {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.photo-detail-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-height: 28px;
+  padding: 0;
+}
+
+.photo-detail-row span {
+  padding: 5px 7px;
+  color: #6a7773;
+  font-size: 12px;
+}
+
+.photo-detail-row strong {
+  min-width: 0;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 5px 7px;
+  background: #f7f9f8;
+  cursor: copy;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.photo-detail-row strong:hover {
+  border-color: #a7c3b8;
+  background: #eef7f3;
+}

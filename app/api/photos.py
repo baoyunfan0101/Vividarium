@@ -9,9 +9,11 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from app.operations import OperationBusyError, operation_manager
 from app.photos import (
     export_table_csv,
     get_latest_update,
+    get_or_create_thumbnail,
     get_photo,
     get_roots,
     list_changed_photos,
@@ -30,6 +32,7 @@ router = APIRouter(prefix="/photos", tags=["photos"])
 
 class PhotosRebuildRequest(BaseModel):
     roots: Optional[List[str]] = None
+    force: bool = False
 
 
 class PhotosUpdateRequest(BaseModel):
@@ -80,7 +83,7 @@ def api_get_latest_update() -> dict:
 
 
 @router.get("/file/{photo_id}")
-def api_get_photo_file(photo_id: int) -> FileResponse:
+def api_get_photo_file(photo_id: int, v: Optional[str] = None) -> FileResponse:
     photo = get_photo(photo_id)
     if photo is None:
         raise HTTPException(status_code=404, detail="photo not found")
@@ -88,7 +91,23 @@ def api_get_photo_file(photo_id: int) -> FileResponse:
     file_path = _photo_file_path(photo)
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="photo file not found")
-    return FileResponse(file_path)
+    return FileResponse(file_path, headers=_photo_cache_headers(v))
+
+
+@router.get("/thumbnail/{photo_id}")
+def api_get_photo_thumbnail(photo_id: int, v: Optional[str] = None) -> FileResponse:
+    try:
+        thumbnail_path = get_or_create_thumbnail(photo_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="photo file not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="thumbnail generation failed") from exc
+
+    if thumbnail_path is None:
+        raise HTTPException(status_code=404, detail="photo not found")
+    return FileResponse(thumbnail_path, headers=_photo_cache_headers(v))
 
 
 @router.get("/export")
@@ -108,31 +127,99 @@ def api_get_photo(photo_id: int) -> dict:
 
 @router.post("/update")
 def api_update_photos(request: PhotosUpdateRequest) -> dict:
+    try:
+        state = operation_manager.start(
+            "photos",
+            "update",
+            lambda: _update_photos_result(request),
+        )
+    except OperationBusyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_busy",
+                "module": exc.module,
+                "blocked_by": exc.blocked_by,
+            },
+        ) from exc
+    return {"operation": state}
+
+
+def _update_photos_result(request: PhotosUpdateRequest) -> dict:
     if request.roots:
         results = {
-            root: update_photos(root)
+            root: update_photos(
+                root,
+                progress=lambda processed, total, message: operation_manager.progress(
+                    "photos",
+                    processed,
+                    total,
+                    message,
+                ),
+            )
             for root in request.roots
         }
-        return {"result": {"roots": len(request.roots), "results": results}}
+        return {"roots": len(request.roots), "results": results}
 
     root = request.root
     if root is None:
         roots = get_roots()
         if len(roots) != 1:
-            raise HTTPException(
-                status_code=400,
-                detail="root is required unless exactly one root is recorded",
-            )
+            raise ValueError("root is required unless exactly one root is recorded")
         root = roots[0]
-    return {"result": update_photos(root)}
+    return update_photos(
+        root,
+        progress=lambda processed, total, message: operation_manager.progress(
+            "photos",
+            processed,
+            total,
+            message,
+        ),
+    )
 
 
 @router.post("/rebuild")
 def api_rebuild_photos(request: PhotosRebuildRequest) -> dict:
+    if not request.force:
+        return {
+            "needs_confirmation": True,
+            "reason": "photos_rebuild_clears_thumbnails",
+            "message": (
+                "Rebuilding photos will clear all cached thumbnails and rebuild "
+                "the photos table. Are you sure you want to continue?"
+            ),
+        }
+    try:
+        state = operation_manager.start(
+            "photos",
+            "rebuild",
+            lambda: _rebuild_photos_result(request),
+        )
+    except OperationBusyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_busy",
+                "module": exc.module,
+                "blocked_by": exc.blocked_by,
+            },
+        ) from exc
+    return {"operation": state}
+
+
+def _rebuild_photos_result(request: PhotosRebuildRequest) -> dict[str, int]:
     roots = request.roots or get_roots()
     if not roots:
-        raise HTTPException(status_code=400, detail="roots are required")
-    return {"result": rebuild_photos([Path(root) for root in roots])}
+        raise ValueError("roots are required")
+    return rebuild_photos(
+        [Path(root) for root in roots],
+        progress=lambda processed, total, message: operation_manager.progress(
+            "photos",
+            processed,
+            total,
+            message,
+        ),
+    )
 
 
 @router.post("/export")
@@ -149,3 +236,9 @@ def _photo_file_path(photo: dict) -> Path:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="photo path escapes root") from exc
     return candidate
+
+
+def _photo_cache_headers(version: Optional[str]) -> dict[str, str]:
+    if version:
+        return {"Cache-Control": "public, max-age=31536000, immutable"}
+    return {"Cache-Control": "no-cache"}

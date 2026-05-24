@@ -13,6 +13,7 @@ from .service import (
     get_by_taxon_id,
     get_latest_update,
     rebuild_mapping,
+    suggest_taxa,
     update_mapping,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "get_by_taxon_id",
     "get_latest_update",
     "rebuild_mapping",
+    "suggest_taxa",
     "update_mapping",
 ]

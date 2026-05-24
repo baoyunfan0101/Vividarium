@@ -1,130 +1,88 @@
 # PhytoIndex
 
-PhytoIndex is a local plant photo indexing app. It scans photo folders, extracts filename and EXIF metadata, imports a taxonomy knowledge base from Excel, maps photos to taxa, and provides a FastAPI + React interface for browsing photos by filesystem folders or taxonomy tree.
+PhytoIndex is a local plant photo index. It scans photo roots, imports a plant taxonomy workbook, maps photos to taxa, and provides a FastAPI backend with a React frontend for browsing by filesystem path or taxonomy tree.
 
 ## Status
 
-This repository is an early working version. The core local database, photo scanner, taxonomy importer, photo-taxon mapping, API routes, and React UI are implemented. The map page is reserved but not implemented yet.
+Working local version. The map page exists in the UI but is not implemented.
 
-## Features
-
-- Browse photos by configured root folders and relative paths.
-- Browse photographed taxa as a folder-like taxonomy tree.
-- Search taxonomy folders by Chinese/display name or binomial name.
-- Extract image dimensions, file size, modified time, camera, capture time, EXIF JSON, and GPS coordinates when available.
-- Import taxa from the `plants` sheet of an Excel knowledge base.
-- Keep taxa as an adjacency list with stable IDs on update and fresh IDs on rebuild.
-- Maintain a photo-to-taxon mapping cache for photographed taxa.
-- Manage photo roots and taxonomy knowledge-base path from the Admin UI.
-- Update/rebuild photos, taxa, and mapping from the Admin UI.
-- Download module tables as CSV.
-
-## Project Layout
+## Layout
 
 ```text
-PhytoIndex/
-├── app/
-│   ├── api/                  # FastAPI routes
-│   ├── photos/               # Photo scanning, metadata, and root management
-│   ├── taxa/                 # Taxonomy Excel importer and adjacency-list storage
-│   └── photos_taxa_mapping/  # Photo-to-taxon mapping cache
-├── frontend/                 # React + Vite frontend
-├── data/                     # Local runtime data, ignored by git
-├── requirements.txt          # Python dependencies
-└── README.md
+app/
+  api/                  FastAPI routes
+  photos/               photo roots, scanning, metadata, thumbnails
+  taxa/                 Excel taxonomy import and adjacency-list storage
+  photos_taxa_mapping/  photo-to-taxon mapping cache
+  operations/           in-process operation state/progress
+frontend/               React + Vite UI
+data/                   local SQLite DB and thumbnail cache, ignored by git
 ```
 
-## Local Setup
-
-Create a Python virtual environment and install backend dependencies:
+## Setup
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-```
 
-Install frontend dependencies:
-
-```bash
 cd frontend
 npm install
 ```
 
 ## Run
 
-Start the FastAPI backend from the repository root:
+Start both backend and frontend:
+
+```bash
+python main.py
+```
+
+Open `http://127.0.0.1:5173`. API docs are at `http://127.0.0.1:8000/docs`.
+
+Optional single-process commands:
 
 ```bash
 .venv/bin/uvicorn app.api.main:app --reload --host 127.0.0.1 --port 8000
-```
 
-Start the React frontend in another terminal:
-
-```bash
 cd frontend
 npm run dev
 ```
 
-Open:
+## Main Features
 
-```text
-http://127.0.0.1:5173
-```
+- Configure and manage multiple photo roots.
+- Browse photos by root and relative folder.
+- Browse mapped taxa as a folder-like tree.
+- Search mapped taxa by Chinese name or binomial name, with suggestions from the mapping subtree.
+- Import taxonomy from the `plants` sheet of an Excel workbook.
+- Update or rebuild photos, taxa, and photo-taxa mapping from the Admin UI.
+- Export module tables as CSV.
+- Generate thumbnails lazily on first request.
 
-FastAPI docs are available at:
+## Data Model
 
-```text
-http://127.0.0.1:8000/docs
-```
+- `photos_metadata`: configured roots, sort order, and per-root sync time.
+- `photos`: photo metadata, parsed binomial name, EXIF/GPS, thumbnail path, and status.
+- `photos_dir`: derived directory index for fast folder browsing.
+- `taxa_metadata`: knowledge-base path, file size, modified time, and sync time.
+- `taxa`: taxonomy adjacency list.
+- `photos_taxa_mapping_metadata`: mapping sync time and source module sync times.
+- `photos_taxa_mapping`: `photo_id -> taxon_id`.
+- `photos_taxa_mapping_taxa`: cached taxonomy subtree used by photographed taxa.
 
-## Core Modules
+## Module Docs
 
-### Photos
+- [API](app/api/README.md)
+- [Photos](app/photos/README.md)
+- [Taxa](app/taxa/README.md)
+- [Photos-Taxa Mapping](app/photos_taxa_mapping/README.md)
+- [Frontend](frontend/README.md)
 
-The `photos` module stores configured roots in `photos_metadata` and photo rows in `photos`. It indexes files under selected roots, stores relative paths, parsed binomial names, capture metadata, dimensions, file size, filesystem modified time, GPS coordinates, serialized EXIF, thumbnail path, and status.
-
-Status values are:
-
-- `unchanged`
-- `deleted`
-- `updated`
-- `new`
-
-### Taxa
-
-The `taxa` module imports the `plants` sheet from an Excel knowledge base and stores taxa in an adjacency-list table named `taxa`. It records the knowledge-base path, file size, file modified time, and last internal sync time in `taxa_metadata`.
-
-Update keeps the same `taxon_id` for existing binomial names. Rebuild recreates the table and may change IDs.
-
-### Photos-Taxa Mapping
-
-The `photos_taxa_mapping` module maps `photo_id` to `taxon_id`, keeps a cached subtree of photographed taxa, and records mapping sync metadata. Incremental update processes photos whose status is `updated` or `new`; rebuild processes all photos.
-
-Unmapped photos are assigned a special internal taxon id and are reported by the mapping operation.
-
-## API Notes
-
-API route details are documented in:
-
-- `app/api/README.md`
-- `app/photos/README.md`
-- `app/taxa/README.md`
-- `app/photos_taxa_mapping/README.md`
-
-Some sync endpoints may return `needs_confirmation: true`. The frontend asks the user and retries with `force: true` when confirmed.
-
-## Development Checks
-
-Backend compile check:
+## Checks
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/phytoindex_pycache .venv/bin/python -m py_compile app/api/*.py app/photos/*.py app/taxa/*.py app/photos_taxa_mapping/*.py
-```
+python -m py_compile app/api/*.py app/photos/*.py app/taxa/*.py app/photos_taxa_mapping/*.py
 
-Frontend build check:
-
-```bash
 cd frontend
 npm run build
 ```
-

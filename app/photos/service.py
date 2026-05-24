@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import shutil
 from pathlib import Path
+from typing import Callable
 
 from .db import (
     DEFAULT_DB_PATH,
@@ -21,25 +23,38 @@ from .scanner import iter_image_files, read_file_metadata
 def rebuild_photos(
     roots: list[str | Path],
     db_path: str | Path = DEFAULT_DB_PATH,
+    thumbnail_root: str | Path = "data/thumbnails",
+    progress: Callable[[int, int | None, str | None], None] | None = None,
 ) -> dict[str, int]:
     """Rebuild photo rows for the given roots."""
 
     normalized_roots = [_normalize_root(root) for root in roots]
+    root_files = [(root, list(iter_image_files(root))) for root in normalized_roots]
+    total = sum(len(paths) for _, paths in root_files)
+    _report_progress(progress, 0, total, "Scanning photos")
+    thumbnails_cleared = _clear_thumbnail_cache(thumbnail_root)
     with PhotosDatabase(db_path) as db:
-        db.clear_photos_for_roots(normalized_roots)
+        db.clear_photos()
         inserted = 0
-        for root in normalized_roots:
-            for path in iter_image_files(root):
+        for root, paths in root_files:
+            for path in paths:
                 db.insert_photo(_build_record(root, path, STATUS_NEW))
                 inserted += 1
+                _report_progress(progress, inserted, total, f"Rebuilding {root}")
+            db.refresh_directories_for_roots([root])
             db.upsert_root(root)
 
-    return {"roots": len(normalized_roots), "inserted": inserted}
+    return {
+        "roots": len(normalized_roots),
+        "inserted": inserted,
+        "thumbnails_cleared": thumbnails_cleared,
+    }
 
 
 def update_photos(
     root: str | Path,
     db_path: str | Path = DEFAULT_DB_PATH,
+    progress: Callable[[int, int | None, str | None], None] | None = None,
 ) -> dict[str, int]:
     """Update one root using file size and modified time checks."""
 
@@ -48,17 +63,24 @@ def update_photos(
     unchanged = 0
     updated = 0
     inserted = 0
+    image_files = list(iter_image_files(normalized_root))
+    total = len(image_files)
+    processed = 0
+    _report_progress(progress, 0, total, f"Updating {normalized_root}")
 
     with PhotosDatabase(db_path) as db:
-        for path in iter_image_files(normalized_root):
+        other_roots_unchanged = db.set_other_roots_unchanged(normalized_root)
+        for path in image_files:
             relative_path = path.relative_to(normalized_root).as_posix()
             scanned_paths.add(relative_path)
             stat = path.stat()
             existing = db.get_photo_by_path(normalized_root, relative_path)
+            processed += 1
 
             if existing is None:
                 db.insert_photo(_build_record(normalized_root, path, STATUS_NEW))
                 inserted += 1
+                _report_progress(progress, processed, total, f"Updating {normalized_root}")
                 continue
 
             if (
@@ -67,6 +89,7 @@ def update_photos(
             ):
                 db.set_status(existing["photo_id"], STATUS_UNCHANGED)
                 unchanged += 1
+                _report_progress(progress, processed, total, f"Updating {normalized_root}")
                 continue
 
             db.update_photo(
@@ -74,12 +97,14 @@ def update_photos(
                 _build_record(normalized_root, path, STATUS_UPDATED),
             )
             updated += 1
+            _report_progress(progress, processed, total, f"Updating {normalized_root}")
 
         deleted = 0
         for photo in db.list_photos_for_root(normalized_root):
             if photo["relative_path"] not in scanned_paths and photo["status"] != STATUS_DELETED:
                 db.set_status(photo["photo_id"], STATUS_DELETED)
                 deleted += 1
+        db.refresh_directories_for_roots([normalized_root])
         db.upsert_root(normalized_root)
 
     return {
@@ -87,7 +112,18 @@ def update_photos(
         "updated": updated,
         "new": inserted,
         "deleted": deleted,
+        "other_roots_unchanged": other_roots_unchanged,
     }
+
+
+def _report_progress(
+    progress: Callable[[int, int | None, str | None], None] | None,
+    processed: int,
+    total: int | None,
+    message: str | None,
+) -> None:
+    if progress is not None:
+        progress(processed, total, message)
 
 
 def list_directory(
@@ -107,6 +143,33 @@ def get_photo(
 ) -> dict | None:
     with PhotosDatabase(db_path) as db:
         return db.get_photo_by_id(photo_id)
+
+
+def get_or_create_thumbnail(
+    photo_id: int,
+    db_path: str | Path = DEFAULT_DB_PATH,
+    thumbnail_root: str | Path = "data/thumbnails",
+    size: tuple[int, int] = (512, 512),
+) -> Path | None:
+    with PhotosDatabase(db_path) as db:
+        photo = db.get_photo_by_id(photo_id)
+        if photo is None:
+            return None
+
+        existing = photo.get("thumbnail_path")
+        if existing:
+            existing_path = Path(existing)
+            if existing_path.exists() and existing_path.is_file():
+                return existing_path
+
+        source_path = _photo_file_path(photo)
+        if not source_path.exists() or not source_path.is_file():
+            raise FileNotFoundError(source_path)
+
+        output_path = _thumbnail_path(photo, thumbnail_root)
+        _create_thumbnail(source_path, output_path, size)
+        db.set_thumbnail_path(photo_id, output_path.as_posix())
+        return output_path
 
 
 def list_photos(db_path: str | Path = DEFAULT_DB_PATH) -> list[dict]:
@@ -146,8 +209,10 @@ def export_table_csv(
 ) -> int:
     """Export one photos module table to CSV."""
 
-    if table_name not in {"photos", "photos_metadata"}:
-        raise ValueError("table_name must be 'photos' or 'photos_metadata'")
+    if table_name not in {"photos", "photos_metadata", "photos_dir"}:
+        raise ValueError(
+            "table_name must be 'photos', 'photos_metadata', or 'photos_dir'"
+        )
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +236,8 @@ def _build_record(root: str, path: Path, status: str) -> PhotoRecord:
     return PhotoRecord(
         root=root,
         relative_path=path.relative_to(root_path).as_posix(),
+        parent_dir=_parent_dir(path.relative_to(root_path).as_posix()),
+        path_depth=_path_depth(_parent_dir(path.relative_to(root_path).as_posix())),
         filename=path.name,
         binomial_name=parsed.binomial_name,
         captured_at=metadata.captured_at or parsed.shoot_date,
@@ -190,3 +257,54 @@ def _build_record(root: str, path: Path, status: str) -> PhotoRecord:
 
 def _normalize_root(root: str | Path) -> str:
     return str(Path(root).expanduser().resolve())
+
+
+def _photo_file_path(photo: dict) -> Path:
+    root = Path(photo["root"]).expanduser().resolve()
+    candidate = (root / photo["relative_path"]).resolve()
+    candidate.relative_to(root)
+    return candidate
+
+
+def _thumbnail_path(photo: dict, thumbnail_root: str | Path) -> Path:
+    modified = int(photo.get("modified_at") or 0)
+    file_size = int(photo.get("file_size") or 0)
+    filename = f"photo_{photo['photo_id']}_{modified}_{file_size}.jpg"
+    return Path(thumbnail_root) / filename
+
+
+def _clear_thumbnail_cache(thumbnail_root: str | Path) -> int:
+    root = Path(thumbnail_root)
+    if not root.exists() or not root.is_dir():
+        return 0
+    count = sum(1 for path in root.rglob("*") if path.is_file())
+    shutil.rmtree(root)
+    return count
+
+
+def _create_thumbnail(
+    source_path: Path,
+    output_path: Path,
+    size: tuple[int, int],
+) -> None:
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required to generate thumbnails") from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source_path) as image:
+        image = ImageOps.exif_transpose(image)
+        image.thumbnail(size)
+        if image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+        image.save(output_path, "JPEG", quality=82, optimize=True)
+
+
+def _parent_dir(relative_path: str) -> str:
+    parent = Path(relative_path).parent.as_posix()
+    return "" if parent == "." else parent
+
+
+def _path_depth(relative_dir: str) -> int:
+    return 0 if not relative_dir else len(relative_dir.split("/"))

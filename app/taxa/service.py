@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from app.photos.db import DEFAULT_DB_PATH
 
@@ -17,13 +17,15 @@ def update_taxa(
     knowledge_base_path: str | Path | None = None,
     db_path: str | Path = DEFAULT_DB_PATH,
     max_rows: int | None = None,
+    progress: Callable[[int, int | None, str | None], None] | None = None,
 ) -> dict[str, int | str]:
     """Update taxa, keeping taxon_id stable for existing binomial names."""
 
     with TaxaDatabase(db_path) as db:
         workbook_path = _resolve_knowledge_base_path(db, knowledge_base_path)
         rows = list(read_taxa_rows(workbook_path, max_rows=max_rows))
-        changed = _import_rows(rows, db, preserve_binomial_ids=True)
+        _report_progress(progress, 0, len(rows), "Updating taxa")
+        changed = _import_rows(rows, db, preserve_binomial_ids=True, progress=progress)
         db.save_metadata(
             workbook_path,
             _file_size(workbook_path),
@@ -38,6 +40,7 @@ def rebuild_taxa(
     knowledge_base_path: str | Path | None = None,
     db_path: str | Path = DEFAULT_DB_PATH,
     max_rows: int | None = None,
+    progress: Callable[[int, int | None, str | None], None] | None = None,
 ) -> dict[str, int | str]:
     """Rebuild taxa from scratch, allowing taxon_id values to change."""
 
@@ -45,7 +48,8 @@ def rebuild_taxa(
         workbook_path = _resolve_knowledge_base_path(db, knowledge_base_path)
         rows = list(read_taxa_rows(workbook_path, max_rows=max_rows))
         db.clear_taxa()
-        changed = _import_rows(rows, db, preserve_binomial_ids=False)
+        _report_progress(progress, 0, len(rows), "Rebuilding taxa")
+        changed = _import_rows(rows, db, preserve_binomial_ids=False, progress=progress)
         db.save_metadata(
             workbook_path,
             _file_size(workbook_path),
@@ -71,7 +75,9 @@ def get_taxon_by_binomial(
 
 def get_latest_update(db_path: str | Path = DEFAULT_DB_PATH) -> dict:
     with TaxaDatabase(db_path) as db:
-        return db.get_metadata().__dict__
+        metadata = db.get_metadata().__dict__
+        metadata["taxa_count"] = db.count_taxa()
+        return metadata
 
 
 def save_knowledge_base_path(
@@ -79,7 +85,9 @@ def save_knowledge_base_path(
     db_path: str | Path = DEFAULT_DB_PATH,
 ) -> dict:
     with TaxaDatabase(db_path) as db:
-        return db.save_knowledge_base_path(knowledge_base_path).__dict__
+        metadata = db.save_knowledge_base_path(knowledge_base_path).__dict__
+        metadata["taxa_count"] = db.count_taxa()
+        return metadata
 
 
 def export_table_csv(
@@ -110,7 +118,9 @@ def _import_rows(
     rows: Iterable[TaxaRow],
     db: TaxaDatabase,
     preserve_binomial_ids: bool,
+    progress: Callable[[int, int | None, str | None], None] | None = None,
 ) -> int:
+    row_list = list(rows)
     current_parent_by_rank: dict[str, int | None] = {
         "ordo": None,
         "familia": None,
@@ -119,7 +129,7 @@ def _import_rows(
     }
     changed = 0
 
-    for row in rows:
+    for index, row in enumerate(row_list, start=1):
         if row.ordo:
             current_parent_by_rank["ordo"] = _save_taxon(
                 db,
@@ -186,8 +196,19 @@ def _import_rows(
                 preserve_binomial_ids,
             )
             changed += 1
+        _report_progress(progress, index, len(row_list), "Importing taxa")
 
     return changed
+
+
+def _report_progress(
+    progress: Callable[[int, int | None, str | None], None] | None,
+    processed: int,
+    total: int | None,
+    message: str | None,
+) -> None:
+    if progress is not None:
+        progress(processed, total, message)
 
 
 def _save_taxon(

@@ -1,16 +1,22 @@
-# PhytoIndex Frontend
+# Frontend
 
-React + Vite frontend for the FastAPI backend.
+React + Vite UI for the FastAPI backend.
 
 ## Run
 
-Start the backend first:
+From the repository root, start backend and frontend together:
+
+```bash
+python main.py
+```
+
+Or start them separately. Backend:
 
 ```bash
 .venv/bin/uvicorn app.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Install frontend dependencies and run Vite:
+Frontend:
 
 ```bash
 cd frontend
@@ -18,21 +24,24 @@ npm install
 npm run dev
 ```
 
-Open:
+Open `http://127.0.0.1:5173`. Vite proxies `/api` to `http://127.0.0.1:8000`.
 
-```text
-http://127.0.0.1:5173
+## Screens
+
+- Photos: browse by root and relative folder, view thumbnails, original images, and full photo metadata.
+- Taxonomy: browse mapped taxa as a tree; search or autocomplete by Chinese name/binomial name.
+- Map: placeholder page.
+- Admin: manage roots and knowledge-base path; run update/rebuild operations; export CSV.
+
+## UI Notes
+
+- Photos and taxonomy remember selected location, scroll position, selected photo, and split-pane width in local storage.
+- Image URLs include a version derived from path, modified time, and size so browser caching is safe across rebuilds.
+- Original image viewer supports scrollbars, wheel zoom, double-click zoom, and drag-to-pan when zoomed.
+- Backend confirmation responses are shown to the user and retried with `force: true` only after confirmation.
+
+## Check
+
+```bash
+npm run build
 ```
-
-The Vite dev server proxies `/api` to `http://127.0.0.1:8000`.
-
-## Current Features
-
-- Browse photos by recorded root and relative folder path.
-- Preview original photo files through the backend photo file endpoint.
-- Browse mapped taxa as a folder-like taxonomy tree.
-- Search mapped taxa by display name or binomial name.
-- View photos with `updated` or `new` status.
-- Trigger photos, taxa, and photos-taxa mapping update/rebuild operations.
-- Download photos, taxa, and photos-taxa mapping tables as CSV files.
-- Handle backend confirmation responses by asking the user and retrying with `force: true`.
