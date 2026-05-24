@@ -7,6 +7,8 @@ import shutil
 from pathlib import Path
 from typing import Callable
 
+from app.runtime_paths import thumbnail_dir
+
 from .db import (
     DEFAULT_DB_PATH,
     STATUS_DELETED,
@@ -23,7 +25,7 @@ from .scanner import iter_image_files, read_file_metadata
 def rebuild_photos(
     roots: list[str | Path],
     db_path: str | Path = DEFAULT_DB_PATH,
-    thumbnail_root: str | Path = "data/thumbnails",
+    thumbnail_root: str | Path = thumbnail_dir(),
     progress: Callable[[int, int | None, str | None], None] | None = None,
 ) -> dict[str, int]:
     """Rebuild photo rows for the given roots."""
@@ -148,7 +150,7 @@ def get_photo(
 def get_or_create_thumbnail(
     photo_id: int,
     db_path: str | Path = DEFAULT_DB_PATH,
-    thumbnail_root: str | Path = "data/thumbnails",
+    thumbnail_root: str | Path = thumbnail_dir(),
     size: tuple[int, int] = (256, 256),
 ) -> Path | None:
     with PhotosDatabase(db_path) as db:

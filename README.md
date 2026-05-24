@@ -15,6 +15,8 @@ app/
 frontend/               React + Vite UI
 data/                   local SQLite DB and thumbnail cache, ignored by git
 main.py                 local backend/frontend launcher
+scripts/                build helpers
+packaging/              PyInstaller configuration
 ```
 
 ## Setup
@@ -57,6 +59,28 @@ PHYTOINDEX_FRONTEND_PATH="/path/to/node/bin" PHYTOINDEX_BACKEND_PATH="/path/to/n
 ```
 
 On Windows, environment variables use semicolon-separated paths.
+
+## Windows Release Build
+
+Build on Windows:
+
+```bat
+scripts\build_windows.bat
+```
+
+The script installs Python build dependencies, builds `frontend/dist`, and creates:
+
+```text
+dist\PhytoIndex.exe
+```
+
+The exe starts FastAPI, serves the built frontend, opens the browser, and stores runtime data in:
+
+```text
+%APPDATA%\PhytoIndex
+```
+
+No Python or Node installation is required on the target user's machine.
 
 ## Core Tables
 

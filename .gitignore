@@ -57,3 +57,7 @@ pnpm-debug.log*
 *.log
 tmp/
 temp/
+
+# Build artifacts
+/build/
+/dist/

@@ -12,7 +12,7 @@ Backend only:
 .venv/bin/uvicorn app.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Docs: `http://127.0.0.1:8000/docs`.
+Docs: `http://127.0.0.1:8000/docs`. API routes are served under `/api`; paths below omit that shared prefix.
 
 ## Confirmation Responses
 

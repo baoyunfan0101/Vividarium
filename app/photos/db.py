@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from app.runtime_paths import database_path
 
-DEFAULT_DB_PATH = Path("data/phytoindex.db")
+DEFAULT_DB_PATH = database_path()
 
 STATUS_UNCHANGED = "unchanged"
 STATUS_DELETED = "deleted"

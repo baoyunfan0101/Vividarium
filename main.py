@@ -6,8 +6,12 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
 from pathlib import Path
+
+import uvicorn
 
 
 ROOT = Path(__file__).resolve().parent
@@ -16,6 +20,10 @@ FRONTEND = ROOT / "frontend"
 
 def main() -> None:
     args = parse_args()
+    if args.production or is_frozen():
+        start_production(args)
+        return
+
     processes: list[subprocess.Popen[bytes]] = []
 
     try:
@@ -43,6 +51,14 @@ def parse_args() -> argparse.Namespace:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--backend-only", action="store_true", help="start only FastAPI")
     group.add_argument("--frontend-only", action="store_true", help="start only Vite")
+    parser.add_argument(
+        "--production",
+        action="store_true",
+        help="serve the built frontend from FastAPI instead of starting Vite",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="backend host")
+    parser.add_argument("--port", type=int, default=8000, help="backend port")
+    parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
     parser.add_argument(
         "--backend-path",
         action="append",
@@ -73,9 +89,9 @@ def start_backend(args: argparse.Namespace) -> subprocess.Popen[bytes]:
             "app.api.main:app",
             "--reload",
             "--host",
-            "127.0.0.1",
+            args.host,
             "--port",
-            "8000",
+            str(args.port),
         ],
         cwd=ROOT,
         env=process_env("PHYTOINDEX_BACKEND_PATH", args.backend_path),
@@ -89,6 +105,27 @@ def start_frontend(args: argparse.Namespace) -> subprocess.Popen[bytes]:
         cwd=FRONTEND,
         env=process_env("PHYTOINDEX_FRONTEND_PATH", args.frontend_path),
     )
+
+
+def start_production(args: argparse.Namespace) -> None:
+    os.environ.setdefault("PHYTOINDEX_SERVE_FRONTEND", "1")
+    url = f"http://{args.host}:{args.port}"
+    print("Starting PhytoIndex.")
+    print(f"Open: {url}")
+    print("Press Ctrl+C to stop.")
+    if not args.no_browser:
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    uvicorn.run(
+        "app.api.main:app",
+        host=args.host,
+        port=args.port,
+        reload=False,
+        log_level="info",
+    )
+
+
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
 
 
 def process_env(env_name: str, extra_paths: list[str]) -> dict[str, str]:

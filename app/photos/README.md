@@ -78,3 +78,4 @@ Primary key: `(root, relative_dir)`.
 - Rebuild deletes thumbnail files under `data/thumbnails`.
 - Thumbnails are generated as compressed WebP files only when requested.
 - Image URLs should include a version based on `root`, `relative_path`, `modified_at`, and `file_size`; versioned image responses are cacheable.
+- Development stores data in repository `data/`; packaged builds store data in the user's application data directory.
