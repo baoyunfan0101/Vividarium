@@ -78,7 +78,8 @@
   text-align: left;
 }
 
-.suggestion-list button:hover {
+.suggestion-list button:hover,
+.suggestion-list button.active {
   border-color: #a7c3b8;
   background: #eef7f3;
 }

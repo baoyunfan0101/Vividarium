@@ -108,8 +108,8 @@ h2 {
 
 .split-resizer {
   position: relative;
-  width: 6px;
-  min-width: 6px;
+  width: 5px;
+  min-width: 5px;
   cursor: col-resize;
   touch-action: none;
 }

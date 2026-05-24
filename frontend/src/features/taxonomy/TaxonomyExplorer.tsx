@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, GitBranch, Image, Search } from "lucide-react";
 import { getMappingRoot, getMappingTaxon, getPhoto, searchMappingByBinomial, searchMappingByName, suggestMappingTaxa, type MappingNode, type Photo, type Taxon, type TaxonSuggestion } from "../../api";
-import { PhotoGrid, PhotoPreview } from "../../components/photo";
+import { PhotoGrid, PhotoPreview, scrollPhotoGridToIndex } from "../../components/photo";
 import { LoadingOverlay } from "../../components/status";
 import { VirtualList } from "../../components/virtual";
 import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, shouldClearSelection } from "../../lib/browserUtils";
@@ -26,6 +26,7 @@ type CachedTaxonomyState = {
 };
 
 const TAXONOMY_STATE_KEY = "phytoindex.taxonomy.explorer";
+const LIST_ITEM_HEIGHT = 37;
 
 export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string) => void }) {
   const cachedState = readStorage<CachedTaxonomyState>(TAXONOMY_STATE_KEY, {
@@ -47,11 +48,14 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   const [mode, setMode] = useState<"name" | "binomial">(cachedState.mode);
   const [suggestions, setSuggestions] = useState<TaxonSuggestion[]>([]);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
+  const [searchFocused, setSearchFocused] = useState(false);
   const [listScrollTop, setListScrollTop] = useState(cachedState.listScrollTop);
   const [gridScrollTop, setGridScrollTop] = useState(cachedState.gridScrollTop);
   const [listingLoading, setListingLoading] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const suppressSuggestionRef = useRef(false);
   const { beginResize, splitRatio, splitRef } = useResizableSplit(cachedState.splitRatio ?? 34);
 
   useEffect(() => {
@@ -99,6 +103,9 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     }
     const nextSelected = photos.find((photo) => photoKey(photo) === selectedPhotoKey) ?? null;
     setSelected(nextSelected);
+    if (nextSelected) {
+      revealPhoto(nextSelected, { list: true, grid: true });
+    }
   }, [photos, selectedPhotoKey]);
 
   useEffect(() => {
@@ -115,9 +122,16 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
 
   useEffect(() => {
     const trimmed = query.trim();
-    if (!trimmed) {
+    if (!trimmed || !searchFocused) {
       setSuggestions([]);
       setSuggestionsOpen(false);
+      return;
+    }
+    if (suppressSuggestionRef.current) {
+      suppressSuggestionRef.current = false;
+      setSuggestions([]);
+      setSuggestionsOpen(false);
+      setActiveSuggestionIndex(-1);
       return;
     }
     const timer = window.setTimeout(() => {
@@ -125,14 +139,16 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
         .then((items) => {
           setSuggestions(items);
           setSuggestionsOpen(items.length > 0);
+          setActiveSuggestionIndex(items.length > 0 ? 0 : -1);
         })
         .catch(() => {
           setSuggestions([]);
           setSuggestionsOpen(false);
+          setActiveSuggestionIndex(-1);
         });
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [query, mode]);
+  }, [query, mode, searchFocused]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -146,17 +162,13 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
       }
       event.preventDefault();
       blurActiveElement();
-      setSelected((current) => {
-        const next = nextPhotoSelection(photos, current, event.key === "ArrowDown" ? 1 : -1);
-        setSelectedPhotoKey(next ? photoKey(next) : null);
-        setSelectedView("image");
-        return next;
-      });
+      const next = nextPhotoSelection(photos, selected, event.key === "ArrowDown" ? 1 : -1);
+      selectPhoto(next, { list: true, grid: true });
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [photos]);
+  }, [photos, selected]);
 
   function openTaxon(taxon: Taxon, fromTrail?: Taxon[]) {
     setListingLoading(true);
@@ -175,6 +187,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
       return;
     }
     setSuggestionsOpen(false);
+    setActiveSuggestionIndex(-1);
     setListingLoading(true);
     try {
       const node = mode === "name"
@@ -191,8 +204,10 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
 
   async function applySuggestion(suggestion: TaxonSuggestion) {
     const value = mode === "name" ? suggestion.name : suggestion.binomial_name ?? suggestion.name;
+    suppressSuggestionRef.current = true;
     setQuery(value);
     setSuggestionsOpen(false);
+    setActiveSuggestionIndex(-1);
     setListingLoading(true);
     try {
       const node = await getMappingTaxon(suggestion.taxon_id);
@@ -212,18 +227,44 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     setState(nextState);
   }
 
-  function selectPhoto(photo: Photo | null) {
+  function selectPhoto(photo: Photo | null, reveal: { list?: boolean; grid?: boolean } = {}) {
     setSelected(photo);
     setSelectedPhotoKey(photo ? photoKey(photo) : null);
     setSelectedView("image");
+    if (photo) {
+      revealPhoto(photo, reveal);
+    }
   }
 
-  function activatePhoto(photo: Photo) {
+  function activatePhoto(photo: Photo, source: "list" | "grid") {
     if (selected?.photo_id === photo.photo_id) {
       setSelectedView((view) => view === "image" ? "details" : "image");
       return;
     }
-    selectPhoto(photo);
+    selectPhoto(photo, {
+      list: source === "grid",
+      grid: source === "list",
+    });
+  }
+
+  function revealPhoto(photo: Photo, reveal: { list?: boolean; grid?: boolean }) {
+    const photoIndex = photos.findIndex((item) => item.photo_id === photo.photo_id);
+    if (photoIndex < 0) {
+      return;
+    }
+    if (reveal.list) {
+      const listIndex = (state?.node.children.length ?? 0) + photoIndex;
+      const nextScrollTop = scrollListToIndex(listRef.current, listIndex);
+      if (nextScrollTop !== null) {
+        setListScrollTop(nextScrollTop);
+      }
+    }
+    if (reveal.grid) {
+      const nextScrollTop = scrollPhotoGridToIndex(gridRef.current, photoIndex, photos.length);
+      if (nextScrollTop !== null) {
+        setGridScrollTop(nextScrollTop);
+      }
+    }
   }
 
   function openTaxonomyRoot() {
@@ -266,15 +307,43 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
               disabled={listingLoading}
               placeholder="Search taxa"
               onChange={(event) => setQuery(event.target.value)}
-              onFocus={() => suggestions.length > 0 && setSuggestionsOpen(true)}
-              onBlur={() => window.setTimeout(() => setSuggestionsOpen(false), 120)}
-              onKeyDown={(event) => event.key === "Enter" && search()}
+              onFocus={() => {
+                setSearchFocused(true);
+                if (suggestions.length > 0) {
+                  setSuggestionsOpen(true);
+                }
+              }}
+              onBlur={() => window.setTimeout(() => {
+                setSearchFocused(false);
+                setSuggestionsOpen(false);
+              }, 120)}
+              onKeyDown={(event) => {
+                if (suggestionsOpen && suggestions.length > 0 && event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setActiveSuggestionIndex((index) => Math.min(index + 1, suggestions.length - 1));
+                  return;
+                }
+                if (suggestionsOpen && suggestions.length > 0 && event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setActiveSuggestionIndex((index) => Math.max(index - 1, 0));
+                  return;
+                }
+                if (suggestionsOpen && suggestions.length > 0 && event.key === "Enter") {
+                  event.preventDefault();
+                  applySuggestion(suggestions[Math.max(activeSuggestionIndex, 0)]);
+                  return;
+                }
+                if (event.key === "Enter") {
+                  search();
+                }
+              }}
             />
             {suggestionsOpen && (
               <div className="suggestion-list">
-                {suggestions.map((suggestion) => (
+                {suggestions.map((suggestion, index) => (
                   <button
                     type="button"
+                    className={index === activeSuggestionIndex ? "active" : ""}
                     key={suggestion.taxon_id}
                     disabled={listingLoading}
                     onMouseDown={(event) => event.preventDefault()}
@@ -318,7 +387,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
               );
             }
             return (
-              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo)}>
+              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo, "list")}>
                 <Image size={18} /> <span>{item.photo.filename}</span>
               </button>
             );
@@ -333,10 +402,23 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
       {selected ? (
         <PhotoPreview photo={selected} mode={selectedView} />
       ) : (
-        <PhotoGrid photos={photos} emptyText="No directly mapped photos" loading={listingLoading} loadingLabel="Loading taxonomy" onPhotoClick={activatePhoto} selectedPhotoId={selectedId} onBlankClick={() => selectPhoto(null)} subtitleForPhoto={() => state?.node.taxon?.name ?? ""} scrollRef={gridRef} onScroll={(event) => setGridScrollTop(event.currentTarget.scrollTop)} />
+        <PhotoGrid photos={photos} emptyText="No directly mapped photos" loading={listingLoading} loadingLabel="Loading taxonomy" onPhotoClick={(photo) => activatePhoto(photo, "grid")} selectedPhotoId={selectedId} onBlankClick={() => selectPhoto(null)} subtitleForPhoto={() => state?.node.taxon?.name ?? ""} scrollRef={gridRef} onScroll={(event) => setGridScrollTop(event.currentTarget.scrollTop)} />
       )}
     </section>
   );
+}
+
+function scrollListToIndex(element: HTMLDivElement | null, index: number): number | null {
+  if (!element || index < 0) {
+    return null;
+  }
+  const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+  const nextScrollTop = Math.min(
+    maxScrollTop,
+    Math.max(0, index * LIST_ITEM_HEIGHT - Math.max(0, element.clientHeight - LIST_ITEM_HEIGHT) / 2),
+  );
+  element.scrollTop = nextScrollTop;
+  return nextScrollTop;
 }
 
 function photoKey(photo: Photo): string {

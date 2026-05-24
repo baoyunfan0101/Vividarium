@@ -93,6 +93,11 @@ Poll `GET /operations/status` for progress and final result.
 - `GET /mapping/photos-taxa/export?table_name=...`: download a mapping table.
 - `POST /mapping/photos-taxa/export`: export a mapping table to a backend path.
 
+## Map
+
+- `GET /map/photos`: GPS-enabled, non-deleted photo rows for map display.
+- `GET /map/photos?bbox=minLng,minLat,maxLng,maxLat`: same rows filtered to a viewport.
+
 ## Local Paths
 
 - `GET /local/select-directory`: open a native directory picker when available.

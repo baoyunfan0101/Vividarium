@@ -6,24 +6,27 @@ import { EXPORT_ENDPOINTS, EXPORT_TABLES } from "./constants";
 import type { ExportModule, RootRow } from "./types";
 import { formatBytes, formatOperationAlert, isConfirmationResponse, mergeRootSelection, moveSelectedRows, operationLabel, uniqueRoots } from "./adminUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
+import { MAP_PROVIDER_KEY, MAP_TILE_PROVIDERS } from "../map/mapProviders";
 
 const ADMIN_ROOT_ROWS_KEY = "phytoindex.admin.rootRows";
 const ADMIN_TAXA_METADATA_KEY = "phytoindex.admin.taxaMetadata";
 const ADMIN_MAPPING_METADATA_KEY = "phytoindex.admin.mappingMetadata";
 const ADMIN_EXPORT_KEY = "phytoindex.admin.export";
+const ADMIN_OPERATIONS_KEY = "phytoindex.admin.operations";
 
 export function AdminPanel({ setMessage }: { setMessage: (message: string) => void }) {
   const [rootRows, setRootRows] = useState<RootRow[]>(() => readStorage<RootRow[]>(ADMIN_ROOT_ROWS_KEY, []));
   const [taxaMetadata, setTaxaMetadata] = useState<TaxaMetadata | null>(() => readStorage<TaxaMetadata | null>(ADMIN_TAXA_METADATA_KEY, null));
   const [knowledgeBasePath, setKnowledgeBasePath] = useState(() => readStorage<TaxaMetadata | null>(ADMIN_TAXA_METADATA_KEY, null)?.knowledge_base_path ?? "");
   const [mappingMetadata, setMappingMetadata] = useState<MappingMetadata | null>(() => readStorage<MappingMetadata | null>(ADMIN_MAPPING_METADATA_KEY, null));
-  const [operations, setOperations] = useState<Record<OperationState["module"], OperationState> | null>(null);
+  const [operations, setOperations] = useState<Record<OperationState["module"], OperationState> | null>(() => readStorage<Record<OperationState["module"], OperationState> | null>(ADMIN_OPERATIONS_KEY, null));
   const cachedExport = readStorage<{ module: ExportModule; table: string }>(ADMIN_EXPORT_KEY, {
     module: "photos",
     table: EXPORT_TABLES.photos[0]
   });
   const [exportModule, setExportModule] = useState<ExportModule>(cachedExport.module);
   const [exportTable, setExportTable] = useState(cachedExport.table);
+  const [mapProviderId, setMapProviderId] = useState(() => readStorage(MAP_PROVIDER_KEY, "osm"));
   const [localBusy, setLocalBusy] = useState({
     photos: false,
     taxa: false,
@@ -54,7 +57,13 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
       .catch((error) => setMessage(error.message));
     refreshOperations();
     const timer = window.setInterval(refreshOperations, 1000);
-    return () => window.clearInterval(timer);
+    window.addEventListener("focus", refreshOperations);
+    document.addEventListener("visibilitychange", refreshOperations);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshOperations);
+      document.removeEventListener("visibilitychange", refreshOperations);
+    };
   }, [setMessage]);
 
   async function execute(module: OperationState["module"], label: string, path: string, body: object) {
@@ -63,7 +72,11 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
       const result = await runMutation(path, body);
       const operation = operationFromResponse(result);
       if (operation) {
-        setOperations((state) => state ? { ...state, [operation.module]: operation } : state);
+        setOperations((state) => {
+          const nextState = { ...(state ?? emptyOperations()), [operation.module]: operation };
+          writeStorage(ADMIN_OPERATIONS_KEY, nextState);
+          return nextState;
+        });
         const finalResult = await waitForOperation(operation);
         alert(formatOperationAlert(label, finalResult));
       } else if (isConfirmationResponse(result)) {
@@ -82,7 +95,10 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
 
   function refreshOperations() {
     getOperationsStatus()
-      .then(setOperations)
+      .then((nextOperations) => {
+        setOperations(nextOperations);
+        writeStorage(ADMIN_OPERATIONS_KEY, nextOperations);
+      })
       .catch((error) => setMessage(error.message));
   }
 
@@ -236,6 +252,12 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
     writeStorage(ADMIN_EXPORT_KEY, { module: moduleName, table: firstTable });
   }
 
+  function selectMapProvider(providerId: string) {
+    setMapProviderId(providerId);
+    writeStorage(MAP_PROVIDER_KEY, providerId);
+    setMessage("Map provider saved");
+  }
+
   async function exportCurrentTable() {
     setLocalBusy((state) => ({ ...state, export: true }));
     setMessage(`Exporting ${exportTable}`);
@@ -325,6 +347,19 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
         </AdminActionArea>
       </div>
       <div className="panel">
+        <h2>Map</h2>
+        <p className="panel-subtitle">Tile provider</p>
+        <select value={mapProviderId} onChange={(event) => selectMapProvider(event.target.value)}>
+          {MAP_TILE_PROVIDERS.map((provider) => (
+            <option value={provider.id} key={provider.id}>{provider.name}</option>
+          ))}
+        </select>
+        <div className="metadata-list">
+          <div><span>Renderer</span><strong>MapLibre GL JS</strong></div>
+          <div><span>Provider</span><strong>{MAP_TILE_PROVIDERS.find((provider) => provider.id === mapProviderId)?.name ?? mapProviderId}</strong></div>
+        </div>
+      </div>
+      <div className="panel">
         <h2>Export Tables</h2>
         <label>Module</label>
         <select value={exportModule} disabled={exportActive} onChange={(event) => selectExportModule(event.target.value as ExportModule)}>
@@ -347,4 +382,28 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
       </div>
     </section>
   );
+}
+
+function emptyOperations(): Record<OperationState["module"], OperationState> {
+  return {
+    photos: emptyOperation("photos"),
+    taxa: emptyOperation("taxa"),
+    mapping: emptyOperation("mapping"),
+  };
+}
+
+function emptyOperation(module: OperationState["module"]): OperationState {
+  return {
+    module,
+    task_id: null,
+    operation: null,
+    running: false,
+    started_at: null,
+    finished_at: null,
+    message: "idle",
+    processed: 0,
+    total: null,
+    result: null,
+    error: null,
+  };
 }

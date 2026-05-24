@@ -4,19 +4,19 @@ React + Vite UI for the FastAPI backend.
 
 ## Run
 
-From the repository root, start backend and frontend together:
+From the repository root:
 
 ```bash
 python main.py
 ```
 
-Or start them separately. Backend:
+If `npm` is not on `PATH`:
 
 ```bash
-.venv/bin/uvicorn app.api.main:app --reload --host 127.0.0.1 --port 8000
+python main.py --frontend-path "/path/to/node/bin"
 ```
 
-Frontend:
+Frontend only:
 
 ```bash
 cd frontend
@@ -28,17 +28,28 @@ Open `http://127.0.0.1:5173`. Vite proxies `/api` to `http://127.0.0.1:8000`.
 
 ## Screens
 
-- Photos: browse by root and relative folder, view thumbnails, original images, and full photo metadata.
-- Taxonomy: browse mapped taxa as a tree; search or autocomplete by Chinese name/binomial name.
-- Map: placeholder page.
-- Admin: manage roots and knowledge-base path; run update/rebuild operations; export CSV.
+| Screen | Purpose |
+| --- | --- |
+| Photos | browse by root/folder; open thumbnails, originals, and metadata |
+| Taxonomy | browse mapped taxa; search/autocomplete by Chinese or binomial name |
+| Map | browse GPS photos with MapLibre clustering and a photo preview overlay |
+| Admin | manage roots/workbook path, run operations, export CSV, choose map tile provider |
 
-## UI Notes
+## Local UI State
 
-- Photos and taxonomy remember selected location, scroll position, selected photo, and split-pane width in local storage.
-- Image URLs include a version derived from path, modified time, and size so browser caching is safe across rebuilds.
-- Original image viewer supports scrollbars, wheel zoom, double-click zoom, and drag-to-pan when zoomed.
-- Backend confirmation responses are shown to the user and retried with `force: true` only after confirmation.
+Stored in `localStorage`:
+
+- active top-level screen
+- Photos and Taxonomy location, selection, scroll position, and split-pane width
+- Taxonomy search mode and query
+- Map center, zoom, selected photo, open preview, preview mode, and tile provider
+
+## Image Loading
+
+- Original and thumbnail URLs include a version derived from path, modified time, and file size.
+- Versioned image responses are safe for browser caching.
+- Thumbnails are generated lazily by the backend on first request.
+- The original image viewer supports scrollbars, wheel zoom, double-click zoom, and drag-to-pan when zoomed.
 
 ## Check
 

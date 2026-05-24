@@ -11,6 +11,9 @@ type DetailRow = {
   label: string;
   values: string[];
 };
+const PHOTO_GRID_PADDING = 10;
+const PHOTO_GRID_GAP = 8;
+const PHOTO_GRID_MIN_COLUMN_WIDTH = 180;
 
 function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
   if (!ref) {
@@ -360,9 +363,9 @@ export function PhotoGrid({
       </div>
     );
   }
-  const padding = 10;
-  const gap = 8;
-  const minColumnWidth = 180;
+  const padding = PHOTO_GRID_PADDING;
+  const gap = PHOTO_GRID_GAP;
+  const minColumnWidth = PHOTO_GRID_MIN_COLUMN_WIDTH;
   const contentWidth = Math.max(0, viewport.width - padding * 2);
   const columns = Math.max(1, Math.floor((contentWidth + gap) / (minColumnWidth + gap)));
   const tileWidth = columns > 1
@@ -405,6 +408,27 @@ export function PhotoGrid({
       {loading && <LoadingOverlay label={loadingLabel} />}
     </div>
   );
+}
+
+export function scrollPhotoGridToIndex(element: HTMLDivElement | null, index: number, itemCount: number): number | null {
+  if (!element || index < 0 || itemCount <= 0) {
+    return null;
+  }
+  const contentWidth = Math.max(0, element.clientWidth - PHOTO_GRID_PADDING * 2);
+  const columns = Math.max(1, Math.floor((contentWidth + PHOTO_GRID_GAP) / (PHOTO_GRID_MIN_COLUMN_WIDTH + PHOTO_GRID_GAP)));
+  const tileWidth = columns > 1
+    ? (contentWidth - PHOTO_GRID_GAP * (columns - 1)) / columns
+    : contentWidth;
+  const rowHeight = Math.ceil(Math.max(PHOTO_GRID_MIN_COLUMN_WIDTH, tileWidth) * 0.75 + 58);
+  const rowStride = rowHeight + PHOTO_GRID_GAP;
+  const row = Math.floor(index / columns);
+  const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+  const nextScrollTop = Math.min(
+    maxScrollTop,
+    Math.max(0, PHOTO_GRID_PADDING + row * rowStride - Math.max(0, element.clientHeight - rowHeight) / 2),
+  );
+  element.scrollTop = nextScrollTop;
+  return nextScrollTop;
 }
 
 function LazyThumbnail({ photo }: { photo: Photo }) {

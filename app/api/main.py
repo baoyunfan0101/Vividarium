@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .local_paths import router as local_paths_router
+from .map import router as map_router
 from .operations import router as operations_router
 from .photos import router as photos_router
 from .photos_taxa_mapping import router as mapping_router
@@ -29,6 +30,7 @@ def create_app() -> FastAPI:
     app.include_router(photos_router)
     app.include_router(taxa_router)
     app.include_router(mapping_router)
+    app.include_router(map_router)
     return app
 
 

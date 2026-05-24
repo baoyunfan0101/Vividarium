@@ -22,6 +22,8 @@ export type Photo = {
   status: string;
 };
 
+export type MapPhoto = Photo;
+
 export type PhotoRootMetadata = {
   root: string;
   last_synced_at: string | null;
@@ -179,6 +181,11 @@ export async function getChangedPhotos(): Promise<Photo[]> {
 export async function getPhoto(photoId: number): Promise<Photo> {
   const data = await request<{ photo: Photo }>(`/photos/${photoId}`);
   return data.photo;
+}
+
+export async function getMapPhotos(): Promise<MapPhoto[]> {
+  const data = await request<{ photos: MapPhoto[] }>("/map/photos");
+  return data.photos;
 }
 
 export async function getMappingRoot(): Promise<MappingNode> {

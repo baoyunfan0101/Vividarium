@@ -1,14 +1,14 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Database, Folder, GitBranch, Map, TreePine } from "lucide-react";
 import { NavButton } from "./components/NavButton";
 import { AdminPanel } from "./features/admin/AdminPanel";
-import { MapPage } from "./features/map/MapPage";
 import { PhotosExplorer } from "./features/photos/PhotosExplorer";
 import { TaxonomyExplorer } from "./features/taxonomy/TaxonomyExplorer";
 import { readStorage, writeStorage } from "./lib/storage";
 
 type View = "photos" | "taxonomy" | "map" | "admin";
 const APP_VIEW_KEY = "phytoindex.app.view";
+const MapPage = lazy(() => import("./features/map/MapPage").then((module) => ({ default: module.MapPage })));
 
 export function App() {
   const [view, setView] = useState<View>(() => readStorage<View>(APP_VIEW_KEY, "photos"));
@@ -37,7 +37,11 @@ export function App() {
       <main className="workspace">
         {view === "photos" && <PhotosExplorer setMessage={setMessage} />}
         {view === "taxonomy" && <TaxonomyExplorer setMessage={setMessage} />}
-        {view === "map" && <MapPage />}
+        {view === "map" && (
+          <Suspense fallback={<div className="panel empty">Loading map</div>}>
+            <MapPage />
+          </Suspense>
+        )}
         {view === "admin" && <AdminPanel setMessage={setMessage} />}
       </main>
     </div>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Folder, Image } from "lucide-react";
 import { browsePhotos, getRoots, searchMappingByBinomial, type DirectoryListing, type Photo } from "../../api";
-import { PhotoGrid, PhotoPreview } from "../../components/photo";
+import { PhotoGrid, PhotoPreview, scrollPhotoGridToIndex } from "../../components/photo";
 import { LoadingOverlay } from "../../components/status";
 import { VirtualList } from "../../components/virtual";
 import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, shouldClearSelection } from "../../lib/browserUtils";
@@ -10,6 +10,7 @@ import { readStorage, writeStorage } from "../../lib/storage";
 import { useResizableSplit } from "../../lib/useResizableSplit";
 
 const PHOTOS_STATE_KEY = "phytoindex.photos.explorer";
+const LIST_ITEM_HEIGHT = 37;
 
 type CachedPhotosState = {
   root: string;
@@ -94,6 +95,9 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
     }
     const nextSelected = files.find((photo) => photoKey(photo) === selectedPhotoKey) ?? null;
     setSelected(nextSelected);
+    if (nextSelected) {
+      revealPhoto(nextSelected, { list: true, grid: true });
+    }
   }, [files, selectedPhotoKey]);
 
   useEffect(() => {
@@ -147,17 +151,13 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
       }
       event.preventDefault();
       blurActiveElement();
-      setSelected((current) => {
-        const next = nextPhotoSelection(files, current, event.key === "ArrowDown" ? 1 : -1);
-        setSelectedPhotoKey(next ? photoKey(next) : null);
-        setSelectedView("image");
-        return next;
-      });
+      const next = nextPhotoSelection(files, selected, event.key === "ArrowDown" ? 1 : -1);
+      selectPhoto(next, { list: true, grid: true });
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [files]);
+  }, [files, selected]);
 
   function openPath(nextPath: string) {
     if (nextPath === path) {
@@ -169,18 +169,44 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
     setPath(nextPath);
   }
 
-  function selectPhoto(photo: Photo | null) {
+  function selectPhoto(photo: Photo | null, reveal: { list?: boolean; grid?: boolean } = {}) {
     setSelected(photo);
     setSelectedPhotoKey(photo ? photoKey(photo) : null);
     setSelectedView("image");
+    if (photo) {
+      revealPhoto(photo, reveal);
+    }
   }
 
-  function activatePhoto(photo: Photo) {
+  function activatePhoto(photo: Photo, source: "list" | "grid") {
     if (selected?.photo_id === photo.photo_id) {
       setSelectedView((view) => view === "image" ? "details" : "image");
       return;
     }
-    selectPhoto(photo);
+    selectPhoto(photo, {
+      list: source === "grid",
+      grid: source === "list",
+    });
+  }
+
+  function revealPhoto(photo: Photo, reveal: { list?: boolean; grid?: boolean }) {
+    const fileIndex = files.findIndex((item) => item.photo_id === photo.photo_id);
+    if (fileIndex < 0) {
+      return;
+    }
+    if (reveal.list) {
+      const listIndex = (listing?.directories.length ?? 0) + fileIndex;
+      const nextScrollTop = scrollListToIndex(listRef.current, listIndex);
+      if (nextScrollTop !== null) {
+        setListScrollTop(nextScrollTop);
+      }
+    }
+    if (reveal.grid) {
+      const nextScrollTop = scrollPhotoGridToIndex(gridRef.current, fileIndex, files.length);
+      if (nextScrollTop !== null) {
+        setGridScrollTop(nextScrollTop);
+      }
+    }
   }
 
   async function loadListing(nextRoot: string, nextPath: string) {
@@ -235,7 +261,7 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
               );
             }
             return (
-              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo)}>
+              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo, "list")}>
                 <Image size={18} /> <span>{item.photo.filename}</span>
               </button>
             );
@@ -250,10 +276,23 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
       {selected ? (
         <PhotoPreview photo={selected} mode={selectedView} />
       ) : (
-        <PhotoGrid photos={files} emptyText="No photos in this folder" loading={listingLoading} loadingLabel="Loading photos" onPhotoClick={activatePhoto} selectedPhotoId={selectedId} onBlankClick={() => selectPhoto(null)} subtitleForPhoto={(photo) => photo.binomial_name ? nameByBinomial[photo.binomial_name] : ""} scrollRef={gridRef} onScroll={(event) => setGridScrollTop(event.currentTarget.scrollTop)} />
+        <PhotoGrid photos={files} emptyText="No photos in this folder" loading={listingLoading} loadingLabel="Loading photos" onPhotoClick={(photo) => activatePhoto(photo, "grid")} selectedPhotoId={selectedId} onBlankClick={() => selectPhoto(null)} subtitleForPhoto={(photo) => photo.binomial_name ? nameByBinomial[photo.binomial_name] : ""} scrollRef={gridRef} onScroll={(event) => setGridScrollTop(event.currentTarget.scrollTop)} />
       )}
     </section>
   );
+}
+
+function scrollListToIndex(element: HTMLDivElement | null, index: number): number | null {
+  if (!element || index < 0) {
+    return null;
+  }
+  const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+  const nextScrollTop = Math.min(
+    maxScrollTop,
+    Math.max(0, index * LIST_ITEM_HEIGHT - Math.max(0, element.clientHeight - LIST_ITEM_HEIGHT) / 2),
+  );
+  element.scrollTop = nextScrollTop;
+  return nextScrollTop;
 }
 
 function photoKey(photo: Photo): string {
