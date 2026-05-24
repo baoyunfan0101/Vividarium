@@ -114,10 +114,32 @@
 }
 
 .browser-list {
-  display: grid;
-  gap: 3px;
   overflow: auto;
   max-height: calc(100vh - 168px);
+}
+
+.virtual-list-spacer {
+  position: relative;
+  min-width: 0;
+}
+
+.virtual-list-window {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.virtual-list-row {
+  min-width: 0;
+  height: 34px;
+}
+
+.virtual-list-row > .row-button {
+  width: 100%;
+  height: 34px;
 }
 
 .browser-status {

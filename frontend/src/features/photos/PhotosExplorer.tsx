@@ -3,6 +3,7 @@ import { ChevronRight, Folder, Image } from "lucide-react";
 import { browsePhotos, getRoots, searchMappingByBinomial, type DirectoryListing, type Photo } from "../../api";
 import { PhotoGrid, PhotoPreview } from "../../components/photo";
 import { LoadingOverlay } from "../../components/status";
+import { VirtualList } from "../../components/virtual";
 import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, shouldClearSelection } from "../../lib/browserUtils";
 import { breadcrumb, joinPath } from "../../lib/pathUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
@@ -14,6 +15,7 @@ type CachedPhotosState = {
   root: string;
   path: string;
   selectedPhotoKey: string | null;
+  selectedView: "image" | "details";
   listScrollTop: number;
   gridScrollTop: number;
   splitRatio: number;
@@ -24,6 +26,7 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
     root: "",
     path: "",
     selectedPhotoKey: null,
+    selectedView: "image",
     listScrollTop: 0,
     gridScrollTop: 0,
     splitRatio: 34
@@ -34,7 +37,7 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
   const [listing, setListing] = useState<DirectoryListing | null>(null);
   const [selected, setSelected] = useState<Photo | null>(null);
   const [selectedPhotoKey, setSelectedPhotoKey] = useState<string | null>(cachedState.selectedPhotoKey ?? null);
-  const [selectedView, setSelectedView] = useState<"image" | "details">("image");
+  const [selectedView, setSelectedView] = useState<"image" | "details">(cachedState.selectedView ?? "image");
   const [listScrollTop, setListScrollTop] = useState(cachedState.listScrollTop);
   const [gridScrollTop, setGridScrollTop] = useState(cachedState.gridScrollTop);
   const [nameByBinomial, setNameByBinomial] = useState<Record<string, string>>({});
@@ -67,17 +70,22 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
 
   const files = listing?.files ?? [];
   const crumbs = useMemo(() => breadcrumb(path), [path]);
+  const browserItems = useMemo(() => [
+    ...(listing?.directories ?? []).map((directory) => ({ type: "directory" as const, directory })),
+    ...files.map((photo) => ({ type: "photo" as const, photo })),
+  ], [listing, files]);
 
   useEffect(() => {
     writeStorage(PHOTOS_STATE_KEY, {
       root,
       path,
       selectedPhotoKey,
+      selectedView,
       listScrollTop,
       gridScrollTop,
       splitRatio
     });
-  }, [root, path, selectedPhotoKey, listScrollTop, gridScrollTop, splitRatio]);
+  }, [root, path, selectedPhotoKey, selectedView, listScrollTop, gridScrollTop, splitRatio]);
 
   useEffect(() => {
     if (!selectedPhotoKey) {
@@ -191,8 +199,8 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
   const selectedId = selected?.photo_id ?? null;
 
   return (
-    <section className="split resizable-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(220px, ${splitRatio}%) 6px minmax(0, 1fr)` }}>
-      <div className="panel browser-panel loading-scope" onClick={(event) => shouldClearSelection(event) && setSelected(null)}>
+    <section className="split resizable-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(220px, ${splitRatio}%) 5px minmax(0, 1fr)` }}>
+      <div className="panel browser-panel loading-scope" onClick={(event) => shouldClearSelection(event) && selectPhoto(null)}>
         <div className="toolbar">
           <select value={root} disabled={listingLoading} onChange={(event) => { setRoot(event.target.value); setPath(""); selectPhoto(null); setListScrollTop(0); setGridScrollTop(0); }}>
             <option value="">Select root</option>
@@ -207,18 +215,32 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
             </button>
           ))}
         </div>
-        <div className="browser-list" ref={listRef} onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}>
-          {listing?.directories.map((directory) => (
-            <button className="row-button" disabled={listingLoading} key={directory} onClick={() => openPath(joinPath(path, directory))}>
-              <Folder size={18} /> <span>{directory}</span>
-            </button>
-          ))}
-          {files.map((photo) => (
-            <button className={photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} key={photo.photo_id} onClick={() => activatePhoto(photo)}>
-              <Image size={18} /> <span>{photo.filename}</span>
-            </button>
-          ))}
-        </div>
+        <VirtualList
+          className="browser-list"
+          itemCount={browserItems.length}
+          itemHeight={37}
+          scrollRef={listRef}
+          onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}
+          itemKey={(index) => {
+            const item = browserItems[index];
+            return item.type === "directory" ? `dir:${item.directory}` : `photo:${item.photo.photo_id}`;
+          }}
+          renderItem={(index) => {
+            const item = browserItems[index];
+            if (item.type === "directory") {
+              return (
+                <button className="row-button" disabled={listingLoading} onClick={() => openPath(joinPath(path, item.directory))}>
+                  <Folder size={18} /> <span>{item.directory}</span>
+                </button>
+              );
+            }
+            return (
+              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo)}>
+                <Image size={18} /> <span>{item.photo.filename}</span>
+              </button>
+            );
+          }}
+        />
         <div className="browser-status">
           {(listing?.directories.length ?? 0)} folders · {files.length} photos
         </div>

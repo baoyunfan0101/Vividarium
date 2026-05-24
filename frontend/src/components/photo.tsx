@@ -1,33 +1,27 @@
 import { Camera, Image } from "lucide-react";
-import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type Ref, type SyntheticEvent, type UIEvent, type WheelEvent } from "react";
-import type { Photo } from "../api";
-import { photoFileUrl, photoThumbnailUrl } from "../api";
+import { useEffect, useRef, useState, type MouseEvent, type MutableRefObject, type PointerEvent, type Ref, type SyntheticEvent, type UIEvent, type WheelEvent } from "react";
+import type { Photo, Taxon } from "../api";
+import { photoFileUrl, photoThumbnailUrl, searchMappingByBinomial } from "../api";
 import { photoDisplayPath } from "../lib/photoUtils";
+import { lineageForNode } from "../lib/taxonUtils";
 import { LoadingOverlay } from "./status";
 
 type PreviewMode = "image" | "details";
+type DetailRow = {
+  label: string;
+  values: string[];
+};
 
-const PHOTO_DETAIL_FIELDS: Array<keyof Photo> = [
-  "photo_id",
-  "root",
-  "relative_path",
-  "parent_dir",
-  "path_depth",
-  "filename",
-  "binomial_name",
-  "captured_at",
-  "location",
-  "camera",
-  "width",
-  "height",
-  "file_size",
-  "modified_at",
-  "longitude",
-  "latitude",
-  "exif_json",
-  "thumbnail_path",
-  "status",
-];
+function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
+  if (!ref) {
+    return;
+  }
+  if (typeof ref === "function") {
+    ref(value);
+    return;
+  }
+  (ref as MutableRefObject<T | null>).current = value;
+}
 
 export function PhotoPreview({
   photo,
@@ -209,10 +203,57 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
 }
 
 function PhotoDetails({ photo }: { photo: Photo }) {
-  const rows = [
-    ["path", photoDisplayPath(photo)],
-    ...PHOTO_DETAIL_FIELDS.map((field) => [field, formatDetailValue(photo[field])]),
-  ] as Array<[string, string]>;
+  const [lineage, setLineage] = useState<Taxon[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLineage([]);
+    if (!photo.binomial_name) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    searchMappingByBinomial(photo.binomial_name)
+      .then(lineageForNode)
+      .then((items) => {
+        if (!cancelled) {
+          setLineage(items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLineage([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [photo.binomial_name]);
+
+  const ordo = lineage.find((taxon) => taxon.rank === "ordo");
+  const familia = lineage.find((taxon) => taxon.rank === "familia");
+  const genus = lineage.find((taxon) => taxon.rank === "genus");
+  const species = lineage.find((taxon) => taxon.rank === "species");
+  const rows: DetailRow[] = [
+    { label: "ordo", values: formatTaxonValues(ordo) },
+    { label: "familia", values: formatTaxonValues(familia) },
+    { label: "genus", values: formatTaxonValues(genus) },
+    { label: "species", values: formatTaxonValues(species) },
+    { label: "path", values: [photoDisplayPath(photo)] },
+    { label: "filename", values: [photo.filename] },
+    { label: "camera", values: [formatDetailValue(photo.camera)] },
+    { label: "captured_at", values: [formatDetailValue(photo.captured_at)] },
+    { label: "modified_at", values: [formatDetailValue(photo.modified_at)] },
+    { label: "location", values: [formatDetailValue(photo.location)] },
+    { label: "longitude / latitude", values: [formatDetailValue(photo.longitude), formatDetailValue(photo.latitude)] },
+    { label: "width / height", values: [formatDetailValue(photo.width), formatDetailValue(photo.height)] },
+    { label: "exif_json", values: [formatDetailValue(photo.exif_json)] },
+    { label: "thumbnail_path", values: [formatDetailValue(photo.thumbnail_path)] },
+    { label: "photo_id", values: [formatDetailValue(photo.photo_id)] },
+    { label: "status", values: [photo.status] },
+  ];
 
   async function copyRow(value: string) {
     await navigator.clipboard?.writeText(value);
@@ -221,15 +262,26 @@ function PhotoDetails({ photo }: { photo: Photo }) {
   return (
     <div className="preview photo-details">
       <div className="photo-detail-list">
-        {rows.map(([label, value]) => (
+        {rows.map(({ label, values }) => (
           <div className="photo-detail-row" key={label}>
             <span>{label}</span>
-            <strong title="Double click to copy" onDoubleClick={() => copyRow(value)}>{value}</strong>
+            <div className={values.length > 1 ? "photo-detail-values two-column" : "photo-detail-values"}>
+              {values.map((value, index) => (
+                <strong title="Double click to copy" key={`${label}:${index}`} onDoubleClick={() => copyRow(value)}>{value}</strong>
+              ))}
+            </div>
           </div>
         ))}
       </div>
     </div>
   );
+}
+
+function formatTaxonValues(taxon: Taxon | undefined): string[] {
+  if (!taxon) {
+    return ["", ""];
+  }
+  return [taxon.name, taxon.binomial_name ?? ""];
 }
 
 function formatDetailValue(value: Photo[keyof Photo]): string {
@@ -262,24 +314,94 @@ export function PhotoGrid({
   scrollRef?: Ref<HTMLDivElement>;
   onScroll?: (event: UIEvent<HTMLDivElement>) => void;
 }) {
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const [viewport, setViewport] = useState({ width: 0, height: 0 });
+  const [scrollTop, setScrollTop] = useState(0);
+
+  useEffect(() => {
+    const element = gridRef.current;
+    if (!element) {
+      return;
+    }
+    function updateViewport() {
+      if (element) {
+        setViewport({ width: element.clientWidth, height: element.clientHeight });
+        setScrollTop(element.scrollTop);
+      }
+    }
+    updateViewport();
+    const observer = new ResizeObserver(updateViewport);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  function setGridRef(element: HTMLDivElement | null) {
+    gridRef.current = element;
+    assignRef(scrollRef, element);
+    if (element) {
+      window.requestAnimationFrame(() => {
+        setViewport({ width: element.clientWidth, height: element.clientHeight });
+        setScrollTop(element.scrollTop);
+      });
+    }
+  }
+
+  function handleScroll(event: UIEvent<HTMLDivElement>) {
+    setScrollTop(event.currentTarget.scrollTop);
+    onScroll?.(event);
+  }
+
   if (!photos.length) {
     return (
-      <div className="panel empty loading-scope" ref={scrollRef} onScroll={onScroll} onClick={onBlankClick}>
+      <div className="panel empty loading-scope" ref={setGridRef} onScroll={handleScroll} onClick={onBlankClick}>
         <Image size={30} />
         <span>{emptyText}</span>
         {loading && <LoadingOverlay label={loadingLabel} />}
       </div>
     );
   }
+  const padding = 10;
+  const gap = 8;
+  const minColumnWidth = 180;
+  const contentWidth = Math.max(0, viewport.width - padding * 2);
+  const columns = Math.max(1, Math.floor((contentWidth + gap) / (minColumnWidth + gap)));
+  const tileWidth = columns > 1
+    ? (contentWidth - gap * (columns - 1)) / columns
+    : contentWidth;
+  const rowHeight = Math.ceil(Math.max(minColumnWidth, tileWidth) * 0.75 + 58);
+  const rowStride = rowHeight + gap;
+  const totalRows = Math.ceil(photos.length / columns);
+  const totalHeight = padding * 2 + Math.max(0, totalRows * rowStride - gap);
+  const startRow = Math.max(0, Math.floor(Math.max(0, scrollTop - padding) / rowStride) - 3);
+  const endRow = Math.min(
+    totalRows,
+    Math.ceil(Math.max(0, scrollTop - padding + viewport.height) / rowStride) + 3,
+  );
+  const startIndex = startRow * columns;
+  const endIndex = Math.min(photos.length, endRow * columns);
+  const visiblePhotos = photos.slice(startIndex, endIndex);
+
   return (
-    <div className="photo-grid loading-scope" ref={scrollRef} onScroll={onScroll} onClick={(event) => event.currentTarget === event.target && onBlankClick?.()}>
-      {photos.map((photo) => (
-        <button key={photo.photo_id} disabled={loading} className={photo.photo_id === selectedPhotoId ? "photo-tile selected" : "photo-tile"} onClick={() => onPhotoClick?.(photo)}>
-          <LazyThumbnail photo={photo} />
-          <strong>{photo.binomial_name ?? photo.filename}</strong>
-          <span>{subtitleForPhoto?.(photo) ?? ""}</span>
-        </button>
-      ))}
+    <div className="photo-grid loading-scope" ref={setGridRef} onScroll={handleScroll} onClick={(event) => event.currentTarget === event.target && onBlankClick?.()}>
+      <div className="photo-grid-spacer" style={{ height: totalHeight }}>
+        <div
+          className="photo-grid-window"
+          style={{
+            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+            left: padding,
+            right: padding,
+            transform: `translateY(${padding + startRow * rowStride}px)`,
+          }}
+        >
+          {visiblePhotos.map((photo) => (
+            <button key={photo.photo_id} disabled={loading} className={photo.photo_id === selectedPhotoId ? "photo-tile selected" : "photo-tile"} style={{ height: rowHeight }} onClick={() => onPhotoClick?.(photo)}>
+              <LazyThumbnail photo={photo} />
+              <strong>{photo.binomial_name ?? photo.filename}</strong>
+              <span>{subtitleForPhoto?.(photo) ?? ""}</span>
+            </button>
+          ))}
+        </div>
+      </div>
       {loading && <LoadingOverlay label={loadingLabel} />}
     </div>
   );
@@ -294,6 +416,23 @@ function LazyThumbnail({ photo }: { photo: Photo }) {
     if (!image || visible) {
       return;
     }
+
+    function isNearViewport(element: HTMLElement): boolean {
+      const margin = 600;
+      const rect = element.getBoundingClientRect();
+      return (
+        rect.bottom >= -margin &&
+        rect.top <= window.innerHeight + margin &&
+        rect.right >= -margin &&
+        rect.left <= window.innerWidth + margin
+      );
+    }
+
+    if (isNearViewport(image)) {
+      setVisible(true);
+      return;
+    }
+
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -304,6 +443,12 @@ function LazyThumbnail({ photo }: { photo: Photo }) {
       { rootMargin: "600px" },
     );
     observer.observe(image);
+    window.requestAnimationFrame(() => {
+      if (isNearViewport(image)) {
+        setVisible(true);
+        observer.disconnect();
+      }
+    });
     return () => observer.disconnect();
   }, [visible]);
 

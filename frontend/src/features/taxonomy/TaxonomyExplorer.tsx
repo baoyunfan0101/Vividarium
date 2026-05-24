@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, GitBranch, Image, Search } from "lucide-react";
 import { getMappingRoot, getMappingTaxon, getPhoto, searchMappingByBinomial, searchMappingByName, suggestMappingTaxa, type MappingNode, type Photo, type Taxon, type TaxonSuggestion } from "../../api";
 import { PhotoGrid, PhotoPreview } from "../../components/photo";
 import { LoadingOverlay } from "../../components/status";
+import { VirtualList } from "../../components/virtual";
 import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, shouldClearSelection } from "../../lib/browserUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
 import { lineageForNode, taxonCrumbLabel, taxonLabel } from "../../lib/taxonUtils";
@@ -18,6 +19,7 @@ type CachedTaxonomyState = {
   query: string;
   mode: "name" | "binomial";
   selectedPhotoKey: string | null;
+  selectedView: "image" | "details";
   listScrollTop: number;
   gridScrollTop: number;
   splitRatio: number;
@@ -31,6 +33,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     query: "",
     mode: "name",
     selectedPhotoKey: null,
+    selectedView: "image",
     listScrollTop: 0,
     gridScrollTop: 0,
     splitRatio: 34
@@ -39,7 +42,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [selected, setSelected] = useState<Photo | null>(null);
   const [selectedPhotoKey, setSelectedPhotoKey] = useState<string | null>(cachedState.selectedPhotoKey ?? null);
-  const [selectedView, setSelectedView] = useState<"image" | "details">("image");
+  const [selectedView, setSelectedView] = useState<"image" | "details">(cachedState.selectedView ?? "image");
   const [query, setQuery] = useState(cachedState.query);
   const [mode, setMode] = useState<"name" | "binomial">(cachedState.mode);
   const [suggestions, setSuggestions] = useState<TaxonSuggestion[]>([]);
@@ -71,11 +74,12 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
       query,
       mode,
       selectedPhotoKey,
+      selectedView,
       listScrollTop,
       gridScrollTop,
       splitRatio
     });
-  }, [state, query, mode, selectedPhotoKey, listScrollTop, gridScrollTop, splitRatio]);
+  }, [state, query, mode, selectedPhotoKey, selectedView, listScrollTop, gridScrollTop, splitRatio]);
 
   useEffect(() => {
     if (!state) {
@@ -243,10 +247,14 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   }
 
   const selectedId = selected?.photo_id ?? null;
+  const browserItems = useMemo(() => [
+    ...(state?.node.children ?? []).map((taxon) => ({ type: "taxon" as const, taxon })),
+    ...photos.map((photo) => ({ type: "photo" as const, photo })),
+  ], [state, photos]);
 
   return (
-    <section className="split resizable-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(220px, ${splitRatio}%) 6px minmax(0, 1fr)` }}>
-      <div className="panel browser-panel loading-scope" onClick={(event) => shouldClearSelection(event) && setSelected(null)}>
+    <section className="split resizable-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(220px, ${splitRatio}%) 5px minmax(0, 1fr)` }}>
+      <div className="panel browser-panel loading-scope" onClick={(event) => shouldClearSelection(event) && selectPhoto(null)}>
         <div className="toolbar">
           <div className="segmented">
             <button className={mode === "name" ? "active" : ""} disabled={listingLoading} title="Chinese name" onClick={() => setMode("name")}>中</button>
@@ -289,19 +297,33 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
             </button>
           ))}
         </div>
-        <div className="browser-list" ref={listRef} onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}>
-          {state?.node.children.map((taxon) => (
-            <button className="row-button" disabled={listingLoading} key={taxon.taxon_id} onClick={() => openTaxon(taxon)}>
-              <GitBranch size={18} />
-              <span className="taxon-line">{taxonLabel(taxon)}</span>
-            </button>
-          ))}
-          {photos.map((photo) => (
-            <button className={photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} key={photo.photo_id} onClick={() => activatePhoto(photo)}>
-              <Image size={18} /> <span>{photo.filename}</span>
-            </button>
-          ))}
-        </div>
+        <VirtualList
+          className="browser-list"
+          itemCount={browserItems.length}
+          itemHeight={37}
+          scrollRef={listRef}
+          onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}
+          itemKey={(index) => {
+            const item = browserItems[index];
+            return item.type === "taxon" ? `taxon:${item.taxon.taxon_id}` : `photo:${item.photo.photo_id}`;
+          }}
+          renderItem={(index) => {
+            const item = browserItems[index];
+            if (item.type === "taxon") {
+              return (
+                <button className="row-button" disabled={listingLoading} onClick={() => openTaxon(item.taxon)}>
+                  <GitBranch size={18} />
+                  <span className="taxon-line">{taxonLabel(item.taxon)}</span>
+                </button>
+              );
+            }
+            return (
+              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo)}>
+                <Image size={18} /> <span>{item.photo.filename}</span>
+              </button>
+            );
+          }}
+        />
         <div className="browser-status">
           {(state?.node.children.length ?? 0)} taxa · {photos.length} photos
         </div>
