@@ -175,11 +175,14 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
     }
   }
 
-  const baseScale = imageSize.width > 0 && imageSize.height > 0 && containerSize.width > 0 && containerSize.height > 0
-    ? Math.max(containerSize.width / imageSize.width, containerSize.height / imageSize.height)
+  const baseScale = imageSize.width > 0 && containerSize.width > 0
+    ? containerSize.width / imageSize.width
     : 1;
   const renderedWidth = imageSize.width > 0 ? Math.ceil(imageSize.width * baseScale * zoom) : undefined;
   const renderedHeight = imageSize.height > 0 ? Math.ceil(imageSize.height * baseScale * zoom) : undefined;
+  const verticalMargin = renderedHeight && containerSize.height > renderedHeight
+    ? Math.floor((containerSize.height - renderedHeight) / 2)
+    : 0;
 
   return (
     <div className="preview">
@@ -198,7 +201,12 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
           alt={photo.filename}
           draggable={false}
           onLoad={handleImageLoad}
-          style={{ width: renderedWidth, height: renderedHeight }}
+          style={{
+            width: renderedWidth,
+            height: renderedHeight,
+            marginTop: verticalMargin,
+            marginBottom: verticalMargin,
+          }}
         />
       </div>
     </div>
