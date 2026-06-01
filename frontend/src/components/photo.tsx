@@ -11,9 +11,19 @@ type DetailRow = {
   label: string;
   values: string[];
 };
+type ScrollMetrics = {
+  scrollLeft: number;
+  scrollTop: number;
+  scrollWidth: number;
+  scrollHeight: number;
+  clientWidth: number;
+  clientHeight: number;
+  visible: boolean;
+};
 const PHOTO_GRID_PADDING = 10;
 const PHOTO_GRID_GAP = 8;
 const PHOTO_GRID_MIN_COLUMN_WIDTH = 180;
+const SCROLLBAR_HIDE_DELAY = 900;
 
 function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
   if (!ref) {
@@ -50,9 +60,20 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
     height: photo.height ?? 0,
   });
   const [dragging, setDragging] = useState(false);
+  const [scrollMetrics, setScrollMetrics] = useState<ScrollMetrics>({
+    scrollLeft: 0,
+    scrollTop: 0,
+    scrollWidth: 0,
+    scrollHeight: 0,
+    clientWidth: 0,
+    clientHeight: 0,
+    visible: false,
+  });
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
   const pendingScrollRef = useRef<{ xRatio: number; yRatio: number; localX: number; localY: number } | null>(null);
+  const scrollbarDragRef = useRef<{ pointerId: number; axis: "x" | "y"; start: number; scrollStart: number } | null>(null);
+  const hideScrollbarTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     setZoom(1);
@@ -60,7 +81,14 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
     setDragging(false);
     dragRef.current = null;
     pendingScrollRef.current = null;
+    scrollbarDragRef.current = null;
   }, [photo.photo_id]);
+
+  useEffect(() => () => {
+    if (hideScrollbarTimerRef.current !== null) {
+      window.clearTimeout(hideScrollbarTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -75,6 +103,7 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
         width: element.clientWidth,
         height: element.clientHeight,
       });
+      updateScrollMetrics(false);
     }
     updateSize();
     const observer = new ResizeObserver(updateSize);
@@ -90,6 +119,7 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
     window.requestAnimationFrame(() => {
       element.scrollLeft = (element.scrollWidth - element.clientWidth) / 2;
       element.scrollTop = (element.scrollHeight - element.clientHeight) / 2;
+      updateScrollMetrics(false);
     });
   }, [photo.photo_id, containerSize, imageSize]);
 
@@ -103,8 +133,33 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
     window.requestAnimationFrame(() => {
       element.scrollLeft = pending.xRatio * element.scrollWidth - pending.localX;
       element.scrollTop = pending.yRatio * element.scrollHeight - pending.localY;
+      updateScrollMetrics(true);
     });
   }, [zoom]);
+
+  function updateScrollMetrics(visible = true) {
+    const element = containerRef.current;
+    if (!element) {
+      return;
+    }
+    setScrollMetrics({
+      scrollLeft: element.scrollLeft,
+      scrollTop: element.scrollTop,
+      scrollWidth: element.scrollWidth,
+      scrollHeight: element.scrollHeight,
+      clientWidth: element.clientWidth,
+      clientHeight: element.clientHeight,
+      visible,
+    });
+    if (hideScrollbarTimerRef.current !== null) {
+      window.clearTimeout(hideScrollbarTimerRef.current);
+    }
+    if (visible) {
+      hideScrollbarTimerRef.current = window.setTimeout(() => {
+        setScrollMetrics((current) => ({ ...current, visible: false }));
+      }, SCROLLBAR_HIDE_DELAY);
+    }
+  }
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -115,6 +170,7 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
   function handleImageLoad(event: SyntheticEvent<HTMLImageElement>) {
     const image = event.currentTarget;
     setImageSize({ width: image.naturalWidth, height: image.naturalHeight });
+    window.requestAnimationFrame(() => updateScrollMetrics(false));
   }
 
   function toggleDefaultZoom(event: MouseEvent<HTMLDivElement>) {
@@ -144,7 +200,7 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     const element = containerRef.current;
-    if (!element || zoom <= 1) {
+    if (!element || zoom <= 1 || scrollbarDragRef.current) {
       return;
     }
     element.setPointerCapture(event.pointerId);
@@ -160,19 +216,67 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
 
   function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
     const element = containerRef.current;
+    const scrollbarDrag = scrollbarDragRef.current;
+    if (element && scrollbarDrag && scrollbarDrag.pointerId === event.pointerId) {
+      const metrics = scrollMetrics;
+      if (scrollbarDrag.axis === "y") {
+        const track = scrollbarTrack(metrics.clientHeight);
+        const maxScroll = metrics.scrollHeight - metrics.clientHeight;
+        const maxThumbTravel = track.size - yThumb.height;
+        if (maxScroll > 0 && maxThumbTravel > 0) {
+          element.scrollTop = scrollbarDrag.scrollStart + ((event.clientY - scrollbarDrag.start) / maxThumbTravel) * maxScroll;
+        }
+      } else {
+        const track = scrollbarTrack(metrics.clientWidth);
+        const maxScroll = metrics.scrollWidth - metrics.clientWidth;
+        const maxThumbTravel = track.size - xThumb.width;
+        if (maxScroll > 0 && maxThumbTravel > 0) {
+          element.scrollLeft = scrollbarDrag.scrollStart + ((event.clientX - scrollbarDrag.start) / maxThumbTravel) * maxScroll;
+        }
+      }
+      updateScrollMetrics(true);
+      return;
+    }
     const drag = dragRef.current;
     if (!element || !drag || drag.pointerId !== event.pointerId) {
       return;
     }
     element.scrollLeft = drag.scrollLeft - (event.clientX - drag.x);
     element.scrollTop = drag.scrollTop - (event.clientY - drag.y);
+    updateScrollMetrics(true);
   }
 
   function endDrag(event: PointerEvent<HTMLDivElement>) {
+    if (scrollbarDragRef.current?.pointerId === event.pointerId) {
+      scrollbarDragRef.current = null;
+      setDragging(false);
+    }
     if (dragRef.current?.pointerId === event.pointerId) {
       dragRef.current = null;
       setDragging(false);
     }
+  }
+
+  function handleScroll() {
+    updateScrollMetrics(true);
+  }
+
+  function beginScrollbarDrag(axis: "x" | "y", event: PointerEvent<HTMLDivElement>) {
+    const element = containerRef.current;
+    if (!element) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    element.setPointerCapture(event.pointerId);
+    scrollbarDragRef.current = {
+      pointerId: event.pointerId,
+      axis,
+      start: axis === "y" ? event.clientY : event.clientX,
+      scrollStart: axis === "y" ? element.scrollTop : element.scrollLeft,
+    };
+    setDragging(true);
+    updateScrollMetrics(true);
   }
 
   const baseScale = imageSize.width > 0 && containerSize.width > 0
@@ -183,34 +287,76 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
   const verticalMargin = renderedHeight && containerSize.height > renderedHeight
     ? Math.floor((containerSize.height - renderedHeight) / 2)
     : 0;
+  const canScrollY = scrollMetrics.scrollHeight > scrollMetrics.clientHeight + 1;
+  const canScrollX = scrollMetrics.scrollWidth > scrollMetrics.clientWidth + 1;
+  const yThumb = scrollbarThumb(scrollMetrics.scrollTop, scrollMetrics.clientHeight, scrollMetrics.scrollHeight);
+  const xThumb = scrollbarThumb(scrollMetrics.scrollLeft, scrollMetrics.clientWidth, scrollMetrics.scrollWidth);
 
   return (
     <div className="preview">
-      <div
-        ref={containerRef}
-        className={`preview-image ${zoom > 1 ? "zoomed" : ""} ${dragging ? "dragging" : ""}`}
-        onWheel={handleWheel}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
-        onDoubleClick={toggleDefaultZoom}
-      >
-        <img
-          src={photoFileUrl(photo)}
-          alt={photo.filename}
-          draggable={false}
-          onLoad={handleImageLoad}
-          style={{
-            width: renderedWidth,
-            height: renderedHeight,
-            marginTop: verticalMargin,
-            marginBottom: verticalMargin,
-          }}
-        />
+      <div className="preview-image-frame">
+        <div
+          ref={containerRef}
+          className={`preview-image ${zoom > 1 ? "zoomed" : ""} ${dragging ? "dragging" : ""}`}
+          onWheel={handleWheel}
+          onScroll={handleScroll}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          onDoubleClick={toggleDefaultZoom}
+        >
+          <img
+            src={photoFileUrl(photo)}
+            alt={photo.filename}
+            draggable={false}
+            onLoad={handleImageLoad}
+            style={{
+              width: renderedWidth,
+              height: renderedHeight,
+              marginTop: verticalMargin,
+              marginBottom: verticalMargin,
+            }}
+          />
+        </div>
+        {canScrollY && (
+          <div className={`preview-scrollbar vertical ${scrollMetrics.visible ? "visible" : ""}`}>
+            <div
+              className="preview-scrollbar-thumb"
+              style={{ height: yThumb.height, transform: `translateY(${yThumb.offset}px)` }}
+              onPointerDown={(event) => beginScrollbarDrag("y", event)}
+            />
+          </div>
+        )}
+        {canScrollX && (
+          <div className={`preview-scrollbar horizontal ${scrollMetrics.visible ? "visible" : ""}`}>
+            <div
+              className="preview-scrollbar-thumb"
+              style={{ width: xThumb.width, transform: `translateX(${xThumb.offset}px)` }}
+              onPointerDown={(event) => beginScrollbarDrag("x", event)}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function scrollbarTrack(clientSize: number) {
+  const inset = 6;
+  return { inset, size: Math.max(clientSize - inset * 2, 0) };
+}
+
+function scrollbarThumb(scrollOffset: number, clientSize: number, scrollSize: number) {
+  const track = scrollbarTrack(clientSize);
+  if (clientSize <= 0 || scrollSize <= clientSize || track.size <= 0) {
+    return { offset: 0, width: 0, height: 0 };
+  }
+  const thumbSize = Math.max(28, Math.round((clientSize / scrollSize) * track.size));
+  const maxThumbTravel = Math.max(track.size - thumbSize, 0);
+  const maxScroll = Math.max(scrollSize - clientSize, 1);
+  const offset = track.inset + Math.round((scrollOffset / maxScroll) * maxThumbTravel);
+  return { offset, width: thumbSize, height: thumbSize };
 }
 
 function PhotoDetails({ photo }: { photo: Photo }) {

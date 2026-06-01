@@ -6,11 +6,23 @@
   overflow: hidden;
 }
 
+.preview-image-frame {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .preview-image {
+  height: 100%;
   min-height: 0;
   overflow: auto;
   background: #ffffff;
   cursor: zoom-in;
+  scrollbar-width: none;
+}
+
+.preview-image::-webkit-scrollbar {
+  display: none;
 }
 
 .preview-image.zoomed {
@@ -30,6 +42,46 @@
   min-height: 0;
   background: #ffffff;
   user-select: none;
+}
+
+.preview-scrollbar {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.preview-scrollbar.visible {
+  opacity: 1;
+}
+
+.preview-scrollbar.vertical {
+  top: 6px;
+  right: 5px;
+  bottom: 6px;
+  width: var(--overlay-scrollbar-size);
+}
+
+.preview-scrollbar.horizontal {
+  right: 6px;
+  bottom: 5px;
+  left: 6px;
+  height: var(--overlay-scrollbar-size);
+}
+
+.preview-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--overlay-scrollbar-thumb);
+  pointer-events: auto;
+}
+
+.preview-scrollbar.vertical .preview-scrollbar-thumb {
+  width: 100%;
+}
+
+.preview-scrollbar.horizontal .preview-scrollbar-thumb {
+  height: 100%;
 }
 
 .preview.empty {

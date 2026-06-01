@@ -1,5 +1,8 @@
 .browser-panel {
   position: relative;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 0;
 }
 
 .segmented {
@@ -115,8 +118,9 @@
 }
 
 .browser-list {
+  min-height: 0;
   overflow: auto;
-  max-height: calc(100vh - 168px);
+  max-height: none;
 }
 
 .virtual-list-spacer {

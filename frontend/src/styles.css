@@ -1,4 +1,5 @@
 @import "./styles/base/reset.css";
+@import "./styles/base/scrollbar.css";
 @import "./styles/layout/app.css";
 @import "./styles/components/panel.css";
 @import "./styles/components/toolbar.css";

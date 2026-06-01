@@ -1,11 +1,14 @@
 .shell {
   display: flex;
-  min-height: 100vh;
+  height: 100%;
+  min-height: 0;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .app-header {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px;
   min-height: 42px;
@@ -72,8 +75,10 @@ nav button:hover {
 }
 
 .workspace {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   padding: 4px 6px 6px;
 }
 
@@ -98,8 +103,8 @@ h2 {
   display: grid;
   grid-template-columns: minmax(380px, 500px) 1fr;
   gap: 8px;
-  height: calc(100vh - 50px);
-  min-height: 480px;
+  height: 100%;
+  min-height: 0;
 }
 
 .resizable-split {
