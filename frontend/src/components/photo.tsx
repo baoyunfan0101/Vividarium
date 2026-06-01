@@ -305,6 +305,7 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
           onDoubleClick={toggleDefaultZoom}
         >
           <img
+            key={photo.photo_id}
             src={photoFileUrl(photo)}
             alt={photo.filename}
             draggable={false}

@@ -4,7 +4,7 @@ import { browsePhotos, getRoots, searchMappingByBinomial, type DirectoryListing,
 import { PhotoGrid, PhotoPreview, scrollPhotoGridToIndex } from "../../components/photo";
 import { LoadingOverlay } from "../../components/status";
 import { VirtualList } from "../../components/virtual";
-import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, shouldClearSelection } from "../../lib/browserUtils";
+import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, scrollListItemIntoView, shouldClearSelection } from "../../lib/browserUtils";
 import { breadcrumb, joinPath } from "../../lib/pathUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
 import { useResizableSplit } from "../../lib/useResizableSplit";
@@ -196,7 +196,7 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
     }
     if (reveal.list) {
       const listIndex = (listing?.directories.length ?? 0) + fileIndex;
-      const nextScrollTop = scrollListToIndex(listRef.current, listIndex);
+      const nextScrollTop = scrollListItemIntoView(listRef.current, listIndex, LIST_ITEM_HEIGHT);
       if (nextScrollTop !== null) {
         setListScrollTop(nextScrollTop);
       }
@@ -280,19 +280,6 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
       )}
     </section>
   );
-}
-
-function scrollListToIndex(element: HTMLDivElement | null, index: number): number | null {
-  if (!element || index < 0) {
-    return null;
-  }
-  const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
-  const nextScrollTop = Math.min(
-    maxScrollTop,
-    Math.max(0, index * LIST_ITEM_HEIGHT - Math.max(0, element.clientHeight - LIST_ITEM_HEIGHT) / 2),
-  );
-  element.scrollTop = nextScrollTop;
-  return nextScrollTop;
 }
 
 function photoKey(photo: Photo): string {

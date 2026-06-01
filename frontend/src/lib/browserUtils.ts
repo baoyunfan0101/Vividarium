@@ -48,3 +48,29 @@ export function blurActiveElement() {
     document.activeElement.blur();
   }
 }
+
+export function scrollListItemIntoView(
+  element: HTMLDivElement | null,
+  index: number,
+  itemHeight: number,
+): number | null {
+  if (!element || index < 0) {
+    return null;
+  }
+  const itemTop = index * itemHeight;
+  const itemBottom = itemTop + itemHeight;
+  const viewportTop = element.scrollTop;
+  const viewportBottom = viewportTop + element.clientHeight;
+  let nextScrollTop = viewportTop;
+  if (itemTop < viewportTop) {
+    nextScrollTop = itemTop;
+  } else if (itemBottom > viewportBottom) {
+    nextScrollTop = itemBottom - element.clientHeight;
+  }
+  nextScrollTop = Math.max(0, Math.min(nextScrollTop, element.scrollHeight - element.clientHeight));
+  if (nextScrollTop === viewportTop) {
+    return null;
+  }
+  element.scrollTop = nextScrollTop;
+  return nextScrollTop;
+}

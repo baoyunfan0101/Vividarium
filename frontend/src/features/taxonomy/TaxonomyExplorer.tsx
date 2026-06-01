@@ -4,7 +4,7 @@ import { getMappingRoot, getMappingTaxon, getPhoto, searchMappingByBinomial, sea
 import { PhotoGrid, PhotoPreview, scrollPhotoGridToIndex } from "../../components/photo";
 import { LoadingOverlay } from "../../components/status";
 import { VirtualList } from "../../components/virtual";
-import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, shouldClearSelection } from "../../lib/browserUtils";
+import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, scrollListItemIntoView, shouldClearSelection } from "../../lib/browserUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
 import { lineageForNode, taxonCrumbLabel, taxonLabel } from "../../lib/taxonUtils";
 import { useResizableSplit } from "../../lib/useResizableSplit";
@@ -17,7 +17,6 @@ type TaxonomyState = {
 type CachedTaxonomyState = {
   state: TaxonomyState | null;
   query: string;
-  mode: "name" | "binomial";
   selectedPhotoKey: string | null;
   selectedView: "image" | "details";
   listScrollTop: number;
@@ -32,7 +31,6 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   const cachedState = readStorage<CachedTaxonomyState>(TAXONOMY_STATE_KEY, {
     state: null,
     query: "",
-    mode: "name",
     selectedPhotoKey: null,
     selectedView: "image",
     listScrollTop: 0,
@@ -45,7 +43,6 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   const [selectedPhotoKey, setSelectedPhotoKey] = useState<string | null>(cachedState.selectedPhotoKey ?? null);
   const [selectedView, setSelectedView] = useState<"image" | "details">(cachedState.selectedView ?? "image");
   const [query, setQuery] = useState(cachedState.query);
-  const [mode, setMode] = useState<"name" | "binomial">(cachedState.mode);
   const [suggestions, setSuggestions] = useState<TaxonSuggestion[]>([]);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
@@ -76,14 +73,13 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     writeStorage(TAXONOMY_STATE_KEY, {
       state,
       query,
-      mode,
       selectedPhotoKey,
       selectedView,
       listScrollTop,
       gridScrollTop,
       splitRatio
     });
-  }, [state, query, mode, selectedPhotoKey, selectedView, listScrollTop, gridScrollTop, splitRatio]);
+  }, [state, query, selectedPhotoKey, selectedView, listScrollTop, gridScrollTop, splitRatio]);
 
   useEffect(() => {
     if (!state) {
@@ -135,7 +131,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
       return;
     }
     const timer = window.setTimeout(() => {
-      suggestMappingTaxa(trimmed, mode)
+      suggestTaxaAcrossNames(trimmed)
         .then((items) => {
           setSuggestions(items);
           setSuggestionsOpen(items.length > 0);
@@ -148,7 +144,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
         });
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [query, mode, searchFocused]);
+  }, [query, searchFocused]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -190,9 +186,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     setActiveSuggestionIndex(-1);
     setListingLoading(true);
     try {
-      const node = mode === "name"
-        ? await searchMappingByName(trimmed)
-        : await searchMappingByBinomial(trimmed);
+      const node = await searchTaxaAcrossNames(trimmed);
       const trail = await lineageForNode(node);
       pushTaxonomyState({ node, trail });
     } catch (error) {
@@ -203,7 +197,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   }
 
   async function applySuggestion(suggestion: TaxonSuggestion) {
-    const value = mode === "name" ? suggestion.name : suggestion.binomial_name ?? suggestion.name;
+    const value = suggestion.name || suggestion.binomial_name || "";
     suppressSuggestionRef.current = true;
     setQuery(value);
     setSuggestionsOpen(false);
@@ -254,7 +248,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     }
     if (reveal.list) {
       const listIndex = (state?.node.children.length ?? 0) + photoIndex;
-      const nextScrollTop = scrollListToIndex(listRef.current, listIndex);
+      const nextScrollTop = scrollListItemIntoView(listRef.current, listIndex, LIST_ITEM_HEIGHT);
       if (nextScrollTop !== null) {
         setListScrollTop(nextScrollTop);
       }
@@ -297,15 +291,11 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     <section className="split resizable-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(220px, ${splitRatio}%) 5px minmax(0, 1fr)` }}>
       <div className="panel browser-panel loading-scope" onClick={(event) => shouldClearSelection(event) && selectPhoto(null)}>
         <div className="toolbar">
-          <div className="segmented">
-            <button className={mode === "name" ? "active" : ""} disabled={listingLoading} title="Chinese name" onClick={() => setMode("name")}>中</button>
-            <button className={mode === "binomial" ? "active" : ""} disabled={listingLoading} title="Binomial name" onClick={() => setMode("binomial")}>Bi</button>
-          </div>
           <div className="autocomplete">
             <input
               value={query}
               disabled={listingLoading}
-              placeholder="Search taxa"
+              placeholder="Search Chinese or binomial name"
               onChange={(event) => setQuery(event.target.value)}
               onFocus={() => {
                 setSearchFocused(true);
@@ -349,8 +339,8 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => applySuggestion(suggestion)}
                   >
-                    <span>{mode === "name" ? suggestion.name : suggestion.binomial_name}</span>
-                    <small>{mode === "name" ? suggestion.binomial_name : suggestion.name}</small>
+                    <span>{suggestion.name}</span>
+                    <small>{suggestion.binomial_name}</small>
                   </button>
                 ))}
               </div>
@@ -408,17 +398,31 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   );
 }
 
-function scrollListToIndex(element: HTMLDivElement | null, index: number): number | null {
-  if (!element || index < 0) {
-    return null;
+async function suggestTaxaAcrossNames(query: string): Promise<TaxonSuggestion[]> {
+  const [byName, byBinomial] = await Promise.all([
+    suggestMappingTaxa(query, "name"),
+    suggestMappingTaxa(query, "binomial"),
+  ]);
+  const seen = new Set<number>();
+  return [...byName, ...byBinomial].filter((taxon) => {
+    if (seen.has(taxon.taxon_id)) {
+      return false;
+    }
+    seen.add(taxon.taxon_id);
+    return true;
+  });
+}
+
+async function searchTaxaAcrossNames(query: string): Promise<MappingNode> {
+  const byName = await searchMappingByName(query);
+  if (mappingNodeHasContent(byName)) {
+    return byName;
   }
-  const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
-  const nextScrollTop = Math.min(
-    maxScrollTop,
-    Math.max(0, index * LIST_ITEM_HEIGHT - Math.max(0, element.clientHeight - LIST_ITEM_HEIGHT) / 2),
-  );
-  element.scrollTop = nextScrollTop;
-  return nextScrollTop;
+  return searchMappingByBinomial(query);
+}
+
+function mappingNodeHasContent(node: MappingNode): boolean {
+  return Boolean(node.taxon || node.photo_ids.length || node.children.length);
 }
 
 function photoKey(photo: Photo): string {
