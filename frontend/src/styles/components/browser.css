@@ -3,6 +3,8 @@
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
+  padding-right: 4px;
+  padding-left: 6px;
 }
 
 .segmented {
@@ -162,20 +164,20 @@
 
 .row-button {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
-  gap: var(--control-gap);
+  gap: 4px;
   min-height: var(--control-size);
   border: 1px solid transparent;
   border-radius: 4px;
-  padding: 5px 6px;
+  padding: 5px 4px 5px 3px;
   background: #f7f9f8;
   color: #17211f;
   text-align: left;
 }
 
 .row-button.file-row {
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 18px minmax(0, 1fr);
 }
 
 .row-button:focus {

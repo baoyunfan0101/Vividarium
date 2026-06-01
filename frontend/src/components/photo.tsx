@@ -200,7 +200,7 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     const element = containerRef.current;
-    if (!element || zoom <= 1 || scrollbarDragRef.current) {
+    if (!element || !hasScrollableOverflow(element) || scrollbarDragRef.current) {
       return;
     }
     element.setPointerCapture(event.pointerId);
@@ -279,16 +279,14 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
     updateScrollMetrics(true);
   }
 
-  const baseScale = imageSize.width > 0 && containerSize.width > 0
-    ? containerSize.width / imageSize.width
-    : 1;
+  const baseScale = fitScale(imageSize, containerSize);
   const renderedWidth = imageSize.width > 0 ? Math.ceil(imageSize.width * baseScale * zoom) : undefined;
   const renderedHeight = imageSize.height > 0 ? Math.ceil(imageSize.height * baseScale * zoom) : undefined;
-  const verticalMargin = renderedHeight && containerSize.height > renderedHeight
-    ? Math.floor((containerSize.height - renderedHeight) / 2)
-    : 0;
+  const horizontalMargin = centerMargin(containerSize.width, renderedWidth);
+  const verticalMargin = centerMargin(containerSize.height, renderedHeight);
   const canScrollY = scrollMetrics.scrollHeight > scrollMetrics.clientHeight + 1;
   const canScrollX = scrollMetrics.scrollWidth > scrollMetrics.clientWidth + 1;
+  const canPan = canScrollX || canScrollY;
   const yThumb = scrollbarThumb(scrollMetrics.scrollTop, scrollMetrics.clientHeight, scrollMetrics.scrollHeight);
   const xThumb = scrollbarThumb(scrollMetrics.scrollLeft, scrollMetrics.clientWidth, scrollMetrics.scrollWidth);
 
@@ -297,7 +295,7 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
       <div className="preview-image-frame">
         <div
           ref={containerRef}
-          className={`preview-image ${zoom > 1 ? "zoomed" : ""} ${dragging ? "dragging" : ""}`}
+          className={`preview-image ${canPan ? "pannable" : ""} ${dragging ? "dragging" : ""}`}
           onWheel={handleWheel}
           onScroll={handleScroll}
           onPointerDown={handlePointerDown}
@@ -314,6 +312,8 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
             style={{
               width: renderedWidth,
               height: renderedHeight,
+              marginLeft: horizontalMargin,
+              marginRight: horizontalMargin,
               marginTop: verticalMargin,
               marginBottom: verticalMargin,
             }}
@@ -345,6 +345,35 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
 function scrollbarTrack(clientSize: number) {
   const inset = 6;
   return { inset, size: Math.max(clientSize - inset * 2, 0) };
+}
+
+function fitScale(
+  imageSize: { width: number; height: number },
+  containerSize: { width: number; height: number },
+): number {
+  if (
+    imageSize.width <= 0
+    || imageSize.height <= 0
+    || containerSize.width <= 0
+    || containerSize.height <= 0
+  ) {
+    return 1;
+  }
+  return Math.min(containerSize.width / imageSize.width, containerSize.height / imageSize.height);
+}
+
+function centerMargin(containerSize: number, renderedSize: number | undefined): number {
+  if (!renderedSize || containerSize <= renderedSize) {
+    return 0;
+  }
+  return Math.floor((containerSize - renderedSize) / 2);
+}
+
+function hasScrollableOverflow(element: HTMLElement): boolean {
+  return (
+    element.scrollWidth > element.clientWidth + 1
+    || element.scrollHeight > element.clientHeight + 1
+  );
 }
 
 function scrollbarThumb(scrollOffset: number, clientSize: number, scrollSize: number) {
