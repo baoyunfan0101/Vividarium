@@ -1,8 +1,10 @@
 .browser-panel {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
+  padding-top: 4px;
+  padding-bottom: 2px;
   padding-right: 4px;
   padding-left: 6px;
 }
@@ -106,7 +108,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 1px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .crumbs button {
@@ -150,15 +152,12 @@
 }
 
 .browser-status {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  left: 10px;
   border-top: 1px solid #e0e7e4;
-  padding: 5px 0 0;
-  background: rgba(255, 255, 255, 0.92);
+  padding: 2px 0 0;
+  background: #ffffff;
   color: #6a7773;
   font-size: 12px;
+  line-height: 1.1;
   pointer-events: none;
 }
 
@@ -186,6 +185,11 @@
 
 .row-button:hover {
   border-color: #a7c3b8;
+  background: #eef7f3;
+}
+
+.row-button.type-selected {
+  border-color: #8bb8a8;
   background: #eef7f3;
 }
 

@@ -4,7 +4,7 @@ import { getMappingRoot, getMappingTaxon, getPhoto, searchMappingByBinomial, sea
 import { PhotoGrid, PhotoPreview, scrollPhotoGridToIndex } from "../../components/photo";
 import { LoadingOverlay } from "../../components/status";
 import { VirtualList } from "../../components/virtual";
-import { blurActiveElement, isFormElement, isSelectionKey, nextPhotoSelection, scrollListItemIntoView, shouldClearSelection } from "../../lib/browserUtils";
+import { blurActiveElement, findTypeSelectIndex, isFormElement, isSelectionKey, isTypeSelectKey, nextPhotoSelection, nextTypeSelect, scrollListItemIntoView, shouldClearSelection, type TypeSelectState } from "../../lib/browserUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
 import { lineageForNode, taxonCrumbLabel, taxonLabel } from "../../lib/taxonUtils";
 import { useResizableSplit } from "../../lib/useResizableSplit";
@@ -23,6 +23,10 @@ type CachedTaxonomyState = {
   gridScrollTop: number;
   splitRatio: number;
 };
+
+type TaxonomyBrowserItem =
+  | { type: "taxon"; taxon: Taxon }
+  | { type: "photo"; photo: Photo };
 
 const TAXONOMY_STATE_KEY = "phytoindex.taxonomy.explorer";
 const LIST_ITEM_HEIGHT = 37;
@@ -50,10 +54,16 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   const [listScrollTop, setListScrollTop] = useState(cachedState.listScrollTop);
   const [gridScrollTop, setGridScrollTop] = useState(cachedState.gridScrollTop);
   const [listingLoading, setListingLoading] = useState(false);
+  const [activeBrowserKey, setActiveBrowserKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const suppressSuggestionRef = useRef(false);
+  const typeSelectRef = useRef<TypeSelectState>({ query: "", updatedAt: 0 });
   const { beginResize, splitRatio, splitRef } = useResizableSplit(cachedState.splitRatio ?? 34);
+  const browserItems = useMemo(() => [
+    ...(state?.node.children ?? []).map((taxon) => ({ type: "taxon" as const, taxon })),
+    ...photos.map((photo) => ({ type: "photo" as const, photo })),
+  ], [state, photos]);
 
   useEffect(() => {
     if (state) {
@@ -150,10 +160,20 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         selectPhoto(null);
+        setActiveBrowserKey(null);
         blurActiveElement();
         return;
       }
-      if (!isSelectionKey(event) || isFormElement(event.target)) {
+      if (isFormElement(event.target)) {
+        return;
+      }
+      if (isTypeSelectKey(event)) {
+        event.preventDefault();
+        blurActiveElement();
+        typeSelectBrowserItem(event.key);
+        return;
+      }
+      if (!isSelectionKey(event)) {
         return;
       }
       event.preventDefault();
@@ -164,7 +184,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [photos, selected]);
+  }, [browserItems, photos, selected, activeBrowserKey]);
 
   function openTaxon(taxon: Taxon, fromTrail?: Taxon[]) {
     setListingLoading(true);
@@ -216,6 +236,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
 
   function pushTaxonomyState(nextState: TaxonomyState) {
     selectPhoto(null);
+    setActiveBrowserKey(null);
     setListScrollTop(0);
     setGridScrollTop(0);
     setState(nextState);
@@ -224,6 +245,7 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   function selectPhoto(photo: Photo | null, reveal: { list?: boolean; grid?: boolean } = {}) {
     setSelected(photo);
     setSelectedPhotoKey(photo ? photoKey(photo) : null);
+    setActiveBrowserKey(photo ? taxonomyBrowserItemKey({ type: "photo", photo }) : null);
     setSelectedView("image");
     if (photo) {
       revealPhoto(photo, reveal);
@@ -239,6 +261,33 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
       list: source === "grid",
       grid: source === "list",
     });
+  }
+
+  function typeSelectBrowserItem(key: string) {
+    const typeSelect = nextTypeSelect(typeSelectRef.current, key);
+    typeSelectRef.current = typeSelect.state;
+    const currentIndex = activeBrowserKey
+      ? browserItems.findIndex((item) => taxonomyBrowserItemKey(item) === activeBrowserKey)
+      : -1;
+    const startIndex = typeSelect.shouldCycle && currentIndex >= 0 ? currentIndex + 1 : 0;
+    const matchIndex = findTypeSelectIndex(
+      browserItems,
+      typeSelect.query,
+      taxonomyBrowserItemLabels,
+      startIndex,
+    );
+    if (matchIndex < 0) {
+      return;
+    }
+    const item = browserItems[matchIndex];
+    setActiveBrowserKey(taxonomyBrowserItemKey(item));
+    const nextScrollTop = scrollListItemIntoView(listRef.current, matchIndex, LIST_ITEM_HEIGHT);
+    if (nextScrollTop !== null) {
+      setListScrollTop(nextScrollTop);
+    }
+    if (item.type === "photo") {
+      selectPhoto(item.photo);
+    }
   }
 
   function revealPhoto(photo: Photo, reveal: { list?: boolean; grid?: boolean }) {
@@ -282,10 +331,6 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
   }
 
   const selectedId = selected?.photo_id ?? null;
-  const browserItems = useMemo(() => [
-    ...(state?.node.children ?? []).map((taxon) => ({ type: "taxon" as const, taxon })),
-    ...photos.map((photo) => ({ type: "photo" as const, photo })),
-  ], [state, photos]);
 
   return (
     <section className="split resizable-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(220px, ${splitRatio}%) 5px minmax(0, 1fr)` }}>
@@ -370,14 +415,15 @@ export function TaxonomyExplorer({ setMessage }: { setMessage: (message: string)
             const item = browserItems[index];
             if (item.type === "taxon") {
               return (
-                <button className="row-button" disabled={listingLoading} onClick={() => openTaxon(item.taxon)}>
+                <button className={activeBrowserKey === taxonomyBrowserItemKey(item) ? "row-button type-selected" : "row-button"} disabled={listingLoading} onClick={() => openTaxon(item.taxon)}>
                   <GitBranch size={18} />
                   <span className="taxon-line">{taxonLabel(item.taxon)}</span>
                 </button>
               );
             }
+            const itemKey = taxonomyBrowserItemKey(item);
             return (
-              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo, "list")}>
+              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : activeBrowserKey === itemKey ? "row-button file-row type-selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo, "list")}>
                 <Image size={18} /> <span>{item.photo.filename}</span>
               </button>
             );
@@ -427,4 +473,15 @@ function mappingNodeHasContent(node: MappingNode): boolean {
 
 function photoKey(photo: Photo): string {
   return `${photo.root}\n${photo.relative_path}`;
+}
+
+function taxonomyBrowserItemKey(item: TaxonomyBrowserItem): string {
+  return item.type === "taxon" ? `taxon:${item.taxon.taxon_id}` : `photo:${item.photo.photo_id}`;
+}
+
+function taxonomyBrowserItemLabels(item: TaxonomyBrowserItem): string[] {
+  if (item.type === "photo") {
+    return [item.photo.filename];
+  }
+  return [item.taxon.name, item.taxon.binomial_name ?? "", taxonLabel(item.taxon)];
 }

@@ -2,16 +2,17 @@
   display: flex;
   gap: var(--control-gap);
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 .toolbar input,
 .toolbar select {
   width: 100%;
   min-width: 0;
+  height: var(--control-size);
   border: 1px solid #c8d2ce;
   border-radius: var(--control-radius);
-  padding: var(--field-padding-y) var(--field-padding-x);
+  padding: 0 var(--field-padding-x);
   background: #fbfcfb;
   color: #17211f;
 }
