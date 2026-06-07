@@ -11,19 +11,9 @@ type DetailRow = {
   label: string;
   values: string[];
 };
-type ScrollMetrics = {
-  scrollLeft: number;
-  scrollTop: number;
-  scrollWidth: number;
-  scrollHeight: number;
-  clientWidth: number;
-  clientHeight: number;
-  visible: boolean;
-};
 const PHOTO_GRID_PADDING = 10;
 const PHOTO_GRID_GAP = 8;
 const PHOTO_GRID_MIN_COLUMN_WIDTH = 180;
-const SCROLLBAR_HIDE_DELAY = 900;
 
 function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
   if (!ref) {
@@ -59,36 +49,32 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
     width: photo.width ?? 0,
     height: photo.height ?? 0,
   });
+  const [imageLoaded, setImageLoaded] = useState(false);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
-  const [scrollMetrics, setScrollMetrics] = useState<ScrollMetrics>({
-    scrollLeft: 0,
-    scrollTop: 0,
-    scrollWidth: 0,
-    scrollHeight: 0,
-    clientWidth: 0,
-    clientHeight: 0,
-    visible: false,
-  });
   const containerRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
-  const pendingScrollRef = useRef<{ xRatio: number; yRatio: number; localX: number; localY: number } | null>(null);
-  const scrollbarDragRef = useRef<{ pointerId: number; axis: "x" | "y"; start: number; scrollStart: number } | null>(null);
-  const hideScrollbarTimerRef = useRef<number | null>(null);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
+  const viewRef = useRef({
+    zoom: 1,
+    pan: { x: 0, y: 0 },
+    baseDisplaySize: { width: 0, height: 0 },
+    containerSize: { width: 0, height: 0 },
+  });
 
   useEffect(() => {
     setZoom(1);
     setImageSize({ width: photo.width ?? 0, height: photo.height ?? 0 });
+    setImageLoaded(false);
+    setPan({ x: 0, y: 0 });
     setDragging(false);
     dragRef.current = null;
-    pendingScrollRef.current = null;
-    scrollbarDragRef.current = null;
+    viewRef.current = {
+      zoom: 1,
+      pan: { x: 0, y: 0 },
+      baseDisplaySize: { width: 0, height: 0 },
+      containerSize: { width: 0, height: 0 },
+    };
   }, [photo.photo_id]);
-
-  useEffect(() => () => {
-    if (hideScrollbarTimerRef.current !== null) {
-      window.clearTimeout(hideScrollbarTimerRef.current);
-    }
-  }, []);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -103,7 +89,6 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
         width: element.clientWidth,
         height: element.clientHeight,
       });
-      updateScrollMetrics(false);
     }
     updateSize();
     const observer = new ResizeObserver(updateSize);
@@ -111,66 +96,17 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    const element = containerRef.current;
-    if (!element) {
-      return;
-    }
-    window.requestAnimationFrame(() => {
-      element.scrollLeft = (element.scrollWidth - element.clientWidth) / 2;
-      element.scrollTop = (element.scrollHeight - element.clientHeight) / 2;
-      updateScrollMetrics(false);
-    });
-  }, [photo.photo_id, containerSize, imageSize]);
-
-  useEffect(() => {
-    const element = containerRef.current;
-    const pending = pendingScrollRef.current;
-    if (!element || !pending) {
-      return;
-    }
-    pendingScrollRef.current = null;
-    window.requestAnimationFrame(() => {
-      element.scrollLeft = pending.xRatio * element.scrollWidth - pending.localX;
-      element.scrollTop = pending.yRatio * element.scrollHeight - pending.localY;
-      updateScrollMetrics(true);
-    });
-  }, [zoom]);
-
-  function updateScrollMetrics(visible = true) {
-    const element = containerRef.current;
-    if (!element) {
-      return;
-    }
-    setScrollMetrics({
-      scrollLeft: element.scrollLeft,
-      scrollTop: element.scrollTop,
-      scrollWidth: element.scrollWidth,
-      scrollHeight: element.scrollHeight,
-      clientWidth: element.clientWidth,
-      clientHeight: element.clientHeight,
-      visible,
-    });
-    if (hideScrollbarTimerRef.current !== null) {
-      window.clearTimeout(hideScrollbarTimerRef.current);
-    }
-    if (visible) {
-      hideScrollbarTimerRef.current = window.setTimeout(() => {
-        setScrollMetrics((current) => ({ ...current, visible: false }));
-      }, SCROLLBAR_HIDE_DELAY);
-    }
-  }
-
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
+    event.stopPropagation();
     const direction = event.deltaY < 0 ? 1 : -1;
-    zoomAt(event.clientX, event.clientY, (current) => Math.min(Math.max(current + direction * 0.25, 1), 6));
+    zoomAt(event.clientX, event.clientY, (current) => clampZoom(current + direction * 0.25));
   }
 
   function handleImageLoad(event: SyntheticEvent<HTMLImageElement>) {
     const image = event.currentTarget;
     setImageSize({ width: image.naturalWidth, height: image.naturalHeight });
-    window.requestAnimationFrame(() => updateScrollMetrics(false));
+    setImageLoaded(true);
   }
 
   function toggleDefaultZoom(event: MouseEvent<HTMLDivElement>) {
@@ -180,115 +116,82 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
 
   function zoomAt(clientX: number, clientY: number, nextZoom: (current: number) => number) {
     const element = containerRef.current;
+    const view = viewRef.current;
     if (!element) {
-      setZoom(nextZoom);
+      const fallbackZoom = clampZoom(nextZoom(view.zoom));
+      viewRef.current = { ...view, zoom: fallbackZoom };
+      setZoom(fallbackZoom);
       return;
     }
     const rect = element.getBoundingClientRect();
-    const localX = clientX - rect.left;
-    const localY = clientY - rect.top;
-    const contentX = element.scrollLeft + localX;
-    const contentY = element.scrollTop + localY;
-    pendingScrollRef.current = {
-      xRatio: element.scrollWidth > 0 ? contentX / element.scrollWidth : 0.5,
-      yRatio: element.scrollHeight > 0 ? contentY / element.scrollHeight : 0.5,
-      localX,
-      localY,
-    };
-    setZoom(nextZoom);
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    const localX = clientX - rect.left - centerX;
+    const localY = clientY - rect.top - centerY;
+    const currentZoom = view.zoom;
+    const targetZoom = clampZoom(nextZoom(currentZoom));
+    if (targetZoom === currentZoom) {
+      return;
+    }
+    const targetPan = clampPan({
+      x: localX - ((localX - view.pan.x) / currentZoom) * targetZoom,
+      y: localY - ((localY - view.pan.y) / currentZoom) * targetZoom,
+    }, targetZoom, view.baseDisplaySize, view.containerSize);
+    viewRef.current = { ...view, zoom: targetZoom, pan: targetPan };
+    setZoom(targetZoom);
+    setPan(targetPan);
   }
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
-    const element = containerRef.current;
-    if (!element || !hasScrollableOverflow(element) || scrollbarDragRef.current) {
+    if (!canPan) {
       return;
     }
-    element.setPointerCapture(event.pointerId);
+    event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
-      scrollLeft: element.scrollLeft,
-      scrollTop: element.scrollTop,
+      panX: clampedPan.x,
+      panY: clampedPan.y,
     };
     setDragging(true);
   }
 
   function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
-    const element = containerRef.current;
-    const scrollbarDrag = scrollbarDragRef.current;
-    if (element && scrollbarDrag && scrollbarDrag.pointerId === event.pointerId) {
-      const metrics = scrollMetrics;
-      if (scrollbarDrag.axis === "y") {
-        const track = scrollbarTrack(metrics.clientHeight);
-        const maxScroll = metrics.scrollHeight - metrics.clientHeight;
-        const maxThumbTravel = track.size - yThumb.height;
-        if (maxScroll > 0 && maxThumbTravel > 0) {
-          element.scrollTop = scrollbarDrag.scrollStart + ((event.clientY - scrollbarDrag.start) / maxThumbTravel) * maxScroll;
-        }
-      } else {
-        const track = scrollbarTrack(metrics.clientWidth);
-        const maxScroll = metrics.scrollWidth - metrics.clientWidth;
-        const maxThumbTravel = track.size - xThumb.width;
-        if (maxScroll > 0 && maxThumbTravel > 0) {
-          element.scrollLeft = scrollbarDrag.scrollStart + ((event.clientX - scrollbarDrag.start) / maxThumbTravel) * maxScroll;
-        }
-      }
-      updateScrollMetrics(true);
-      return;
-    }
     const drag = dragRef.current;
-    if (!element || !drag || drag.pointerId !== event.pointerId) {
+    if (!drag || drag.pointerId !== event.pointerId) {
       return;
     }
-    element.scrollLeft = drag.scrollLeft - (event.clientX - drag.x);
-    element.scrollTop = drag.scrollTop - (event.clientY - drag.y);
-    updateScrollMetrics(true);
+    const view = viewRef.current;
+    const targetPan = clampPan({
+      x: drag.panX + event.clientX - drag.x,
+      y: drag.panY + event.clientY - drag.y,
+    }, view.zoom, view.baseDisplaySize, view.containerSize);
+    viewRef.current = { ...view, pan: targetPan };
+    setPan(targetPan);
   }
 
   function endDrag(event: PointerEvent<HTMLDivElement>) {
-    if (scrollbarDragRef.current?.pointerId === event.pointerId) {
-      scrollbarDragRef.current = null;
-      setDragging(false);
-    }
     if (dragRef.current?.pointerId === event.pointerId) {
       dragRef.current = null;
       setDragging(false);
     }
   }
 
-  function handleScroll() {
-    updateScrollMetrics(true);
-  }
-
-  function beginScrollbarDrag(axis: "x" | "y", event: PointerEvent<HTMLDivElement>) {
-    const element = containerRef.current;
-    if (!element) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    element.setPointerCapture(event.pointerId);
-    scrollbarDragRef.current = {
-      pointerId: event.pointerId,
-      axis,
-      start: axis === "y" ? event.clientY : event.clientX,
-      scrollStart: axis === "y" ? element.scrollTop : element.scrollLeft,
-    };
-    setDragging(true);
-    updateScrollMetrics(true);
-  }
-
   const baseScale = fitScale(imageSize, containerSize);
-  const renderedWidth = imageSize.width > 0 ? Math.ceil(imageSize.width * baseScale * zoom) : undefined;
-  const renderedHeight = imageSize.height > 0 ? Math.ceil(imageSize.height * baseScale * zoom) : undefined;
-  const horizontalMargin = centerMargin(containerSize.width, renderedWidth);
-  const verticalMargin = centerMargin(containerSize.height, renderedHeight);
-  const canScrollY = scrollMetrics.scrollHeight > scrollMetrics.clientHeight + 1;
-  const canScrollX = scrollMetrics.scrollWidth > scrollMetrics.clientWidth + 1;
-  const canPan = canScrollX || canScrollY;
-  const yThumb = scrollbarThumb(scrollMetrics.scrollTop, scrollMetrics.clientHeight, scrollMetrics.scrollHeight);
-  const xThumb = scrollbarThumb(scrollMetrics.scrollLeft, scrollMetrics.clientWidth, scrollMetrics.scrollWidth);
+  const baseDisplaySize = {
+    width: Math.max(0, Math.round(imageSize.width * baseScale)),
+    height: Math.max(0, Math.round(imageSize.height * baseScale)),
+  };
+  const clampedPan = clampPan(pan, zoom, baseDisplaySize, containerSize);
+  const canPan = canPanImage(zoom, baseDisplaySize, containerSize);
+  const ready = imageLoaded && baseDisplaySize.width > 0 && baseDisplaySize.height > 0 && containerSize.width > 0 && containerSize.height > 0;
+  viewRef.current = {
+    zoom,
+    pan: clampedPan,
+    baseDisplaySize,
+    containerSize,
+  };
 
   return (
     <div className="preview">
@@ -297,7 +200,6 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
           ref={containerRef}
           className={`preview-image ${canPan ? "pannable" : ""} ${dragging ? "dragging" : ""}`}
           onWheel={handleWheel}
-          onScroll={handleScroll}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={endDrag}
@@ -311,41 +213,16 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
             draggable={false}
             onLoad={handleImageLoad}
             style={{
-              width: renderedWidth,
-              height: renderedHeight,
-              marginLeft: horizontalMargin,
-              marginRight: horizontalMargin,
-              marginTop: verticalMargin,
-              marginBottom: verticalMargin,
+              width: baseDisplaySize.width,
+              height: baseDisplaySize.height,
+              opacity: ready ? 1 : 0,
+              transform: `translate3d(-50%, -50%, 0) translate3d(${clampedPan.x}px, ${clampedPan.y}px, 0) scale3d(${zoom}, ${zoom}, 1)`,
             }}
           />
         </div>
-        {canScrollY && (
-          <div className={`preview-scrollbar vertical ${scrollMetrics.visible ? "visible" : ""}`}>
-            <div
-              className="preview-scrollbar-thumb"
-              style={{ height: yThumb.height, transform: `translateY(${yThumb.offset}px)` }}
-              onPointerDown={(event) => beginScrollbarDrag("y", event)}
-            />
-          </div>
-        )}
-        {canScrollX && (
-          <div className={`preview-scrollbar horizontal ${scrollMetrics.visible ? "visible" : ""}`}>
-            <div
-              className="preview-scrollbar-thumb"
-              style={{ width: xThumb.width, transform: `translateX(${xThumb.offset}px)` }}
-              onPointerDown={(event) => beginScrollbarDrag("x", event)}
-            />
-          </div>
-        )}
       </div>
     </div>
   );
-}
-
-function scrollbarTrack(clientSize: number) {
-  const inset = 6;
-  return { inset, size: Math.max(clientSize - inset * 2, 0) };
 }
 
 function fitScale(
@@ -363,30 +240,33 @@ function fitScale(
   return Math.min(containerSize.width / imageSize.width, containerSize.height / imageSize.height);
 }
 
-function centerMargin(containerSize: number, renderedSize: number | undefined): number {
-  if (!renderedSize || containerSize <= renderedSize) {
-    return 0;
-  }
-  return Math.floor((containerSize - renderedSize) / 2);
+function clampZoom(value: number): number {
+  return Math.min(Math.max(value, 1), 6);
 }
 
-function hasScrollableOverflow(element: HTMLElement): boolean {
+function clampPan(
+  pan: { x: number; y: number },
+  zoom: number,
+  baseDisplaySize: { width: number; height: number },
+  containerSize: { width: number; height: number },
+): { x: number; y: number } {
+  const maxX = Math.max(0, (baseDisplaySize.width * zoom - containerSize.width) / 2);
+  const maxY = Math.max(0, (baseDisplaySize.height * zoom - containerSize.height) / 2);
+  return {
+    x: Math.min(Math.max(pan.x, -maxX), maxX),
+    y: Math.min(Math.max(pan.y, -maxY), maxY),
+  };
+}
+
+function canPanImage(
+  zoom: number,
+  baseDisplaySize: { width: number; height: number },
+  containerSize: { width: number; height: number },
+): boolean {
   return (
-    element.scrollWidth > element.clientWidth + 1
-    || element.scrollHeight > element.clientHeight + 1
+    baseDisplaySize.width * zoom > containerSize.width + 1
+    || baseDisplaySize.height * zoom > containerSize.height + 1
   );
-}
-
-function scrollbarThumb(scrollOffset: number, clientSize: number, scrollSize: number) {
-  const track = scrollbarTrack(clientSize);
-  if (clientSize <= 0 || scrollSize <= clientSize || track.size <= 0) {
-    return { offset: 0, width: 0, height: 0 };
-  }
-  const thumbSize = Math.max(28, Math.round((clientSize / scrollSize) * track.size));
-  const maxThumbTravel = Math.max(track.size - thumbSize, 0);
-  const maxScroll = Math.max(scrollSize - clientSize, 1);
-  const offset = track.inset + Math.round((scrollOffset / maxScroll) * maxThumbTravel);
-  return { offset, width: thumbSize, height: thumbSize };
 }
 
 function PhotoDetails({ photo }: { photo: Photo }) {

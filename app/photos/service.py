@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import csv
+import json
 import shutil
 from pathlib import Path
 from typing import Callable
@@ -137,6 +139,66 @@ def list_directory(
 
     with PhotosDatabase(db_path) as db:
         return db.list_directory(_normalize_root(root), str(relative_dir))
+
+
+def list_directory_page(
+    root: str | Path,
+    relative_dir: str | Path = "",
+    cursor: str | None = None,
+    limit: int = 100,
+    db_path: str | Path = DEFAULT_DB_PATH,
+) -> dict:
+    """Return one keyset-cursor page of child directories and files."""
+
+    normalized_root = _normalize_root(root)
+    directory = str(relative_dir)
+    page_limit = max(1, min(limit, 500))
+    cursor_data = _decode_directory_cursor(cursor)
+    section = cursor_data.get("section", "directories")
+    remaining = page_limit
+    directories: list[str] = []
+    files: list[dict] = []
+
+    with PhotosDatabase(db_path) as db:
+        counts = db.count_directory_items(normalized_root, directory)
+
+        if section == "directories":
+            directories = db.list_directory_dirs_page(
+                normalized_root,
+                directory,
+                after_name=cursor_data.get("name"),
+                limit=remaining,
+            )
+            remaining -= len(directories)
+            if remaining == 0:
+                next_cursor = _encode_directory_cursor({
+                    "section": "directories",
+                    "name": directories[-1],
+                })
+                return _directory_page_result(normalized_root, directory, directories, files, next_cursor, counts)
+            section = "files"
+            cursor_data = {}
+
+        if section == "files" and remaining > 0:
+            files = db.list_directory_files_page(
+                normalized_root,
+                directory,
+                after_filename=cursor_data.get("filename"),
+                after_photo_id=cursor_data.get("photo_id"),
+                limit=remaining,
+            )
+
+        next_cursor = None
+        if files:
+            last_file = files[-1]
+            if _has_next_file_page(db, normalized_root, directory, last_file):
+                next_cursor = _encode_directory_cursor({
+                    "section": "files",
+                    "filename": last_file["filename"],
+                    "photo_id": last_file["photo_id"],
+                })
+
+    return _directory_page_result(normalized_root, directory, directories, files, next_cursor, counts)
 
 
 def get_photo(
@@ -310,3 +372,53 @@ def _parent_dir(relative_path: str) -> str:
 
 def _path_depth(relative_dir: str) -> int:
     return 0 if not relative_dir else len(relative_dir.split("/"))
+
+
+def _directory_page_result(
+    root: str,
+    relative_dir: str | Path,
+    directories: list[str],
+    files: list[dict],
+    next_cursor: str | None,
+    counts: dict,
+) -> dict:
+    return {
+        "root": root,
+        "relative_dir": str(relative_dir),
+        "directories": directories,
+        "files": files,
+        "next_cursor": next_cursor,
+        "directory_count": counts["directory_count"],
+        "file_count": counts["file_count"],
+    }
+
+
+def _encode_directory_cursor(value: dict) -> str:
+    payload = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_directory_cursor(cursor: str | None) -> dict:
+    if not cursor:
+        return {}
+    padding = "=" * (-len(cursor) % 4)
+    try:
+        value = json.loads(base64.urlsafe_b64decode((cursor + padding).encode("ascii")))
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _has_next_file_page(
+    db: PhotosDatabase,
+    root: str,
+    relative_dir: str | Path,
+    last_file: dict,
+) -> bool:
+    return bool(db.list_directory_files_page(
+        root,
+        str(relative_dir),
+        after_filename=last_file["filename"],
+        after_photo_id=int(last_file["photo_id"]),
+        limit=1,
+    ))

@@ -22,7 +22,9 @@ Import from `app.taxa`.
 
 ## Workbook Columns
 
-Only these columns are read:
+The knowledge base is an Excel workbook. The importer reads only the sheet named `plants`; other sheets are ignored.
+
+The `plants` sheet should contain one row per taxonomy record or species record. Only these columns are read:
 
 | Workbook column | Stored rank/field |
 | --- | --- |
@@ -32,7 +34,7 @@ Only these columns are read:
 | `种(Species)` | `species` |
 | `学名(Binomial name)` | `binomial_name` |
 
-Header matching tolerates extra text after the leading Chinese label.
+Header matching tolerates extra text after the leading Chinese label. The rank columns provide the Chinese/common names; `学名(Binomial name)` provides the scientific name used to match photos.
 
 ## Tables
 

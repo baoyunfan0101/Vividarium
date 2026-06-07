@@ -13,6 +13,11 @@ app/
   map/                  GPS photo selection for the map view
   operations/           local operation locks and progress
 frontend/               React + Vite UI
+  src/
+    components/         shared navigation, status, virtual list, photo viewer
+    features/           Admin, Photos, Taxonomy, and Map screens
+    lib/                browser, path, photo, storage, taxon, split-pane helpers
+    styles/             global, layout, component, and feature CSS
 data/                   local SQLite DB and thumbnail cache, ignored by git
 main.py                 local backend/frontend launcher
 scripts/                build helpers
@@ -31,56 +36,49 @@ npm install
 
 ## Run
 
-Start backend and frontend together:
+Use `main.py` to start the app:
 
 ```bash
 python main.py
 ```
 
-Open `http://127.0.0.1:5173`. API docs are at `http://127.0.0.1:8000/docs`.
+Options:
 
-Backend or frontend only:
+- `--backend-only`: start only FastAPI.
+- `--frontend-only`: start only Vite.
+- `--frontend-path PATH`: prepend Node/npm paths.
+- `--backend-path PATH`: prepend native library paths used by Python packages.
 
-```bash
-python main.py --backend-only
-python main.py --frontend-only
-```
-
-When Node or native library paths are not already available, pass them to the launcher:
+Example:
 
 ```bash
 python main.py --frontend-path "/path/to/node/bin" --backend-path "/path/to/native/libs"
 ```
 
-Equivalent environment variables:
+Equivalent environment variables are `PHYTOINDEX_FRONTEND_PATH` and `PHYTOINDEX_BACKEND_PATH`. On Windows, use semicolon-separated paths.
+
+Manual development run:
 
 ```bash
-PHYTOINDEX_FRONTEND_PATH="/path/to/node/bin" PHYTOINDEX_BACKEND_PATH="/path/to/native/libs" python main.py
+.venv/bin/uvicorn app.api.main:app --reload --host 127.0.0.1 --port 8000
+
+cd frontend
+npm run dev
 ```
 
-On Windows, environment variables use semicolon-separated paths.
+Open `http://127.0.0.1:5173`. API docs are at `http://127.0.0.1:8000/docs`.
 
-## Windows Release Build
+## Release
 
-Build on Windows:
+Windows packaging is handled by PyInstaller:
 
 ```bat
 scripts\build_windows.bat
 ```
 
-The script installs Python build dependencies, builds `frontend/dist`, and creates:
+The script builds the frontend and creates `dist\PhytoIndex.exe`. The packaged app starts FastAPI, serves the built frontend, opens the browser, and stores runtime data under `%APPDATA%\PhytoIndex`.
 
-```text
-dist\PhytoIndex.exe
-```
-
-The exe starts FastAPI, serves the built frontend, opens the browser, and stores runtime data in:
-
-```text
-%APPDATA%\PhytoIndex
-```
-
-No Python or Node installation is required on the target user's machine.
+Target users do not need Python or Node installed.
 
 ## Core Tables
 
@@ -102,19 +100,11 @@ The map module currently reads GPS-enabled rows from `photos`; it does not own a
 - Configure photo roots and a taxonomy workbook in Admin.
 - Update or rebuild photos, taxa, and photo-taxa mapping from Admin.
 - Browse photos by root/folder.
+- Load large photo folders through cursor paging backed by `photos_dir` and photos browse indexes.
 - Browse photos by mapped taxonomy tree.
 - Search mapped taxa by Chinese name or binomial name.
 - Browse GPS-enabled photos on a MapLibre/OpenStreetMap map.
 - Export module tables as CSV.
-
-## Checks
-
-```bash
-python -m py_compile main.py app/api/*.py app/photos/*.py app/taxa/*.py app/photos_taxa_mapping/*.py app/map/*.py
-
-cd frontend
-npm run build
-```
 
 ## Module Docs
 

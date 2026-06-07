@@ -18,6 +18,7 @@ from app.photos import (
     get_roots,
     list_changed_photos,
     list_directory,
+    list_directory_page,
     list_photos,
     rebuild_photos,
     save_roots,
@@ -65,6 +66,18 @@ def api_browse_photos(
     relative_dir: str = "",
 ) -> dict:
     return list_directory(root, relative_dir)
+
+
+@router.get("/browse-page")
+def api_browse_photos_page(
+    root: str,
+    relative_dir: str = "",
+    cursor: Optional[str] = None,
+    limit: int = 120,
+) -> dict:
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    return list_directory_page(root, relative_dir, cursor=cursor, limit=limit)
 
 
 @router.get("/all")

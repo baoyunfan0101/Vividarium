@@ -16,6 +16,7 @@ Import from `app.photos`.
 - `update_photos(root, db_path=DEFAULT_DB_PATH, progress=None)`: update one root. Uses `file_size` and `modified_at` to skip unchanged files, marks deleted files, refreshes `photos_dir`, and marks other roots' non-deleted photos as `unchanged`.
 - `rebuild_photos(roots, db_path=DEFAULT_DB_PATH, thumbnail_root="data/thumbnails", progress=None)`: clear `photos` and `photos_dir`, reset photo ids, clear thumbnail cache, rescan all roots, insert all photos as `new`.
 - `list_directory(root, relative_dir="", db_path=DEFAULT_DB_PATH)`: return direct child directories and non-deleted photos.
+- `list_directory_page(root, relative_dir="", cursor=None, limit=100, db_path=DEFAULT_DB_PATH)`: return one keyset-cursor page of direct child directories and non-deleted photos.
 - `list_photos(db_path=DEFAULT_DB_PATH)`: return all photo rows.
 - `list_changed_photos(db_path=DEFAULT_DB_PATH)`: return photos with status `new` or `updated`.
 - `get_photo(photo_id, db_path=DEFAULT_DB_PATH)`: return one row or `None`.
@@ -72,6 +73,22 @@ Derived directory index for fast direct-child browsing.
 | `path_depth` | directory depth |
 
 Primary key: `(root, relative_dir)`.
+
+## Indexes
+
+| Index | Columns | Used for |
+| --- | --- | --- |
+| `idx_photos_root_path` | `root, relative_path` | exact path lookup and uniqueness-adjacent queries |
+| `idx_photos_browse` | `root, parent_dir, status, filename` | folder browsing ordered by filename |
+| `idx_photos_browse_cursor` | `root, parent_dir, status, filename, photo_id` | keyset cursor paging for folder files |
+| `idx_photos_status` | `status` | changed/new/deleted filtering |
+| `idx_photos_binomial_name` | `binomial_name` | mapping and name lookup helpers |
+| `idx_photos_dir_unique` | `root, relative_dir` | directory identity |
+| `idx_photos_dir_browse` | `root, parent_dir, name` | direct child directory browsing |
+
+## Cursor Browsing
+
+`list_directory_page` returns folders first, then files, matching the UI order. The cursor encodes the last returned directory name or file `(filename, photo_id)` key, so the next page uses keyset predicates instead of `OFFSET`.
 
 ## Notes
 

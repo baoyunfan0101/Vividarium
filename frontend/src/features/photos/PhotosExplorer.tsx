@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { ChevronRight, Folder, Image } from "lucide-react";
-import { browsePhotos, getRoots, searchMappingByBinomial, type DirectoryListing, type Photo } from "../../api";
+import { browsePhotosPage, getRoots, searchMappingByBinomial, type DirectoryListingPage, type Photo } from "../../api";
 import { PhotoGrid, PhotoPreview, scrollPhotoGridToIndex } from "../../components/photo";
 import { LoadingOverlay } from "../../components/status";
 import { VirtualList } from "../../components/virtual";
-import { blurActiveElement, findTypeSelectIndex, isFormElement, isSelectionKey, isTypeSelectKey, nextPhotoSelection, nextTypeSelect, scrollListItemIntoView, shouldClearSelection, type TypeSelectState } from "../../lib/browserUtils";
+import { blurActiveElement, findTypeSelectIndex, isFormElement, isSelectionKey, isTypeSelectKey, nextTypeSelect, scrollListItemIntoView, shouldClearSelection, type TypeSelectState } from "../../lib/browserUtils";
 import { breadcrumb, joinPath } from "../../lib/pathUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
 import { useResizableSplit } from "../../lib/useResizableSplit";
 
 const PHOTOS_STATE_KEY = "phytoindex.photos.explorer";
 const LIST_ITEM_HEIGHT = 37;
+const BROWSE_PAGE_LIMIT = 180;
+const LOAD_MORE_DISTANCE = 900;
 
 type PhotosBrowserItem =
   | { type: "directory"; directory: string }
@@ -39,7 +41,7 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
   const [roots, setRoots] = useState<string[]>([]);
   const [root, setRoot] = useState(cachedState.root);
   const [path, setPath] = useState(cachedState.path);
-  const [listing, setListing] = useState<DirectoryListing | null>(null);
+  const [listing, setListing] = useState<DirectoryListingPage | null>(null);
   const [selected, setSelected] = useState<Photo | null>(null);
   const [selectedPhotoKey, setSelectedPhotoKey] = useState<string | null>(cachedState.selectedPhotoKey ?? null);
   const [selectedView, setSelectedView] = useState<"image" | "details">(cachedState.selectedView ?? "image");
@@ -47,10 +49,12 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
   const [gridScrollTop, setGridScrollTop] = useState(cachedState.gridScrollTop);
   const [nameByBinomial, setNameByBinomial] = useState<Record<string, string>>({});
   const [listingLoading, setListingLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(false);
   const [activeBrowserKey, setActiveBrowserKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const typeSelectRef = useRef<TypeSelectState>({ query: "", updatedAt: 0 });
+  const pageLoadingRef = useRef(false);
   const { beginResize, splitRatio, splitRef } = useResizableSplit(cachedState.splitRatio ?? 34);
 
   useEffect(() => {
@@ -162,13 +166,18 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
         typeSelectBrowserItem(event.key);
         return;
       }
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        blurActiveElement();
+        openActiveBrowserItem();
+        return;
+      }
       if (!isSelectionKey(event)) {
         return;
       }
       event.preventDefault();
       blurActiveElement();
-      const next = nextPhotoSelection(files, selected, event.key === "ArrowDown" ? 1 : -1);
-      selectPhoto(next, { list: true, grid: true });
+      selectNextBrowserItem(event.key === "ArrowDown" ? 1 : -1);
     }
 
     window.addEventListener("keydown", handleKeyDown);
@@ -207,6 +216,49 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
     });
   }
 
+  function selectBrowserItem(item: PhotosBrowserItem, reveal: { list?: boolean; grid?: boolean } = {}) {
+    setActiveBrowserKey(photosBrowserItemKey(item));
+    if (item.type === "directory") {
+      setSelected(null);
+      setSelectedPhotoKey(null);
+      setSelectedView("image");
+      return;
+    }
+    selectPhoto(item.photo, reveal);
+  }
+
+  function selectNextBrowserItem(direction: 1 | -1) {
+    if (!browserItems.length) {
+      return;
+    }
+    const currentIndex = activeBrowserKey
+      ? browserItems.findIndex((item) => photosBrowserItemKey(item) === activeBrowserKey)
+      : -1;
+    const nextIndex = currentIndex < 0
+      ? direction === 1 ? 0 : browserItems.length - 1
+      : Math.min(Math.max(currentIndex + direction, 0), browserItems.length - 1);
+    const item = browserItems[nextIndex];
+    selectBrowserItem(item, { grid: true });
+    const nextScrollTop = scrollListItemIntoView(listRef.current, nextIndex, LIST_ITEM_HEIGHT);
+    if (nextScrollTop !== null) {
+      setListScrollTop(nextScrollTop);
+    }
+  }
+
+  function openActiveBrowserItem() {
+    const item = activeBrowserKey
+      ? browserItems.find((candidate) => photosBrowserItemKey(candidate) === activeBrowserKey)
+      : null;
+    if (!item) {
+      return;
+    }
+    if (item.type === "directory") {
+      openPath(joinPath(path, item.directory));
+      return;
+    }
+    activatePhoto(item.photo, "list");
+  }
+
   function typeSelectBrowserItem(key: string) {
     const typeSelect = nextTypeSelect(typeSelectRef.current, key);
     typeSelectRef.current = typeSelect.state;
@@ -224,13 +276,10 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
       return;
     }
     const item = browserItems[matchIndex];
-    setActiveBrowserKey(photosBrowserItemKey(item));
+    selectBrowserItem(item);
     const nextScrollTop = scrollListItemIntoView(listRef.current, matchIndex, LIST_ITEM_HEIGHT);
     if (nextScrollTop !== null) {
       setListScrollTop(nextScrollTop);
-    }
-    if (item.type === "photo") {
-      selectPhoto(item.photo);
     }
   }
 
@@ -254,12 +303,32 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
     }
   }
 
+  function handleListScroll(event: UIEvent<HTMLDivElement>) {
+    setListScrollTop(event.currentTarget.scrollTop);
+    maybeLoadNextPage(event.currentTarget);
+  }
+
+  function handleGridScroll(event: UIEvent<HTMLDivElement>) {
+    setGridScrollTop(event.currentTarget.scrollTop);
+    maybeLoadNextPage(event.currentTarget);
+  }
+
+  function maybeLoadNextPage(element: HTMLDivElement) {
+    if (!listing?.next_cursor || listingLoading || pageLoadingRef.current) {
+      return;
+    }
+    const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (distanceToBottom <= LOAD_MORE_DISTANCE) {
+      loadNextListingPage();
+    }
+  }
+
   async function loadListing(nextRoot: string, nextPath: string) {
     setListingLoading(true);
     try {
-      const data = await browsePhotos(nextRoot, nextPath);
+      const data = await browsePhotosPage(nextRoot, nextPath, null, BROWSE_PAGE_LIMIT);
       setListing(data);
-      setMessage(`Loaded ${data.directories.length} folders and ${data.files.length} files`);
+      setMessage(`Loaded ${data.directory_count} folders and ${data.file_count} files`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -267,13 +336,51 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
     }
   }
 
+  async function loadNextListingPage() {
+    if (!root || !listing?.next_cursor || pageLoadingRef.current) {
+      return;
+    }
+    const requestCursor = listing.next_cursor;
+    pageLoadingRef.current = true;
+    setPageLoading(true);
+    try {
+      const data = await browsePhotosPage(root, path, requestCursor, BROWSE_PAGE_LIMIT);
+      setListing((current) => {
+        if (!current || current.root !== data.root || current.relative_dir !== data.relative_dir || current.next_cursor !== requestCursor) {
+          return current;
+        }
+        return mergeDirectoryPages(current, data);
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      pageLoadingRef.current = false;
+      setPageLoading(false);
+    }
+  }
+
   const selectedId = selected?.photo_id ?? null;
 
   return (
-    <section className="split resizable-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(220px, ${splitRatio}%) 5px minmax(0, 1fr)` }}>
+    <section
+      className="split resizable-split"
+      ref={splitRef}
+      style={{ gridTemplateColumns: `minmax(220px, ${splitRatio}%) 5px minmax(0, 1fr)` }}
+    >
       <div className="panel browser-panel loading-scope" onClick={(event) => shouldClearSelection(event) && selectPhoto(null)}>
         <div className="toolbar">
-          <select value={root} disabled={listingLoading} onChange={(event) => { setRoot(event.target.value); setPath(""); selectPhoto(null); setListScrollTop(0); setGridScrollTop(0); }}>
+          <select
+            value={root}
+            disabled={listingLoading}
+            onChange={(event) => {
+              event.currentTarget.blur();
+              setRoot(event.target.value);
+              setPath("");
+              selectPhoto(null);
+              setListScrollTop(0);
+              setGridScrollTop(0);
+            }}
+          >
             <option value="">Select root</option>
             {roots.map((item) => <option value={item} key={item}>{item}</option>)}
           </select>
@@ -289,9 +396,9 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
         <VirtualList
           className="browser-list"
           itemCount={browserItems.length}
-          itemHeight={37}
+          itemHeight={LIST_ITEM_HEIGHT}
           scrollRef={listRef}
-          onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}
+          onScroll={handleListScroll}
           itemKey={(index) => {
             const item = browserItems[index];
             return item.type === "directory" ? `dir:${item.directory}` : `photo:${item.photo.photo_id}`;
@@ -300,21 +407,35 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
             const item = browserItems[index];
             if (item.type === "directory") {
               return (
-                <button className={activeBrowserKey === photosBrowserItemKey(item) ? "row-button type-selected" : "row-button"} disabled={listingLoading} onClick={() => openPath(joinPath(path, item.directory))}>
+                <button
+                  className={activeBrowserKey === photosBrowserItemKey(item) ? "row-button type-selected" : "row-button"}
+                  disabled={listingLoading}
+                  onClick={() => openPath(joinPath(path, item.directory))}
+                >
                   <Folder size={18} /> <span>{item.directory}</span>
                 </button>
               );
             }
             const itemKey = photosBrowserItemKey(item);
             return (
-              <button className={item.photo.photo_id === selected?.photo_id ? "row-button file-row selected" : activeBrowserKey === itemKey ? "row-button file-row type-selected" : "row-button file-row"} disabled={listingLoading} onClick={() => activatePhoto(item.photo, "list")}>
+              <button
+                className={
+                  item.photo.photo_id === selected?.photo_id
+                    ? "row-button file-row selected"
+                    : activeBrowserKey === itemKey
+                      ? "row-button file-row type-selected"
+                      : "row-button file-row"
+                }
+                disabled={listingLoading}
+                onClick={() => activatePhoto(item.photo, "list")}
+              >
                 <Image size={18} /> <span>{item.photo.filename}</span>
               </button>
             );
           }}
         />
         <div className="browser-status">
-          {(listing?.directories.length ?? 0)} folders · {files.length} photos
+          {(listing?.directory_count ?? 0)} folders · {listing?.file_count ?? 0} photos
         </div>
         {listingLoading && <LoadingOverlay label="Loading photos" />}
       </div>
@@ -322,7 +443,18 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
       {selected ? (
         <PhotoPreview photo={selected} mode={selectedView} />
       ) : (
-        <PhotoGrid photos={files} emptyText="No photos in this folder" loading={listingLoading} loadingLabel="Loading photos" onPhotoClick={(photo) => activatePhoto(photo, "grid")} selectedPhotoId={selectedId} onBlankClick={() => selectPhoto(null)} subtitleForPhoto={(photo) => photo.binomial_name ? nameByBinomial[photo.binomial_name] : ""} scrollRef={gridRef} onScroll={(event) => setGridScrollTop(event.currentTarget.scrollTop)} />
+        <PhotoGrid
+          photos={files}
+          emptyText="No photos in this folder"
+          loading={listingLoading || pageLoading}
+          loadingLabel={listingLoading ? "Loading photos" : "Loading more"}
+          onPhotoClick={(photo) => activatePhoto(photo, "grid")}
+          selectedPhotoId={selectedId}
+          onBlankClick={() => selectPhoto(null)}
+          subtitleForPhoto={(photo) => photo.binomial_name ? nameByBinomial[photo.binomial_name] : ""}
+          scrollRef={gridRef}
+          onScroll={handleGridScroll}
+        />
       )}
     </section>
   );
@@ -338,4 +470,15 @@ function photosBrowserItemKey(item: PhotosBrowserItem): string {
 
 function photosBrowserItemLabels(item: PhotosBrowserItem): string[] {
   return item.type === "directory" ? [item.directory] : [item.photo.filename];
+}
+
+function mergeDirectoryPages(
+  current: DirectoryListingPage,
+  next: DirectoryListingPage,
+): DirectoryListingPage {
+  return {
+    ...next,
+    directories: [...current.directories, ...next.directories],
+    files: [...current.files, ...next.files],
+  };
 }

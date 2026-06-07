@@ -69,6 +69,9 @@ class PhotosDatabase:
             "CREATE INDEX IF NOT EXISTS idx_photos_browse ON photos(root, parent_dir, status, filename)"
         )
         self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_browse_cursor ON photos(root, parent_dir, status, filename, photo_id)"
+        )
+        self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status)"
         )
         self._conn.execute(
@@ -553,6 +556,106 @@ class PhotosDatabase:
             "directories": [row["name"] for row in dir_rows],
             "files": [dict(row) for row in file_rows],
         }
+
+    def count_directory_items(self, root: str, relative_dir: str = "") -> dict:
+        directory = _normalize_relative_path(relative_dir)
+        dir_row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS count FROM photos_dir
+            WHERE root = ? AND parent_dir = ?
+            """,
+            (root, directory),
+        ).fetchone()
+        file_row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS count FROM photos
+            WHERE root = ?
+              AND status != ?
+              AND parent_dir = ?
+            """,
+            (root, STATUS_DELETED, directory),
+        ).fetchone()
+        return {
+            "directory_count": int(dir_row["count"]),
+            "file_count": int(file_row["count"]),
+        }
+
+    def list_directory_dirs_page(
+        self,
+        root: str,
+        relative_dir: str = "",
+        after_name: str | None = None,
+        limit: int = 100,
+    ) -> list[str]:
+        directory = _normalize_relative_path(relative_dir)
+        if after_name is None:
+            rows = self._conn.execute(
+                """
+                SELECT name FROM photos_dir
+                WHERE root = ? AND parent_dir = ?
+                ORDER BY name
+                LIMIT ?
+                """,
+                (root, directory, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT name FROM photos_dir
+                WHERE root = ? AND parent_dir = ? AND name > ?
+                ORDER BY name
+                LIMIT ?
+                """,
+                (root, directory, after_name, limit),
+            ).fetchall()
+        return [row["name"] for row in rows]
+
+    def list_directory_files_page(
+        self,
+        root: str,
+        relative_dir: str = "",
+        after_filename: str | None = None,
+        after_photo_id: int | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        directory = _normalize_relative_path(relative_dir)
+        if after_filename is None or after_photo_id is None:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM photos
+                WHERE root = ?
+                  AND status != ?
+                  AND parent_dir = ?
+                ORDER BY filename, photo_id
+                LIMIT ?
+                """,
+                (root, STATUS_DELETED, directory, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM photos
+                WHERE root = ?
+                  AND status != ?
+                  AND parent_dir = ?
+                  AND (
+                    filename > ?
+                    OR (filename = ? AND photo_id > ?)
+                  )
+                ORDER BY filename, photo_id
+                LIMIT ?
+                """,
+                (
+                    root,
+                    STATUS_DELETED,
+                    directory,
+                    after_filename,
+                    after_filename,
+                    after_photo_id,
+                    limit,
+                ),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def _backfill_photo_paths(self) -> None:
         rows = self._conn.execute(

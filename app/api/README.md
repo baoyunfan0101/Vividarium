@@ -58,6 +58,7 @@ Poll `GET /operations/status` for progress and final result.
 - `GET /photos/roots`: roots and `photos_metadata`.
 - `PUT /photos/roots`: replace roots. Body: `{"roots": ["..."]}`.
 - `GET /photos/browse?root=...&relative_dir=...`: direct child folders and files.
+- `GET /photos/browse-page?root=...&relative_dir=...&limit=...&cursor=...`: keyset-cursor page of direct child folders and files.
 - `GET /photos/all`: all photo rows.
 - `GET /photos/changed`: photos with status `new` or `updated`.
 - `GET /photos/latest-update`: `photos_metadata`.

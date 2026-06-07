@@ -54,6 +54,12 @@ export type DirectoryListing = {
   files: Photo[];
 };
 
+export type DirectoryListingPage = DirectoryListing & {
+  next_cursor: string | null;
+  directory_count: number;
+  file_count: number;
+};
+
 export type Taxon = {
   taxon_id: number;
   rank: string;
@@ -92,6 +98,8 @@ export type OperationState = {
 
 export type OperationsStatus = Record<OperationState["module"], OperationState>;
 
+// Photos
+
 export function photoFileUrl(photo: Photo): string {
   return `${API_BASE}/photos/file/${photo.photo_id}?${photoVersionParams(photo)}`;
 }
@@ -129,6 +137,8 @@ export async function savePhotoRoots(roots: string[]): Promise<PhotoRootMetadata
   return data.metadata;
 }
 
+// Taxa
+
 export async function getTaxaMetadata(): Promise<TaxaMetadata> {
   const data = await request<{ metadata: TaxaMetadata }>("/taxa/latest-update");
   return data.metadata;
@@ -143,15 +153,21 @@ export async function saveKnowledgeBasePath(knowledgeBasePath: string | null): P
   return data.metadata;
 }
 
+// Photos-taxa mapping metadata
+
 export async function getMappingMetadata(): Promise<MappingMetadata> {
   const data = await request<{ metadata: MappingMetadata }>("/mapping/photos-taxa/latest-update");
   return data.metadata;
 }
 
+// Operation status
+
 export async function getOperationsStatus(): Promise<OperationsStatus> {
   const data = await request<{ operations: OperationsStatus }>("/operations/status");
   return data.operations;
 }
+
+// Local path pickers
 
 export async function selectLocalDirectory(): Promise<string | null> {
   const data = await request<{ path: string | null }>("/local/select-directory");
@@ -163,9 +179,28 @@ export async function selectLocalFile(): Promise<string | null> {
   return data.path;
 }
 
+// Photos browsing and lookup
+
 export async function browsePhotos(root: string, relativeDir = ""): Promise<DirectoryListing> {
   const params = new URLSearchParams({ root, relative_dir: relativeDir });
   return request<DirectoryListing>(`/photos/browse?${params.toString()}`);
+}
+
+export async function browsePhotosPage(
+  root: string,
+  relativeDir = "",
+  cursor: string | null = null,
+  limit = 160,
+): Promise<DirectoryListingPage> {
+  const params = new URLSearchParams({
+    root,
+    relative_dir: relativeDir,
+    limit: String(limit),
+  });
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+  return request<DirectoryListingPage>(`/photos/browse-page?${params.toString()}`);
 }
 
 export async function getAllPhotos(): Promise<Photo[]> {
@@ -183,10 +218,14 @@ export async function getPhoto(photoId: number): Promise<Photo> {
   return data.photo;
 }
 
+// Map
+
 export async function getMapPhotos(): Promise<MapPhoto[]> {
   const data = await request<{ photos: MapPhoto[] }>("/map/photos");
   return data.photos;
 }
+
+// Photos-taxa mapping
 
 export async function getMappingRoot(): Promise<MappingNode> {
   return request<MappingNode>("/mapping/photos-taxa/root");
@@ -211,6 +250,8 @@ export async function suggestMappingTaxa(query: string, mode: "name" | "binomial
   const data = await request<{ suggestions: TaxonSuggestion[] }>(`/mapping/photos-taxa/suggest?${params.toString()}`);
   return data.suggestions;
 }
+
+// Operations and exports
 
 export async function runMutation(path: string, body: object): Promise<unknown> {
   const result = await request<unknown>(path, {
