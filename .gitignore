@@ -1,13 +1,7 @@
 # macOS
 .DS_Store
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-env/
+# Environment
 .env
 .env.*
 
@@ -24,6 +18,7 @@ data/
 *.jpg
 *.jpeg
 *.png
+!apps/desktop/src-tauri/icons/**/*.png
 *.heic
 *.tif
 *.tiff
@@ -38,10 +33,11 @@ data/
 *.xlsx
 *.xls
 
-# Frontend
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
+# Desktop app
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/.vite/
+apps/desktop/src-tauri/gen/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -61,3 +57,4 @@ temp/
 # Build artifacts
 /build/
 /dist/
+/target/

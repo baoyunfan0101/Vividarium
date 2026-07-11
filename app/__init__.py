@@ -1,2 +1,0 @@
-"""PhytoIndex application package."""
-

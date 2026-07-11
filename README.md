@@ -1,116 +1,115 @@
 # PhytoIndex
 
-PhytoIndex is a local plant photo index. It scans photo roots, imports a plant taxonomy workbook, maps photos to taxa, and provides a FastAPI backend with a React frontend.
+PhytoIndex is a local-first desktop application for indexing plant photos. It scans photo folders, imports a taxonomy workbook, maps photos to taxa, and provides photo, taxonomy, and map browsers.
 
-## Project Layout
+Current release: `v2.0.0`
+
+Version 2 replaces the Python service and separately hosted frontend from version 1 with a Tauri 2 desktop application. The user interface remains React and TypeScript, while application services, SQLite access, file scanning, and imports run in Rust.
+
+## Supported Platforms
+
+| Platform | Minimum system | Release artifact | First launch |
+| --- | --- | --- | --- |
+| macOS Apple Silicon | macOS 11 | `PhytoIndex_2.0.0_aarch64.dmg` | Allow the app in Privacy and Security |
+| Windows x64 | Windows 10 or 11 | `PhytoIndex_2.0.0_x64-setup.exe` | Confirm the SmartScreen warning |
+
+Release builds do not require Python, Node.js, Rust, a database server, or other development tools on the destination computer. Windows downloads WebView2 during installation only when the runtime is missing.
+
+Packages are available from [GitHub Releases](https://github.com/baoyunfan0101/PhytoIndex/releases).
+
+## Features
+
+- Configure and scan one or more local photo roots.
+- Import plant taxonomy data from an Excel workbook.
+- Map indexed photos to taxa using the existing filename convention.
+- Browse large photo collections with cursor-based pagination.
+- Browse and search the photographed taxonomy tree.
+- Display GPS-enabled photos on a MapLibre map.
+- Export module tables as UTF-8 CSV files.
+- Keep photos, thumbnails, and the SQLite database on the local computer.
+
+## Architecture
 
 ```text
-app/
-  api/                  FastAPI routes
-  photos/               photo roots, metadata, directory index, thumbnails
-  taxa/                 workbook import and adjacency-list taxonomy
-  photos_taxa_mapping/  photo-to-taxon mapping and cached taxonomy subtree
-  map/                  GPS photo selection for the map view
-  operations/           local operation locks and progress
-frontend/               React + Vite UI
-  src/
-    components/         shared navigation, status, virtual list, photo viewer
-    features/           Admin, Photos, Taxonomy, and Map screens
-    lib/                browser, path, photo, storage, taxon, split-pane helpers
-    styles/             global, layout, component, and feature CSS
-data/                   local SQLite DB and thumbnail cache, ignored by git
-main.py                 local backend/frontend launcher
-scripts/                build helpers
-packaging/              PyInstaller configuration
+apps/
+  desktop/
+    src/                    React and TypeScript user interface
+    src-tauri/              Tauri adapter, IPC commands, and platform config
+crates/
+  phytoindex-core/          Rust domain services, SQLite, scanning, and imports
+docs/
+  BUILDING.md               Local and GitHub release instructions
+scripts/
+  build-macos.sh            Apple Silicon DMG build
+  build-windows.ps1         Windows x64 NSIS build
+.github/workflows/
+  release.yml               Two-platform GitHub release pipeline
+Cargo.toml                  Rust workspace and release profile
 ```
 
-## Setup
+The React application calls typed Rust commands through Tauri IPC. Original photos and generated thumbnails are served through a private `phytoindex://` protocol. The core crate does not depend on Tauri, so its services can be tested separately from the desktop shell.
+
+## Development
+
+Prerequisites:
+
+- Rust 1.85 or newer
+- Node.js 20 or newer and npm
+- Tauri 2 platform prerequisites
+- Tauri CLI 2
+
+Install the Tauri CLI and frontend dependencies:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-
-cd frontend
-npm install
+cargo install tauri-cli --version "^2.0" --locked
+cd apps/desktop
+npm ci
 ```
 
-## Run
-
-Use `main.py` to start the app:
+Run the desktop application:
 
 ```bash
-python main.py
+cd apps/desktop
+cargo tauri dev
 ```
 
-Options:
+Development builds store application data in the repository `data/` directory. Set `PHYTOINDEX_DATA_DIR` to override that location.
 
-- `--backend-only`: start only FastAPI.
-- `--frontend-only`: start only Vite.
-- `--frontend-path PATH`: prepend Node/npm paths.
-- `--backend-path PATH`: prepend native library paths used by Python packages.
-
-Example:
+## Test
 
 ```bash
-python main.py --frontend-path "/path/to/node/bin" --backend-path "/path/to/native/libs"
+cargo test --workspace
+
+cd apps/desktop
+npm run build
 ```
 
-Equivalent environment variables are `PHYTOINDEX_FRONTEND_PATH` and `PHYTOINDEX_BACKEND_PATH`. On Windows, use semicolon-separated paths.
+## Build and Release
 
-Manual development run:
+Build the Apple Silicon DMG on macOS:
 
 ```bash
-.venv/bin/uvicorn app.api.main:app --reload --host 127.0.0.1 --port 8000
-
-cd frontend
-npm run dev
+./scripts/build-macos.sh
 ```
 
-Open `http://127.0.0.1:5173`. API docs are at `http://127.0.0.1:8000/docs`.
+Build the Windows x64 installer from PowerShell on Windows:
 
-## Release
-
-Windows packaging is handled by PyInstaller:
-
-```bat
-scripts\build_windows.bat
+```powershell
+.\scripts\build-windows.ps1
 ```
 
-The script builds the frontend and creates `dist\PhytoIndex.exe`. The packaged app starts FastAPI, serves the built frontend, opens the browser, and stores runtime data under `%APPDATA%\PhytoIndex`.
+The repository also includes a GitHub Actions workflow that builds both platforms and creates a GitHub release. See [docs/BUILDING.md](docs/BUILDING.md) for prerequisites, package locations, verification, first-launch instructions, and the complete release procedure.
 
-Target users do not need Python or Node installed.
+## Version 1 Data Migration
 
-## Core Tables
+Release builds use the operating system application-data directory. On first start, version 2 looks for the legacy version 1 `PhytoIndex` database and thumbnail directory and imports them when present. The SQLite schema remains compatible with version 1.
 
-| Table | Owner | Purpose |
-| --- | --- | --- |
-| `photos_metadata` | photos | configured roots, order, and per-root sync time |
-| `photos` | photos | photo metadata, parsed scientific name, EXIF/GPS, thumbnail path, status |
-| `photos_dir` | photos | derived directory index for fast folder browsing |
-| `taxa_metadata` | taxa | workbook path, workbook file state, taxa sync time |
-| `taxa` | taxa | taxonomy adjacency list |
-| `photos_taxa_mapping_metadata` | mapping | mapping sync time and source module sync times |
-| `photos_taxa_mapping` | mapping | `photo_id -> taxon_id` |
-| `photos_taxa_mapping_taxa` | mapping | photographed taxonomy subtree with original taxon ids |
+The permanent application identifier is:
 
-The map module currently reads GPS-enabled rows from `photos`; it does not own a table.
+```text
+io.github.baoyunfan0101.phytoindex
+```
 
-## Main Workflows
+## License
 
-- Configure photo roots and a taxonomy workbook in Admin.
-- Update or rebuild photos, taxa, and photo-taxa mapping from Admin.
-- Browse photos by root/folder.
-- Load large photo folders through cursor paging backed by `photos_dir` and photos browse indexes.
-- Browse photos by mapped taxonomy tree.
-- Search mapped taxa by Chinese name or binomial name.
-- Browse GPS-enabled photos on a MapLibre/OpenStreetMap map.
-- Export module tables as CSV.
-
-## Module Docs
-
-- [API](app/api/README.md)
-- [Photos](app/photos/README.md)
-- [Taxa](app/taxa/README.md)
-- [Photos-Taxa Mapping](app/photos_taxa_mapping/README.md)
-- [Map](app/map/README.md)
-- [Frontend](frontend/README.md)
+[MIT](LICENSE)

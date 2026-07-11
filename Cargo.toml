@@ -1,0 +1,19 @@
+[workspace]
+members = [
+  "apps/desktop/src-tauri",
+  "crates/phytoindex-core",
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/baoyunfan0101/PhytoIndex"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
