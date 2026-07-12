@@ -6,7 +6,7 @@ import { getMapPhotos, photoThumbnailUrl, type MapPhoto } from "../../bridge";
 import { readStorage, writeStorage } from "../../lib/storage";
 import { MapPreviewPanel } from "./MapPreviewPanel";
 import { expandCluster, persistMapView, syncPhotoLayers } from "./mapLayers";
-import { getMapTileProvider, MAP_PROVIDER_KEY } from "./mapProviders";
+import { getMapProviderConfigurationError, getMapTileProvider, readMapSettings } from "./mapProviders";
 import { DEFAULT_MAP_STATE, MAP_STATE_KEY, type MapPreviewMode } from "./mapState";
 import { centerForPhotos, mapPhotosToGeoJson, type MapPhotoFeatureCollection } from "./mapUtils";
 
@@ -25,8 +25,9 @@ export function MapPage() {
   const [previewMode, setPreviewMode] = useState<MapPreviewMode>(cachedState.previewMode);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [providerId] = useState(() => readStorage(MAP_PROVIDER_KEY, "osm"));
-  const provider = getMapTileProvider(providerId);
+  const [mapSettings] = useState(readMapSettings);
+  const provider = getMapTileProvider(mapSettings.providerId, mapSettings.tiandituToken);
+  const providerConfigurationError = getMapProviderConfigurationError(mapSettings);
   const selectedPhoto = photos.find((photo) => photo.photo_id === selectedPhotoId) ?? null;
   const previewPhoto = photos.find((photo) => photo.photo_id === previewPhotoId) ?? null;
   const geoJson = useMemo(() => mapPhotosToGeoJson(photos), [photos]);
@@ -52,10 +53,6 @@ export function MapPage() {
       .catch((nextError) => setError(nextError instanceof Error ? nextError.message : String(nextError)))
       .finally(() => setLoading(false));
   }, []);
-
-  useEffect(() => {
-    writeStorage(MAP_PROVIDER_KEY, providerId);
-  }, [providerId]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -147,7 +144,7 @@ export function MapPage() {
       <div className="map-shell">
         <div className="map-canvas" ref={containerRef} />
         {loading && <div className="map-message">Loading map photos</div>}
-        {error && <div className="map-message error">{error}</div>}
+        {(error || providerConfigurationError) && <div className="map-message error">{error ?? providerConfigurationError}</div>}
         {!loading && !error && !photos.length && (
           <div className="map-message">No photos with GPS coordinates</div>
         )}

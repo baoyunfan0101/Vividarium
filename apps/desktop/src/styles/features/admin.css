@@ -59,3 +59,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.map-token-field {
+  display: grid;
+  gap: 5px;
+}
+
+.map-token-field span {
+  color: #52615d;
+  font-size: 12px;
+}

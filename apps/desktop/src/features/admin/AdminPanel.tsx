@@ -7,7 +7,7 @@ import type { ExportModule, RootRow } from "./types";
 import { formatBytes, formatOperationAlert, isConfirmationResponse, mergeRootSelection, moveSelectedRows, operationLabel, uniqueRoots } from "./adminUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
 import { displayPath } from "../../lib/pathUtils";
-import { MAP_PROVIDER_KEY, MAP_TILE_PROVIDERS } from "../map/mapProviders";
+import { MAP_TILE_PROVIDERS, readMapSettings, writeMapSettings, type MapProviderId, type MapSettings } from "../map/mapProviders";
 
 const ADMIN_ROOT_ROWS_KEY = "phytoindex.admin.rootRows";
 const ADMIN_TAXA_METADATA_KEY = "phytoindex.admin.taxaMetadata";
@@ -27,7 +27,7 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
   });
   const [exportModule, setExportModule] = useState<ExportModule>(cachedExport.module);
   const [exportTable, setExportTable] = useState(cachedExport.table);
-  const [mapProviderId, setMapProviderId] = useState(() => readStorage(MAP_PROVIDER_KEY, "osm"));
+  const [mapSettings, setMapSettings] = useState<MapSettings>(readMapSettings);
   const [editingRootIndex, setEditingRootIndex] = useState<number | null>(null);
   const [localBusy, setLocalBusy] = useState({
     photos: false,
@@ -254,10 +254,10 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
     writeStorage(ADMIN_EXPORT_KEY, { module: moduleName, table: firstTable });
   }
 
-  function selectMapProvider(providerId: string) {
-    setMapProviderId(providerId);
-    writeStorage(MAP_PROVIDER_KEY, providerId);
-    setMessage("Map provider saved");
+  function updateMapSettings(nextSettings: MapSettings) {
+    setMapSettings(nextSettings);
+    writeMapSettings(nextSettings);
+    setMessage("Map settings saved");
   }
 
   async function exportCurrentTable() {
@@ -355,14 +355,29 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
       <div className="panel">
         <h2>Map</h2>
         <p className="panel-subtitle">Tile provider</p>
-        <select value={mapProviderId} onChange={(event) => selectMapProvider(event.target.value)}>
+        <select value={mapSettings.providerId} onChange={(event) => updateMapSettings({ ...mapSettings, providerId: event.target.value as MapProviderId })}>
           {MAP_TILE_PROVIDERS.map((provider) => (
             <option value={provider.id} key={provider.id}>{provider.name}</option>
           ))}
         </select>
+        {mapSettings.providerId === "tianditu" && (
+          <label className="map-token-field">
+            <span>Application token (tk)</span>
+            <input
+              type="password"
+              value={mapSettings.tiandituToken}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="Enter your Tianditu token"
+              onChange={(event) => setMapSettings({ ...mapSettings, tiandituToken: event.target.value })}
+              onBlur={() => updateMapSettings(mapSettings)}
+            />
+          </label>
+        )}
         <div className="metadata-list">
           <div><span>Renderer</span><strong>MapLibre GL JS</strong></div>
-          <div><span>Provider</span><strong>{MAP_TILE_PROVIDERS.find((provider) => provider.id === mapProviderId)?.name ?? mapProviderId}</strong></div>
+          <div><span>Provider</span><strong>{MAP_TILE_PROVIDERS.find((provider) => provider.id === mapSettings.providerId)?.name ?? mapSettings.providerId}</strong></div>
+          {mapSettings.providerId === "tianditu" && <div><span>Application token</span><strong>{mapSettings.tiandituToken ? "Configured" : "Required"}</strong></div>}
         </div>
       </div>
       <div className="panel">
