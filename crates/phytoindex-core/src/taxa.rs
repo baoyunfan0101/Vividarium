@@ -1,7 +1,9 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Cursor;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader, open_workbook_auto_from_rs};
 use chrono::{DateTime, Local};
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -161,7 +163,10 @@ fn import_taxa(
     progress: &mut ProgressCallback<'_>,
 ) -> CoreResult<TaxaSyncResult> {
     let workbook_path = resolve_workbook_path(database, path)?;
-    let rows = read_taxa_rows(&workbook_path)?;
+    progress(0, None, "Reading knowledge base");
+    let workbook_data: Arc<[u8]> = fs::read(&workbook_path)?.into();
+    progress(0, None, "Parsing knowledge base");
+    let rows = read_taxa_rows(workbook_data)?;
     let operation = if preserve_binomial_ids {
         "Updating taxa"
     } else {
@@ -196,6 +201,7 @@ fn import_taxa(
     )?;
     let total_taxa: i64 =
         transaction.query_row("SELECT COUNT(*) FROM taxa", [], |row| row.get(0))?;
+    progress(rows.len() as u64, None, "Committing taxa database");
     transaction.commit()?;
     Ok(TaxaSyncResult {
         knowledge_base_path: workbook_path.to_string_lossy().into_owned(),
@@ -222,9 +228,9 @@ fn resolve_workbook_path(database: &Database, value: Option<&str>) -> CoreResult
     Ok(path)
 }
 
-fn read_taxa_rows(path: &Path) -> CoreResult<Vec<TaxaRow>> {
-    let mut workbook =
-        open_workbook_auto(path).map_err(|error| CoreError::Workbook(error.to_string()))?;
+fn read_taxa_rows(data: Arc<[u8]>) -> CoreResult<Vec<TaxaRow>> {
+    let mut workbook = open_workbook_auto_from_rs(Cursor::new(data))
+        .map_err(|error| CoreError::Workbook(error.to_string()))?;
     let range = workbook
         .worksheet_range(PLANTS_SHEET_NAME)
         .map_err(|error| CoreError::Workbook(error.to_string()))?;

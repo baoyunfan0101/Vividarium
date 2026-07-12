@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use phytoindex_core::{Database, OperationState, OperationsStatus};
@@ -10,6 +11,44 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 static GLOBAL_STATE: OnceLock<AppState> = OnceLock::new();
+const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
+
+struct ProgressEventThrottle {
+    last_emitted_at: Option<Instant>,
+    last_message: Option<String>,
+    last_processed: Option<u64>,
+    last_total: Option<u64>,
+}
+
+impl ProgressEventThrottle {
+    fn new() -> Self {
+        Self {
+            last_emitted_at: None,
+            last_message: None,
+            last_processed: None,
+            last_total: None,
+        }
+    }
+
+    fn should_emit(&mut self, processed: u64, total: Option<u64>, message: &str) -> bool {
+        let first = self.last_emitted_at.is_none();
+        let phase_changed =
+            self.last_message.as_deref() != Some(message) || self.last_total != total;
+        let completed =
+            total.is_some_and(|value| processed >= value) && self.last_processed != Some(processed);
+        let interval_elapsed = self
+            .last_emitted_at
+            .is_some_and(|instant| instant.elapsed() >= PROGRESS_EVENT_INTERVAL);
+        let emit = first || phase_changed || completed || interval_elapsed;
+        if emit {
+            self.last_emitted_at = Some(Instant::now());
+            self.last_message = Some(message.into());
+            self.last_processed = Some(processed);
+            self.last_total = total;
+        }
+        emit
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -101,13 +140,16 @@ impl OperationManager {
             let progress_manager = manager.clone();
             let progress_app = app.clone();
             let progress_task_id = task_id.clone();
+            let mut throttle = ProgressEventThrottle::new();
             let mut progress = move |processed: u64, total: Option<u64>, message: &str| {
+                let emit = throttle.should_emit(processed, total, message);
                 let current = progress_manager.update_progress(
                     module,
                     &progress_task_id,
                     processed,
                     total,
                     message,
+                    emit,
                 );
                 if let Some(current) = current {
                     let _ = progress_app.emit("operation-progress", current);
@@ -129,6 +171,7 @@ impl OperationManager {
         processed: u64,
         total: Option<u64>,
         message: &str,
+        snapshot: bool,
     ) -> Option<OperationState> {
         let mut states = self.states.lock().ok()?;
         let state = states.get_mut(module)?;
@@ -138,7 +181,7 @@ impl OperationManager {
         state.processed = processed;
         state.total = total;
         state.message = message.into();
-        Some(state.clone())
+        snapshot.then(|| state.clone())
     }
 
     fn finish(
@@ -194,4 +237,21 @@ fn blocked_by(states: &BTreeMap<String, OperationState>, module: &str) -> Option
 
 fn now() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_throttle_emits_first_phase_changes_and_completion() {
+        let mut throttle = ProgressEventThrottle::new();
+
+        assert!(throttle.should_emit(0, None, "Reading"));
+        assert!(!throttle.should_emit(1, None, "Reading"));
+        assert!(throttle.should_emit(0, Some(100), "Importing"));
+        assert!(!throttle.should_emit(1, Some(100), "Importing"));
+        assert!(throttle.should_emit(100, Some(100), "Importing"));
+        assert!(throttle.should_emit(100, None, "Committing"));
+    }
 }

@@ -168,6 +168,7 @@ pub fn update_mapping(
     database: &Database,
     progress: &mut ProgressCallback<'_>,
 ) -> CoreResult<MappingSyncResult> {
+    progress(0, None, "Loading changed photos");
     let photos = photos::list_changed_photos(database)?;
     sync_photos(database, &photos, false, progress)
 }
@@ -176,6 +177,7 @@ pub fn rebuild_mapping(
     database: &Database,
     progress: &mut ProgressCallback<'_>,
 ) -> CoreResult<MappingSyncResult> {
+    progress(0, None, "Loading photos");
     let photos = photos::list_photos(database)?;
     sync_photos(database, &photos, true, progress)
 }
@@ -247,6 +249,7 @@ fn sync_photos(
         "#,
         params![now, photos_last_synced_at, taxa_last_synced_at],
     )?;
+    progress(photos.len() as u64, None, "Committing mapping database");
     transaction.commit()?;
     Ok(MappingSyncResult {
         processed: photos.len(),

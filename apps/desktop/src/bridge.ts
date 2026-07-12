@@ -268,18 +268,16 @@ export async function waitForOperation(operation: OperationState): Promise<unkno
     return { result: operation.result };
   }
 
-  let latest: OperationState | null = null;
   let wake: (() => void) | null = null;
   const unlisten = await listen<OperationState>("operation-progress", (event) => {
     if (event.payload.task_id !== operation.task_id) {
       return;
     }
-    latest = event.payload;
     wake?.();
   });
   try {
     while (true) {
-      const current = latest ?? (await getOperationsStatus())[operation.module];
+      const current = (await getOperationsStatus())[operation.module];
       if (current.task_id !== operation.task_id) {
         throw new Error(`${operation.module} operation was replaced before it finished`);
       }
