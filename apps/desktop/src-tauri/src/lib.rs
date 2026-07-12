@@ -25,6 +25,7 @@ pub fn run() {
             commands::get_all_photos,
             commands::get_changed_photos,
             commands::get_photo,
+            commands::get_photo_availability,
             commands::get_map_photos,
             commands::get_taxa_metadata,
             commands::save_knowledge_base_path,

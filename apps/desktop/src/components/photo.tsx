@@ -1,7 +1,7 @@
-import { Camera, Image } from "lucide-react";
+import { Camera, Image, ImageOff, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent, type MutableRefObject, type PointerEvent, type Ref, type SyntheticEvent, type UIEvent, type WheelEvent } from "react";
-import type { Photo, Taxon } from "../bridge";
-import { photoFileUrl, photoThumbnailUrl, searchMappingByBinomial } from "../bridge";
+import type { Photo, PhotoAvailability, Taxon } from "../bridge";
+import { getPhotoAvailability, photoFileUrl, photoThumbnailUrl, searchMappingByBinomial } from "../bridge";
 import { photoDisplayPath } from "../lib/photoUtils";
 import { lineageForNode } from "../lib/taxonUtils";
 import { LoadingOverlay } from "./status";
@@ -33,16 +33,80 @@ export function PhotoPreview({
   photo: Photo | null;
   mode?: PreviewMode;
 }) {
+  const [availability, setAvailability] = useState<PhotoAvailability | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAvailability(null);
+    if (!photo) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    getPhotoAvailability(photo.photo_id)
+      .then((result) => {
+        if (!cancelled) {
+          setAvailability(result);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAvailability({ available: false, error: String(error) });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [photo?.photo_id]);
+
   if (!photo) {
     return <div className="preview empty"><Camera size={34} /><span>Select a photo</span></div>;
+  }
+  if (availability?.available === false) {
+    if (mode === "details") {
+      return (
+        <div className="photo-preview-with-notice">
+          <PhotoUnavailableNotice photo={photo} error={availability.error} compact />
+          <PhotoDetails photo={photo} />
+        </div>
+      );
+    }
+    return <PhotoUnavailableNotice photo={photo} error={availability.error} />;
   }
   if (mode === "details") {
     return <PhotoDetails photo={photo} />;
   }
-  return <PhotoImageViewer photo={photo} />;
+  return (
+    <PhotoImageViewer
+      photo={photo}
+      onUnavailable={(error) => setAvailability({ available: false, error })}
+    />
+  );
 }
 
-function PhotoImageViewer({ photo }: { photo: Photo }) {
+function PhotoUnavailableNotice({
+  photo,
+  error,
+  compact = false,
+}: {
+  photo: Photo;
+  error: string | null;
+  compact?: boolean;
+}) {
+  return (
+    <div className={compact ? "photo-unavailable-notice compact" : "preview photo-unavailable-notice"} role="alert" title={error ?? undefined}>
+      <TriangleAlert size={compact ? 18 : 34} />
+      <div>
+        <strong>Photo file unavailable</strong>
+        <span>The file may have been moved, renamed, deleted, or disconnected.</span>
+        <code>{photoDisplayPath(photo)}</code>
+        {!compact && <small>Run Update Photos or Rebuild Photos to refresh the index.</small>}
+      </div>
+    </div>
+  );
+}
+
+function PhotoImageViewer({ photo, onUnavailable }: { photo: Photo; onUnavailable: (error: string) => void }) {
   const [zoom, setZoom] = useState(1);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [imageSize, setImageSize] = useState({
@@ -212,6 +276,7 @@ function PhotoImageViewer({ photo }: { photo: Photo }) {
             alt={photo.filename}
             draggable={false}
             onLoad={handleImageLoad}
+            onError={() => onUnavailable("The original photo could not be loaded")}
             style={{
               width: baseDisplaySize.width,
               height: baseDisplaySize.height,
@@ -497,6 +562,7 @@ export function scrollPhotoGridToIndex(element: HTMLDivElement | null, index: nu
 
 function LazyThumbnail({ photo }: { photo: Photo }) {
   const [visible, setVisible] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
@@ -540,6 +606,15 @@ function LazyThumbnail({ photo }: { photo: Photo }) {
     return () => observer.disconnect();
   }, [visible]);
 
+  if (loadFailed) {
+    return (
+      <div className="photo-thumbnail-unavailable" title={`Photo unavailable: ${photoDisplayPath(photo)}`}>
+        <ImageOff size={24} />
+        <span>File unavailable</span>
+      </div>
+    );
+  }
+
   return (
     <img
       ref={imageRef}
@@ -547,6 +622,7 @@ function LazyThumbnail({ photo }: { photo: Photo }) {
       alt={photo.filename}
       loading="lazy"
       decoding="async"
+      onError={() => setLoadFailed(true)}
     />
   );
 }

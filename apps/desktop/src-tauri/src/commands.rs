@@ -65,6 +65,14 @@ pub fn get_photo(state: State<'_, AppState>, photo_id: i64) -> CommandResult<Pho
 }
 
 #[tauri::command]
+pub fn get_photo_availability(state: State<'_, AppState>, photo_id: i64) -> CommandResult<Value> {
+    Ok(match photos::photo_file_path(&state.database, photo_id) {
+        Ok(_) => json!({ "available": true, "error": null }),
+        Err(error) => json!({ "available": false, "error": error.to_string() }),
+    })
+}
+
+#[tauri::command]
 pub fn get_map_photos(state: State<'_, AppState>) -> CommandResult<Vec<Photo>> {
     photos::list_map_photos(&state.database, None).map_err(error)
 }

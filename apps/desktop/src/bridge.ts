@@ -26,6 +26,11 @@ export type Photo = {
 
 export type MapPhoto = Photo;
 
+export type PhotoAvailability = {
+  available: boolean;
+  error: string | null;
+};
+
 export type PhotoRootMetadata = {
   root: string;
   last_synced_at: string | null;
@@ -108,6 +113,10 @@ export function photoFileUrl(photo: Photo): string {
 
 export function photoThumbnailUrl(photo: Photo): string {
   return `${convertFileSrc(`thumbnail/${photo.photo_id}`, "phytoindex")}?${photoVersionParams(photo)}`;
+}
+
+export function getPhotoAvailability(photoId: number): Promise<PhotoAvailability> {
+  return invoke("get_photo_availability", { photoId });
 }
 
 function photoVersionParams(photo: Photo): string {
