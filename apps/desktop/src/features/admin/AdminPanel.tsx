@@ -6,6 +6,7 @@ import { EXPORT_TABLES } from "./constants";
 import type { ExportModule, RootRow } from "./types";
 import { formatBytes, formatOperationAlert, isConfirmationResponse, mergeRootSelection, moveSelectedRows, operationLabel, uniqueRoots } from "./adminUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
+import { displayPath } from "../../lib/pathUtils";
 import { MAP_PROVIDER_KEY, MAP_TILE_PROVIDERS } from "../map/mapProviders";
 
 const ADMIN_ROOT_ROWS_KEY = "phytoindex.admin.rootRows";
@@ -27,6 +28,7 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
   const [exportModule, setExportModule] = useState<ExportModule>(cachedExport.module);
   const [exportTable, setExportTable] = useState(cachedExport.table);
   const [mapProviderId, setMapProviderId] = useState(() => readStorage(MAP_PROVIDER_KEY, "osm"));
+  const [editingRootIndex, setEditingRootIndex] = useState<number | null>(null);
   const [localBusy, setLocalBusy] = useState({
     photos: false,
     taxa: false,
@@ -297,10 +299,14 @@ export function AdminPanel({ setMessage }: { setMessage: (message: string) => vo
                 aria-label="Select root"
               />
               <input
-                value={row.root}
+                value={editingRootIndex === index ? row.root : displayPath(row.root)}
                 disabled={photosBlocked}
+                onFocus={() => setEditingRootIndex(index)}
                 onChange={(event) => updateRootValue(index, event.target.value)}
-                onBlur={() => persistRoots(rootRows)}
+                onBlur={() => {
+                  setEditingRootIndex(null);
+                  persistRoots(rootRows);
+                }}
                 placeholder="/path/to/photos"
               />
               <button type="button" disabled={photosBlocked} title="Browse root" onClick={() => browseRoot(index)}><FolderOpen size={15} /></button>

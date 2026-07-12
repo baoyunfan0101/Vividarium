@@ -5,7 +5,7 @@ import { PhotoGrid, PhotoPreview, scrollPhotoGridToIndex } from "../../component
 import { LoadingOverlay } from "../../components/status";
 import { VirtualList } from "../../components/virtual";
 import { blurActiveElement, findTypeSelectIndex, isFormElement, isSelectionKey, isTypeSelectKey, nextTypeSelect, scrollListItemIntoView, shouldClearSelection, type TypeSelectState } from "../../lib/browserUtils";
-import { breadcrumb, joinPath } from "../../lib/pathUtils";
+import { breadcrumb, displayPath, joinPath } from "../../lib/pathUtils";
 import { readStorage, writeStorage } from "../../lib/storage";
 import { useResizableSplit } from "../../lib/useResizableSplit";
 
@@ -382,7 +382,7 @@ export function PhotosExplorer({ setMessage }: { setMessage: (message: string) =
             }}
           >
             <option value="">Select root</option>
-            {roots.map((item) => <option value={item} key={item}>{item}</option>)}
+            {roots.map((item) => <option value={item} key={item}>{displayPath(item)}</option>)}
           </select>
         </div>
         <div className="crumbs">

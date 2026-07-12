@@ -1,4 +1,5 @@
 import type { OperationState, Photo, PhotoRootMetadata } from "../../bridge";
+import { displayPath } from "../../lib/pathUtils";
 import type { RootRow } from "./types";
 
 export function uniqueRoots(roots: string[]): string[] {
@@ -35,7 +36,7 @@ export function moveSelectedRows(rows: RootRow[], direction: -1 | 1): RootRow[] 
 export function formatOperationAlert(label: string, result: unknown): string {
   if (hasUnmappedPhotos(result)) {
     const photos = result.result.unmapped_photos
-      .map((photo) => `${photo.photo_id}: ${photo.root}/${photo.relative_path}`)
+      .map((photo) => `${photo.photo_id}: ${displayPath(photo.root)}/${photo.relative_path}`)
       .join("\n");
     return `${label} completed with ${result.result.unmapped} unmapped photos:\n${photos}`;
   }
