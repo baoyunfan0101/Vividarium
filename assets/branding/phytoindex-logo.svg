@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" width="1254" height="1254">
+  <rect x="40" y="38" width="1174" height="1178" rx="224" ry="224" fill="#044D22"/>
+
+  <!-- Smooth leaf silhouette -->
+  <path d="
+    M 769 377
+    C 735 410, 675 433, 606 458
+    C 540 482, 493 511, 463 552
+    C 438 586, 432 626, 440 665
+    C 445 693, 456 718, 472 739
+    C 480 757, 486 785, 489 818
+    C 498 823, 507 827, 515 828
+    C 514 805, 512 786, 522 771
+    C 534 757, 557 757, 581 752
+    C 638 743, 684 717, 718 676
+    C 756 631, 773 575, 777 510
+    C 780 459, 777 413, 769 377
+    Z" fill="#97D155"/>
+
+  <!-- Smooth central vein: narrow at the tip and gradually wider toward the base -->
+  <path d="
+    M 474 818
+    C 474 775, 481 733, 495 697
+    C 511 662, 533 631, 562 603
+    C 591 576, 624 553, 655 538
+    C 625 555, 596 579, 569 608
+    C 542 637, 521 669, 505 704
+    C 494 734, 488 775, 489 818
+    Z" fill="#044D22"/>
+
+  <!-- Handle is behind the lens, so it cannot leak into the inner circle -->
+  <line x1="826" y1="813" x2="976" y2="963"
+        stroke="#FDFEFE" stroke-width="84" stroke-linecap="round"/>
+
+  <!-- Lens drawn above the handle -->
+  <circle cx="609.1" cy="560.4" r="316.3"
+          fill="none" stroke="#FDFEFE" stroke-width="65.4"/>
+</svg>
