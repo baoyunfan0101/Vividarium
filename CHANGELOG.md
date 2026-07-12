@@ -2,6 +2,26 @@
 
 All notable changes to PhytoIndex are documented in this file.
 
+## [2.1.0] - 2026-07-12
+
+### Added
+
+- Added explicit warnings when indexed photo files are unavailable on disk.
+- Added Tianditu as an optional map tile provider for networks where OpenStreetMap tiles are unavailable.
+- Added local map provider metadata and masked Tianditu application-token configuration.
+
+### Changed
+
+- Refreshed the application logo assets.
+- Improved progress reporting for long-running photo, taxa, and mapping operations.
+- Kept map provider credentials in local configuration and excluded them from source control.
+
+### Fixed
+
+- Fixed Windows rebuild operations that appeared stalled or caused the interface to become unresponsive.
+- Hid the Windows extended-path prefix in displayed photo-root paths.
+- Preserved photo markers and displayed a clear configuration error when a base map cannot be configured.
+
 ## [2.0.0] - 2026-07-11
 
 ### Changed

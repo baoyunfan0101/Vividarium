@@ -2,7 +2,7 @@
 
 PhytoIndex is a local-first desktop application for indexing plant photos. It scans photo folders, imports a taxonomy workbook, maps photos to taxa, and provides photo, taxonomy, and map browsers.
 
-Current release: `v2.0.0`
+Current release: `v2.1.0`
 
 Version 2 replaces the Python service and separately hosted frontend from version 1 with a Tauri 2 desktop application. The user interface remains React and TypeScript, while application services, SQLite access, file scanning, and imports run in Rust.
 
@@ -10,8 +10,8 @@ Version 2 replaces the Python service and separately hosted frontend from versio
 
 | Platform | Minimum system | Release artifact | First launch |
 | --- | --- | --- | --- |
-| macOS Apple Silicon | macOS 11 | `PhytoIndex_2.0.0_aarch64.dmg` | Allow the app in Privacy and Security |
-| Windows x64 | Windows 10 or 11 | `PhytoIndex_2.0.0_x64-setup.exe` | Confirm the SmartScreen warning |
+| macOS Apple Silicon | macOS 11 | `PhytoIndex_2.1.0_aarch64.dmg` | Allow the app in Privacy and Security |
+| Windows x64 | Windows 10 or 11 | `PhytoIndex_2.1.0_x64-setup.exe` | Confirm the SmartScreen warning |
 
 Release builds do not require Python, Node.js, Rust, a database server, or other development tools on the destination computer. Windows downloads WebView2 during installation only when the runtime is missing.
 
@@ -24,7 +24,7 @@ Packages are available from [GitHub Releases](https://github.com/baoyunfan0101/P
 - Map indexed photos to taxa using the existing filename convention.
 - Browse large photo collections with cursor-based pagination.
 - Browse and search the photographed taxonomy tree.
-- Display GPS-enabled photos on a MapLibre map.
+- Display GPS-enabled photos on a MapLibre map with OpenStreetMap or Tianditu tiles.
 - Export module tables as UTF-8 CSV files.
 - Keep photos, thumbnails, and the SQLite database on the local computer.
 
@@ -74,6 +74,10 @@ cargo tauri dev
 ```
 
 Development builds store application data in the repository `data/` directory. Set `PHYTOINDEX_DATA_DIR` to override that location.
+
+## Map Providers
+
+OpenStreetMap is available without configuration. Tianditu can be selected in `Admin > Map` for networks where OpenStreetMap tiles are unavailable. Tianditu requires a browser-side application token (`tk`) from the Tianditu developer platform. The token is stored in local application metadata, masked in the interface, and must not be committed to the repository.
 
 ## Test
 

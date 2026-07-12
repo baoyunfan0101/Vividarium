@@ -61,6 +61,8 @@ jobs:
             Private desktop build for macOS Apple Silicon and Windows x64.
 
             These packages are not notarized or signed by a paid developer certificate. Manual trust confirmation is required on first launch.
+
+            See the repository CHANGELOG for release details and upgrade notes.
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
