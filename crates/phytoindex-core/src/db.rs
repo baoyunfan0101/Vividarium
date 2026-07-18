@@ -44,17 +44,19 @@ impl Database {
     fn initialize(&self) -> CoreResult<()> {
         let connection = self.connect()?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version == 1 {
-            return Err(CoreError::InvalidArgument(
-                "legacy database version 1 is not supported; open a new vividarium.db".into(),
-            ));
+        match version {
+            0 | SCHEMA_VERSION => connection.execute_batch(SCHEMA)?,
+            1 => {
+                return Err(CoreError::InvalidArgument(
+                    "legacy database version 1 is not supported; open a new vividarium.db".into(),
+                ));
+            }
+            _ => {
+                return Err(CoreError::InvalidArgument(format!(
+                    "unsupported database schema version: {version}"
+                )));
+            }
         }
-        if version != 0 && version != SCHEMA_VERSION {
-            return Err(CoreError::InvalidArgument(format!(
-                "unsupported database schema version: {version}"
-            )));
-        }
-        connection.execute_batch(SCHEMA)?;
         Ok(())
     }
 }
@@ -154,6 +156,28 @@ CREATE TABLE IF NOT EXISTS taxon_identifiers (
     FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS taxonomy_operation_batches (
+    batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS taxonomy_operations (
+    operation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    row_number INTEGER NOT NULL,
+    taxon_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    input_json TEXT NOT NULL,
+    options_json TEXT NOT NULL,
+    changes_json TEXT NOT NULL,
+    before_json TEXT,
+    after_json TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reverted_at TEXT,
+    CHECK (status IN ('applied', 'reverted')),
+    FOREIGN KEY (batch_id) REFERENCES taxonomy_operation_batches(batch_id) ON DELETE RESTRICT
+);
+
 CREATE TABLE IF NOT EXISTS taxa_metadata (
     knowledge_base_path TEXT,
     knowledge_base_size INTEGER,
@@ -192,6 +216,10 @@ CREATE INDEX IF NOT EXISTS idx_scientific_name ON scientific(scientific_name);
 CREATE INDEX IF NOT EXISTS idx_english_name ON english(english_name);
 CREATE INDEX IF NOT EXISTS idx_chinese_name ON chinese(chinese_name);
 CREATE INDEX IF NOT EXISTS idx_taxon_identifiers_taxon ON taxon_identifiers(taxon_id);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_batch
+    ON taxonomy_operations(batch_id, row_number);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_taxon
+    ON taxonomy_operations(taxon_id, operation_id);
 CREATE INDEX IF NOT EXISTS idx_photos_root_path ON photos(root, relative_path);
 CREATE INDEX IF NOT EXISTS idx_photos_browse
     ON photos(root, parent_dir, status, filename);
@@ -286,6 +314,8 @@ mod tests {
             "english",
             "chinese",
             "taxon_identifiers",
+            "taxonomy_operation_batches",
+            "taxonomy_operations",
         ] {
             let exists: bool = connection
                 .query_row(

@@ -16,6 +16,8 @@ const ALLOWED_TABLES: &[&str] = &[
     "english",
     "chinese",
     "taxon_identifiers",
+    "taxonomy_operation_batches",
+    "taxonomy_operations",
     "taxa_metadata",
     "photos_taxa_mapping",
     "photos_taxa_mapping_metadata",
