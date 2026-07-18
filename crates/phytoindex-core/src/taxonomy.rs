@@ -381,7 +381,7 @@ fn prepare_row(
         )
     })?;
     let target_name = target_name.to_string();
-    validate_required_parent(target_rank, &target_name, &mut path)?;
+    validate_required_parent(target_rank, &target_name, &mut path, options.allow_new_taxa)?;
     let search =
         find_candidates(transaction, target_rank, &target_name, &path).map_err(core_issue)?;
     let had_name_match = search.had_name_match;
@@ -433,7 +433,11 @@ fn validate_required_parent(
     target_rank: TaxonRank,
     target_name: &str,
     path: &mut NormalizedPath,
+    allow_new_taxa: bool,
 ) -> Result<(), RowIssue> {
+    if !allow_new_taxa {
+        return Ok(());
+    }
     let Some(parent_rank) = target_rank.parent() else {
         return Ok(());
     };
@@ -1296,6 +1300,23 @@ mod tests {
         .unwrap();
         assert_eq!(result.rows[0].status, TaxonRowStatus::Invalid);
         assert!(result.rows[0].message.contains("family"));
+    }
+
+    #[test]
+    fn does_not_require_the_parent_when_new_taxa_are_disabled() {
+        let (_directory, database) = database();
+        let ids = seed_lineage(&database);
+        let result = preview_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                genus: Some("Canis".into()),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.rows[0].status, TaxonRowStatus::NoChange);
+        assert_eq!(result.rows[0].target.as_ref().unwrap().taxon_id, ids[3]);
     }
 
     #[test]
