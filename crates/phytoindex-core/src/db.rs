@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Row};
 
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::models::{Photo, Taxon};
+
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct Database {
@@ -29,117 +31,207 @@ impl Database {
     pub fn connect(&self) -> CoreResult<Connection> {
         let connection = Connection::open(&self.path)?;
         connection.busy_timeout(Duration::from_secs(30))?;
-        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        connection.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            "#,
+        )?;
         Ok(connection)
     }
 
     fn initialize(&self) -> CoreResult<()> {
         let connection = self.connect()?;
-        connection.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS photos (
-                photo_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                root TEXT NOT NULL,
-                relative_path TEXT NOT NULL,
-                parent_dir TEXT NOT NULL,
-                path_depth INTEGER NOT NULL,
-                filename TEXT NOT NULL,
-                binomial_name TEXT,
-                captured_at TEXT,
-                location TEXT,
-                camera TEXT,
-                width INTEGER,
-                height INTEGER,
-                file_size INTEGER,
-                modified_at REAL,
-                longitude REAL,
-                latitude REAL,
-                exif_json TEXT,
-                thumbnail_path TEXT DEFAULT NULL,
-                status TEXT NOT NULL,
-                UNIQUE(root, relative_path)
-            );
-
-            CREATE TABLE IF NOT EXISTS photos_dir (
-                root TEXT NOT NULL,
-                relative_dir TEXT NOT NULL,
-                parent_dir TEXT NOT NULL,
-                name TEXT NOT NULL,
-                path_depth INTEGER NOT NULL,
-                PRIMARY KEY (root, relative_dir)
-            );
-
-            CREATE TABLE IF NOT EXISTS photos_metadata (
-                root TEXT PRIMARY KEY,
-                last_synced_at TEXT,
-                sort_order INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS taxa (
-                taxon_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rank TEXT NOT NULL,
-                name TEXT NOT NULL,
-                parent_id INTEGER REFERENCES taxa(taxon_id) ON DELETE CASCADE,
-                binomial_name TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS taxa_metadata (
-                knowledge_base_path TEXT,
-                knowledge_base_size INTEGER,
-                knowledge_base_modified_at TEXT,
-                last_synced_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS photos_taxa_mapping_metadata (
-                last_synced_at TEXT,
-                photos_last_synced_at TEXT,
-                taxa_last_synced_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS photos_taxa_mapping (
-                photo_id INTEGER PRIMARY KEY,
-                taxon_id INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS photos_taxa_mapping_taxa (
-                taxon_id INTEGER PRIMARY KEY,
-                rank TEXT NOT NULL,
-                name TEXT NOT NULL,
-                parent_id INTEGER,
-                binomial_name TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_photos_root_path
-                ON photos(root, relative_path);
-            CREATE INDEX IF NOT EXISTS idx_photos_browse
-                ON photos(root, parent_dir, status, filename);
-            CREATE INDEX IF NOT EXISTS idx_photos_browse_cursor
-                ON photos(root, parent_dir, status, filename, photo_id);
-            CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status);
-            CREATE INDEX IF NOT EXISTS idx_photos_binomial_name
-                ON photos(binomial_name);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_photos_dir_unique
-                ON photos_dir(root, relative_dir);
-            CREATE INDEX IF NOT EXISTS idx_photos_dir_browse
-                ON photos_dir(root, parent_dir, name);
-            CREATE INDEX IF NOT EXISTS idx_taxa_parent ON taxa(parent_id);
-            CREATE INDEX IF NOT EXISTS idx_taxa_binomial_name
-                ON taxa(binomial_name);
-            CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxon
-                ON photos_taxa_mapping(taxon_id);
-            CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_parent
-                ON photos_taxa_mapping_taxa(parent_id);
-            CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_binomial
-                ON photos_taxa_mapping_taxa(binomial_name);
-            CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_name
-                ON photos_taxa_mapping_taxa(name);
-
-            PRAGMA user_version = 1;
-            "#,
-        )?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 1 {
+            return Err(CoreError::InvalidArgument(
+                "legacy database version 1 is not supported; open a new vividarium.db".into(),
+            ));
+        }
+        if version != 0 && version != SCHEMA_VERSION {
+            return Err(CoreError::InvalidArgument(format!(
+                "unsupported database schema version: {version}"
+            )));
+        }
+        connection.execute_batch(SCHEMA)?;
         Ok(())
     }
 }
+
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS photos (
+    photo_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    root TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    parent_dir TEXT NOT NULL,
+    path_depth INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    binomial_name TEXT,
+    captured_at TEXT,
+    location TEXT,
+    camera TEXT,
+    width INTEGER,
+    height INTEGER,
+    file_size INTEGER,
+    modified_at REAL,
+    longitude REAL,
+    latitude REAL,
+    exif_json TEXT,
+    thumbnail_path TEXT DEFAULT NULL,
+    status TEXT NOT NULL,
+    UNIQUE(root, relative_path)
+);
+
+CREATE TABLE IF NOT EXISTS photos_dir (
+    root TEXT NOT NULL,
+    relative_dir TEXT NOT NULL,
+    parent_dir TEXT NOT NULL,
+    name TEXT NOT NULL,
+    path_depth INTEGER NOT NULL,
+    PRIMARY KEY (root, relative_dir)
+);
+
+CREATE TABLE IF NOT EXISTS photos_metadata (
+    root TEXT PRIMARY KEY,
+    last_synced_at TEXT,
+    sort_order INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS taxa (
+    taxon_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_taxon_id INTEGER,
+    rank TEXT NOT NULL,
+    geological_range TEXT,
+    CHECK (rank IN ('kingdom', 'order', 'family', 'genus', 'species')),
+    FOREIGN KEY (parent_taxon_id) REFERENCES taxa(taxon_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS scientific (
+    taxon_id INTEGER NOT NULL,
+    scientific_name TEXT NOT NULL,
+    is_accepted INTEGER NOT NULL DEFAULT 0,
+    authority_year TEXT,
+    category TEXT,
+    source TEXT,
+    PRIMARY KEY (taxon_id, scientific_name),
+    CHECK (is_accepted IN (0, 1)),
+    CHECK (length(trim(scientific_name)) > 0),
+    FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS english (
+    taxon_id INTEGER NOT NULL,
+    english_name TEXT NOT NULL,
+    is_accepted INTEGER NOT NULL DEFAULT 0,
+    authority_year TEXT,
+    category TEXT,
+    source TEXT,
+    PRIMARY KEY (taxon_id, english_name),
+    CHECK (is_accepted IN (0, 1)),
+    CHECK (length(trim(english_name)) > 0),
+    FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chinese (
+    taxon_id INTEGER NOT NULL,
+    chinese_name TEXT NOT NULL,
+    is_accepted INTEGER NOT NULL DEFAULT 0,
+    authority_year TEXT,
+    category TEXT,
+    source TEXT,
+    PRIMARY KEY (taxon_id, chinese_name),
+    CHECK (is_accepted IN (0, 1)),
+    CHECK (length(trim(chinese_name)) > 0),
+    FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS taxon_identifiers (
+    taxon_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    PRIMARY KEY (source, external_id),
+    FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS taxa_metadata (
+    knowledge_base_path TEXT,
+    knowledge_base_size INTEGER,
+    knowledge_base_modified_at TEXT,
+    last_synced_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS photos_taxa_mapping_metadata (
+    last_synced_at TEXT,
+    photos_last_synced_at TEXT,
+    taxa_last_synced_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS photos_taxa_mapping (
+    photo_id INTEGER PRIMARY KEY,
+    taxon_id INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS photos_taxa_mapping_taxa (
+    taxon_id INTEGER PRIMARY KEY,
+    rank TEXT NOT NULL,
+    name TEXT NOT NULL,
+    parent_id INTEGER,
+    binomial_name TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scientific_one_accepted
+    ON scientific(taxon_id) WHERE is_accepted = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_english_one_accepted
+    ON english(taxon_id) WHERE is_accepted = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chinese_one_accepted
+    ON chinese(taxon_id) WHERE is_accepted = 1;
+CREATE INDEX IF NOT EXISTS idx_taxa_parent ON taxa(parent_taxon_id);
+CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
+CREATE INDEX IF NOT EXISTS idx_scientific_name ON scientific(scientific_name);
+CREATE INDEX IF NOT EXISTS idx_english_name ON english(english_name);
+CREATE INDEX IF NOT EXISTS idx_chinese_name ON chinese(chinese_name);
+CREATE INDEX IF NOT EXISTS idx_taxon_identifiers_taxon ON taxon_identifiers(taxon_id);
+CREATE INDEX IF NOT EXISTS idx_photos_root_path ON photos(root, relative_path);
+CREATE INDEX IF NOT EXISTS idx_photos_browse
+    ON photos(root, parent_dir, status, filename);
+CREATE INDEX IF NOT EXISTS idx_photos_browse_cursor
+    ON photos(root, parent_dir, status, filename, photo_id);
+CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status);
+CREATE INDEX IF NOT EXISTS idx_photos_binomial_name ON photos(binomial_name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_photos_dir_unique
+    ON photos_dir(root, relative_dir);
+CREATE INDEX IF NOT EXISTS idx_photos_dir_browse
+    ON photos_dir(root, parent_dir, name);
+CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxon
+    ON photos_taxa_mapping(taxon_id);
+CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_parent
+    ON photos_taxa_mapping_taxa(parent_id);
+CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_binomial
+    ON photos_taxa_mapping_taxa(binomial_name);
+CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_name
+    ON photos_taxa_mapping_taxa(name);
+
+CREATE VIEW IF NOT EXISTS taxa_display AS
+SELECT
+    taxa.taxon_id,
+    taxa.rank,
+    COALESCE(
+        (SELECT chinese_name FROM chinese
+         WHERE chinese.taxon_id = taxa.taxon_id AND is_accepted = 1),
+        (SELECT english_name FROM english
+         WHERE english.taxon_id = taxa.taxon_id AND is_accepted = 1),
+        (SELECT scientific_name FROM scientific
+         WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
+        ''
+    ) AS name,
+    taxa.parent_taxon_id AS parent_id,
+    (SELECT scientific_name FROM scientific
+     WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1) AS binomial_name
+FROM taxa;
+
+PRAGMA user_version = 2;
+"#;
 
 pub(crate) fn photo_from_row(row: &Row<'_>) -> rusqlite::Result<Photo> {
     Ok(Photo {
@@ -180,23 +272,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initializes_the_version_one_schema() {
+    fn initializes_the_version_two_schema() {
         let directory = tempfile::tempdir().unwrap();
-        let database = Database::open(directory.path().join("phytoindex.db")).unwrap();
+        let database = Database::open(directory.path().join("vividarium.db")).unwrap();
         let connection = database.connect().unwrap();
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, SCHEMA_VERSION);
         for table in [
-            "photos",
-            "photos_dir",
-            "photos_metadata",
             "taxa",
-            "taxa_metadata",
-            "photos_taxa_mapping",
-            "photos_taxa_mapping_metadata",
-            "photos_taxa_mapping_taxa",
+            "scientific",
+            "english",
+            "chinese",
+            "taxon_identifiers",
         ] {
             let exists: bool = connection
                 .query_row(
@@ -207,5 +296,40 @@ mod tests {
                 .unwrap();
             assert!(exists, "missing table {table}");
         }
+    }
+
+    #[test]
+    fn rejects_a_second_accepted_name_of_the_same_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(directory.path().join("vividarium.db")).unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute("INSERT INTO taxa (rank) VALUES ('species')", [])
+            .unwrap();
+        let taxon_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO scientific (taxon_id, scientific_name, is_accepted) VALUES (?, 'A a', 1)",
+                [taxon_id],
+            )
+            .unwrap();
+        let result = connection.execute(
+            "INSERT INTO scientific (taxon_id, scientific_name, is_accepted) VALUES (?, 'A b', 1)",
+            [taxon_id],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn refuses_to_open_the_abandoned_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("phytoindex.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 1;")
+            .unwrap();
+        drop(connection);
+        let error = Database::open(path).unwrap_err();
+        assert!(error.to_string().contains("legacy database version 1"));
     }
 }
