@@ -1,9 +1,17 @@
-use std::collections::{BTreeSet, HashSet};
+mod view;
+
+pub use view::{
+    TaxonBreadcrumbItem, TaxonDetail, TaxonDisplayNames, TaxonIdentifierDetail, TaxonNameDetail,
+    TaxonNamesDetail, TaxonSummary, get_taxon_detail, get_taxon_summary,
+};
+
+use std::collections::BTreeSet;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use self::view::load_taxon_summary;
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,35 +94,6 @@ pub struct TaxonUpdateOptions {
     pub allow_new_taxa: bool,
     pub allow_overwrite: bool,
     pub allow_switch_accepted_name: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TaxonPath {
-    pub kingdom: Option<String>,
-    pub order: Option<String>,
-    pub family: Option<String>,
-    pub genus: Option<String>,
-    pub species: Option<String>,
-}
-
-impl TaxonPath {
-    fn set(&mut self, rank: TaxonRank, value: String) {
-        match rank {
-            TaxonRank::Kingdom => self.kingdom = Some(value),
-            TaxonRank::Order => self.order = Some(value),
-            TaxonRank::Family => self.family = Some(value),
-            TaxonRank::Genus => self.genus = Some(value),
-            TaxonRank::Species => self.species = Some(value),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TaxonCandidate {
-    pub taxon_id: i64,
-    pub rank: TaxonRank,
-    pub scientific_name: String,
-    pub path: TaxonPath,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -262,8 +241,8 @@ pub struct TaxonRowOutcome {
     pub operation_id: Option<i64>,
     pub status: TaxonRowStatus,
     pub message: String,
-    pub target: Option<TaxonCandidate>,
-    pub candidates: Vec<TaxonCandidate>,
+    pub target: Option<TaxonSummary>,
+    pub candidates: Vec<TaxonSummary>,
     pub changes: Vec<TaxonChange>,
 }
 
@@ -511,7 +490,7 @@ fn issue_outcome(row_number: usize, issue: RowIssue) -> TaxonRowOutcome {
 struct RowIssue {
     status: TaxonRowStatus,
     message: String,
-    candidates: Vec<TaxonCandidate>,
+    candidates: Vec<TaxonSummary>,
 }
 
 impl RowIssue {
@@ -523,7 +502,7 @@ impl RowIssue {
         }
     }
 
-    fn ambiguous(message: impl Into<String>, candidates: Vec<TaxonCandidate>) -> Self {
+    fn ambiguous(message: impl Into<String>, candidates: Vec<TaxonSummary>) -> Self {
         Self {
             status: TaxonRowStatus::Ambiguous,
             message: message.into(),
@@ -1260,7 +1239,9 @@ fn execute_plan(
             validate_accepted_name(transaction, taxon_id, kind)?;
         }
     }
-    let target = candidate_from_id(transaction, taxon_id)?;
+    let target = load_taxon_summary(transaction, taxon_id)?.ok_or_else(|| {
+        CoreError::InvalidArgument(format!("applied taxon {taxon_id} no longer exists"))
+    })?;
     let status = if plan.changes.is_empty() {
         TaxonRowStatus::NoChange
     } else {
@@ -1774,7 +1755,10 @@ fn find_candidates(
             }
         }
         if matches {
-            candidates.push(candidate_from_id(transaction, taxon_id)?);
+            let candidate = load_taxon_summary(transaction, taxon_id)?.ok_or_else(|| {
+                CoreError::InvalidArgument(format!("candidate taxon {taxon_id} no longer exists"))
+            })?;
+            candidates.push(candidate);
         }
     }
     Ok(CandidateSearch {
@@ -1785,7 +1769,7 @@ fn find_candidates(
 
 struct CandidateSearch {
     had_name_match: bool,
-    candidates: Vec<TaxonCandidate>,
+    candidates: Vec<TaxonSummary>,
 }
 
 fn lineage_has_name(
@@ -1813,52 +1797,6 @@ fn lineage_has_name(
         params![taxon_id, rank.as_str(), name],
         |row| row.get(0),
     )?)
-}
-
-fn candidate_from_id(transaction: &Transaction<'_>, taxon_id: i64) -> CoreResult<TaxonCandidate> {
-    let mut current_id = Some(taxon_id);
-    let mut visited = HashSet::new();
-    let mut path = TaxonPath::default();
-    let mut target_rank = None;
-    let mut target_name = None;
-    while let Some(id) = current_id {
-        if !visited.insert(id) {
-            return Err(CoreError::InvalidArgument(format!(
-                "taxon parent cycle detected at {id}"
-            )));
-        }
-        let (parent_id, rank, name): (Option<i64>, String, String) = transaction.query_row(
-            r#"
-            SELECT
-                taxa.parent_taxon_id,
-                taxa.rank,
-                COALESCE(
-                    (SELECT scientific_name FROM scientific
-                     WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT scientific_name FROM scientific
-                     WHERE scientific.taxon_id = taxa.taxon_id ORDER BY scientific_name LIMIT 1),
-                    ''
-                )
-            FROM taxa WHERE taxa.taxon_id = ?
-            "#,
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        let rank = parse_rank(&rank)?;
-        if id == taxon_id {
-            target_rank = Some(rank);
-            target_name = Some(name.clone());
-        }
-        path.set(rank, name);
-        current_id = parent_id;
-    }
-    Ok(TaxonCandidate {
-        taxon_id,
-        rank: target_rank
-            .ok_or_else(|| CoreError::InvalidArgument(format!("taxon {taxon_id} has no rank")))?,
-        scientific_name: target_name.unwrap_or_default(),
-        path,
-    })
 }
 
 fn accepted_name(
@@ -2008,6 +1946,83 @@ mod tests {
     }
 
     #[test]
+    fn loads_summary_and_detail_views_for_a_taxon() {
+        let (_directory, database) = database();
+        let ids = seed_lineage(&database);
+        let created = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                geological_range: Some("Holocene".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lupus".into(),
+                    authority_year: Some("Linnaeus, 1758".into()),
+                    source: Some("local".into()),
+                    ..TaxonNameInput::default()
+                }),
+                english: Some(TaxonNameInput {
+                    name: "gray wolf".into(),
+                    ..TaxonNameInput::default()
+                }),
+                chinese: Some(TaxonNameInput {
+                    name: "wolf".into(),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let taxon_id = created.rows[0].target.as_ref().unwrap().taxon_id;
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO scientific (
+                    taxon_id, scientific_name, is_accepted, category, source
+                ) VALUES (?, 'Canis lycaon', 0, 'synonym', 'local')
+                "#,
+                [taxon_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO taxon_identifiers (taxon_id, source, external_id) VALUES (?, 'biolib', '123')",
+                [taxon_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        let summary = get_taxon_summary(&database, taxon_id).unwrap().unwrap();
+        assert_eq!(summary.rank, TaxonRank::Species);
+        assert_eq!(summary.names.scientific.as_deref(), Some("Canis lupus"));
+        assert_eq!(summary.names.english.as_deref(), Some("gray wolf"));
+        assert_eq!(summary.names.chinese.as_deref(), Some("wolf"));
+        assert_eq!(summary.breadcrumb.len(), 4);
+        assert_eq!(summary.breadcrumb[0].rank, TaxonRank::Kingdom);
+        assert_eq!(summary.breadcrumb[3].taxon_id, ids[3]);
+        assert_eq!(
+            summary.breadcrumb[3].names.scientific.as_deref(),
+            Some("Canis")
+        );
+
+        let detail = get_taxon_detail(&database, taxon_id).unwrap().unwrap();
+        assert_eq!(detail.parent_taxon_id, Some(ids[3]));
+        assert_eq!(detail.geological_range.as_deref(), Some("Holocene"));
+        assert_eq!(detail.names.scientific.len(), 2);
+        assert!(detail.names.scientific[0].is_accepted);
+        assert_eq!(
+            detail.names.scientific[0].authority_year.as_deref(),
+            Some("Linnaeus, 1758")
+        );
+        assert_eq!(detail.identifiers.len(), 1);
+        assert_eq!(detail.identifiers[0].external_id, "123");
+    }
+
+    #[test]
     fn requires_the_immediate_parent_for_non_species_taxa() {
         let (_directory, database) = database();
         let result = preview_taxon_rows(
@@ -2089,6 +2104,21 @@ mod tests {
         let ambiguous =
             preview_taxon_rows(&database, &[species_row()], TaxonUpdateOptions::default()).unwrap();
         assert_eq!(ambiguous.rows[0].status, TaxonRowStatus::Ambiguous);
+        assert_eq!(ambiguous.rows[0].candidates.len(), 2);
+        let first_candidate = ambiguous.rows[0]
+            .candidates
+            .iter()
+            .find(|candidate| candidate.taxon_id == first)
+            .unwrap();
+        assert_eq!(
+            first_candidate.names.scientific.as_deref(),
+            Some("Canis lupus")
+        );
+        assert_eq!(first_candidate.breadcrumb.len(), 4);
+        assert_eq!(
+            first_candidate.breadcrumb[2].names.scientific.as_deref(),
+            Some("Canidae")
+        );
 
         let filtered = preview_taxon_rows(
             &database,
