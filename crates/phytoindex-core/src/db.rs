@@ -45,7 +45,11 @@ impl Database {
         let connection = self.connect()?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         match version {
-            0 | SCHEMA_VERSION => connection.execute_batch(SCHEMA)?,
+            0 => connection.execute_batch(SCHEMA)?,
+            SCHEMA_VERSION => {
+                reset_prerelease_taxonomy_logs(&connection)?;
+                connection.execute_batch(SCHEMA)?;
+            }
             1 => {
                 return Err(CoreError::InvalidArgument(
                     "legacy database version 1 is not supported; open a new vividarium.db".into(),
@@ -59,6 +63,43 @@ impl Database {
         }
         Ok(())
     }
+}
+
+fn reset_prerelease_taxonomy_logs(connection: &Connection) -> CoreResult<()> {
+    let has_obsolete_schema: bool = connection.query_row(
+        r#"
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM pragma_table_info('taxonomy_operations')
+                WHERE name IN (
+                    'taxon_id', 'input_json', 'options_json', 'before_json', 'after_json'
+                )
+            )
+            OR (
+                EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'taxonomy_operation_batches'
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM pragma_table_info('taxonomy_operation_batches')
+                    WHERE name = 'options_json'
+                )
+            )
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    if has_obsolete_schema {
+        connection.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS taxonomy_operations;
+            DROP TABLE IF EXISTS taxonomy_operation_batches;
+            "#,
+        )?;
+    }
+    Ok(())
 }
 
 const SCHEMA: &str = r#"
@@ -158,6 +199,8 @@ CREATE TABLE IF NOT EXISTS taxon_identifiers (
 
 CREATE TABLE IF NOT EXISTS taxonomy_operation_batches (
     batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    options_json TEXT NOT NULL,
+    input_json TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -165,15 +208,20 @@ CREATE TABLE IF NOT EXISTS taxonomy_operations (
     operation_id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id INTEGER NOT NULL,
     row_number INTEGER NOT NULL,
-    taxon_id INTEGER NOT NULL,
+    operation_type TEXT NOT NULL,
     status TEXT NOT NULL,
-    input_json TEXT NOT NULL,
-    options_json TEXT NOT NULL,
     changes_json TEXT NOT NULL,
-    before_json TEXT,
-    after_json TEXT NOT NULL,
+    after_hash TEXT NOT NULL,
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     reverted_at TEXT,
+    UNIQUE (batch_id, row_number),
+    CHECK (operation_type IN (
+        'create_taxon',
+        'append_name',
+        'update_metadata',
+        'switch_accepted_name',
+        'mixed'
+    )),
     CHECK (status IN ('applied', 'reverted')),
     FOREIGN KEY (batch_id) REFERENCES taxonomy_operation_batches(batch_id) ON DELETE RESTRICT
 );
@@ -218,8 +266,6 @@ CREATE INDEX IF NOT EXISTS idx_chinese_name ON chinese(chinese_name);
 CREATE INDEX IF NOT EXISTS idx_taxon_identifiers_taxon ON taxon_identifiers(taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_batch
     ON taxonomy_operations(batch_id, row_number);
-CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_taxon
-    ON taxonomy_operations(taxon_id, operation_id);
 CREATE INDEX IF NOT EXISTS idx_photos_root_path ON photos(root, relative_path);
 CREATE INDEX IF NOT EXISTS idx_photos_browse
     ON photos(root, parent_dir, status, filename);
@@ -326,6 +372,81 @@ mod tests {
                 .unwrap();
             assert!(exists, "missing table {table}");
         }
+        let batch_columns = table_columns(&connection, "taxonomy_operation_batches");
+        assert_eq!(
+            batch_columns,
+            ["batch_id", "options_json", "input_json", "created_at"]
+        );
+        let operation_columns = table_columns(&connection, "taxonomy_operations");
+        assert_eq!(
+            operation_columns,
+            [
+                "operation_id",
+                "batch_id",
+                "row_number",
+                "operation_type",
+                "status",
+                "changes_json",
+                "after_hash",
+                "applied_at",
+                "reverted_at",
+            ]
+        );
+    }
+
+    #[test]
+    fn resets_prerelease_taxonomy_logs_without_changing_the_schema_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vividarium.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE taxonomy_operation_batches (
+                    batch_id INTEGER PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE taxonomy_operations (
+                    operation_id INTEGER PRIMARY KEY,
+                    batch_id INTEGER NOT NULL,
+                    row_number INTEGER NOT NULL,
+                    taxon_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    input_json TEXT NOT NULL,
+                    options_json TEXT NOT NULL,
+                    changes_json TEXT NOT NULL,
+                    before_json TEXT,
+                    after_json TEXT NOT NULL,
+                    applied_at TEXT NOT NULL,
+                    reverted_at TEXT
+                );
+                INSERT INTO taxonomy_operation_batches VALUES (1, CURRENT_TIMESTAMP);
+                INSERT INTO taxonomy_operations VALUES (
+                    1, 1, 1, 1, 'applied', '{}', '{}', '[]', NULL, '{}',
+                    CURRENT_TIMESTAMP, NULL
+                );
+                PRAGMA user_version = 2;
+                "#,
+            )
+            .unwrap();
+        drop(connection);
+
+        let database = Database::open(&path).unwrap();
+        let connection = database.connect().unwrap();
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(
+            table_columns(&connection, "taxonomy_operation_batches"),
+            ["batch_id", "options_json", "input_json", "created_at"]
+        );
+        let operation_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM taxonomy_operations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(operation_count, 0);
     }
 
     #[test]
@@ -361,5 +482,16 @@ mod tests {
         drop(connection);
         let error = Database::open(path).unwrap_err();
         assert!(error.to_string().contains("legacy database version 1"));
+    }
+
+    fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
     }
 }

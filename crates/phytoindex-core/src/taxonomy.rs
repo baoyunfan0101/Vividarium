@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{CoreError, CoreResult, Database};
 
@@ -146,6 +147,115 @@ pub struct TaxonChange {
     pub new_value: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaxonomyOperationType {
+    CreateTaxon,
+    AppendName,
+    UpdateMetadata,
+    SwitchAcceptedName,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaxonomyNameKind {
+    Scientific,
+    English,
+    Chinese,
+}
+
+impl TaxonomyNameKind {
+    fn table(self) -> &'static str {
+        match self {
+            Self::Scientific => "scientific",
+            Self::English => "english",
+            Self::Chinese => "chinese",
+        }
+    }
+
+    fn column(self) -> &'static str {
+        match self {
+            Self::Scientific => "scientific_name",
+            Self::English => "english_name",
+            Self::Chinese => "chinese_name",
+        }
+    }
+}
+
+impl TaxonomyOperationType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateTaxon => "create_taxon",
+            Self::AppendName => "append_name",
+            Self::UpdateMetadata => "update_metadata",
+            Self::SwitchAcceptedName => "switch_accepted_name",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    fn from_str(value: &str) -> CoreResult<Self> {
+        match value {
+            "create_taxon" => Ok(Self::CreateTaxon),
+            "append_name" => Ok(Self::AppendName),
+            "update_metadata" => Ok(Self::UpdateMetadata),
+            "switch_accepted_name" => Ok(Self::SwitchAcceptedName),
+            "mixed" => Ok(Self::Mixed),
+            _ => Err(CoreError::InvalidArgument(format!(
+                "invalid taxonomy operation type: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonLogRecord {
+    pub taxon_id: i64,
+    pub parent_taxon_id: Option<i64>,
+    pub rank: String,
+    pub geological_range: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonNameLogRecord {
+    pub taxon_id: i64,
+    pub name: String,
+    pub is_accepted: bool,
+    pub authority_year: Option<String>,
+    pub category: Option<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum TaxonomyLogChange {
+    TaxonInserted {
+        after: TaxonLogRecord,
+    },
+    TaxonUpdated {
+        before: TaxonLogRecord,
+        after: TaxonLogRecord,
+    },
+    NameInserted {
+        name_kind: TaxonomyNameKind,
+        after: TaxonNameLogRecord,
+    },
+    NameUpdated {
+        name_kind: TaxonomyNameKind,
+        before: TaxonNameLogRecord,
+        after: TaxonNameLogRecord,
+    },
+}
+
+impl TaxonomyLogChange {
+    fn taxon_id(&self) -> i64 {
+        match self {
+            Self::TaxonInserted { after } | Self::TaxonUpdated { after, .. } => after.taxon_id,
+            Self::NameInserted { after, .. } | Self::NameUpdated { after, .. } => after.taxon_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonRowOutcome {
     pub row_number: usize,
@@ -169,9 +279,10 @@ pub struct TaxonomyOperation {
     pub operation_id: i64,
     pub batch_id: i64,
     pub row_number: usize,
-    pub taxon_id: i64,
+    pub operation_type: TaxonomyOperationType,
     pub status: String,
-    pub changes: Vec<TaxonChange>,
+    pub changes: Vec<TaxonomyLogChange>,
+    pub after_hash: String,
     pub applied_at: String,
     pub reverted_at: Option<String>,
 }
@@ -252,11 +363,13 @@ fn apply_rows(
         let after = taxon_snapshot(&transaction, taxon_id)?.ok_or_else(|| {
             CoreError::InvalidArgument("applied operation target no longer exists".into())
         })?;
+        let log_changes = diff_taxon_snapshots(before.as_ref(), &after);
+        let operation_type = operation_type(&outcome.changes);
+        let after_hash = hash_affected_taxa(&transaction, &log_changes)?;
         let current_batch_id = match batch_id {
             Some(value) => value,
             None => {
-                transaction.execute("INSERT INTO taxonomy_operation_batches DEFAULT VALUES", [])?;
-                let value = transaction.last_insert_rowid();
+                let value = insert_operation_batch(&transaction, rows, options)?;
                 batch_id = Some(value);
                 value
             }
@@ -265,12 +378,9 @@ fn apply_rows(
             &transaction,
             current_batch_id,
             index + 1,
-            taxon_id,
-            row,
-            options,
-            &outcome.changes,
-            before.as_ref(),
-            &after,
+            operation_type,
+            &log_changes,
+            &after_hash,
         )?;
         transaction.commit()?;
         outcome.operation_id = Some(operation_id);
@@ -293,8 +403,8 @@ pub fn list_taxonomy_operations(
     let connection = database.connect()?;
     let mut statement = connection.prepare(
         r#"
-        SELECT operation_id, batch_id, row_number, taxon_id, status,
-               changes_json, applied_at, reverted_at
+        SELECT operation_id, batch_id, row_number, operation_type, status,
+               changes_json, after_hash, applied_at, reverted_at
         FROM taxonomy_operations
         ORDER BY operation_id DESC
         LIMIT ?
@@ -305,11 +415,12 @@ pub fn list_taxonomy_operations(
             row.get::<_, i64>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
+            row.get::<_, String>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
-            row.get::<_, Option<String>>(7)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
     rows.map(|row| {
@@ -317,9 +428,10 @@ pub fn list_taxonomy_operations(
             operation_id,
             batch_id,
             row_number,
-            taxon_id,
+            operation_type,
             status,
             changes_json,
+            after_hash,
             applied_at,
             reverted_at,
         ) = row?;
@@ -327,9 +439,10 @@ pub fn list_taxonomy_operations(
             operation_id,
             batch_id,
             row_number: row_number as usize,
-            taxon_id,
+            operation_type: TaxonomyOperationType::from_str(&operation_type)?,
             status,
             changes: deserialize_json(&changes_json, "operation changes")?,
+            after_hash,
             applied_at,
             reverted_at,
         })
@@ -343,38 +456,30 @@ pub fn revert_taxonomy_operation(
 ) -> CoreResult<TaxonomyOperation> {
     let mut connection = database.connect()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (status, taxon_id, before_json, after_json): (String, i64, Option<String>, String) =
-        transaction
-            .query_row(
-                r#"
-            SELECT status, taxon_id, before_json, after_json
+    let (status, changes_json, after_hash): (String, String, String) = transaction
+        .query_row(
+            r#"
+            SELECT status, changes_json, after_hash
             FROM taxonomy_operations
             WHERE operation_id = ?
             "#,
-                [operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?
-            .ok_or_else(|| CoreError::NotFound(format!("taxonomy operation {operation_id}")))?;
+            [operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| CoreError::NotFound(format!("taxonomy operation {operation_id}")))?;
     if status != "applied" {
         return Err(CoreError::InvalidArgument(format!(
             "taxonomy operation {operation_id} is already {status}"
         )));
     }
-    let expected_after: TaxonSnapshot = deserialize_json(&after_json, "after snapshot")?;
-    let current = taxon_snapshot(&transaction, taxon_id)?;
-    if current.as_ref() != Some(&expected_after) {
+    let changes: Vec<TaxonomyLogChange> = deserialize_json(&changes_json, "operation changes")?;
+    if hash_affected_taxa(&transaction, &changes)? != after_hash {
         return Err(CoreError::InvalidArgument(format!(
-            "taxonomy operation {operation_id} cannot be reverted because the taxon changed later"
+            "taxonomy operation {operation_id} cannot be reverted because an affected taxon changed later"
         )));
     }
-    match before_json {
-        Some(value) => {
-            let before: TaxonSnapshot = deserialize_json(&value, "before snapshot")?;
-            restore_taxon_snapshot(&transaction, &before)?;
-        }
-        None => delete_created_taxon(&transaction, taxon_id, operation_id)?,
-    }
+    revert_changes(&transaction, &changes, operation_id)?;
     transaction.execute(
         r#"
         UPDATE taxonomy_operations
@@ -1227,41 +1332,44 @@ fn execute_name_plan(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+fn insert_operation_batch(
+    transaction: &Transaction<'_>,
+    inputs: &[TaxonInputRow],
+    options: TaxonUpdateOptions,
+) -> CoreResult<i64> {
+    let input_json = serialize_json(inputs, "taxonomy inputs")?;
+    let options_json = serialize_json(&options, "taxonomy options")?;
+    transaction.execute(
+        r#"
+        INSERT INTO taxonomy_operation_batches (options_json, input_json)
+        VALUES (?, ?)
+        "#,
+        params![options_json, input_json],
+    )?;
+    Ok(transaction.last_insert_rowid())
+}
+
 fn insert_operation_log(
     transaction: &Transaction<'_>,
     batch_id: i64,
     row_number: usize,
-    taxon_id: i64,
-    input: &TaxonInputRow,
-    options: TaxonUpdateOptions,
-    changes: &[TaxonChange],
-    before: Option<&TaxonSnapshot>,
-    after: &TaxonSnapshot,
+    operation_type: TaxonomyOperationType,
+    changes: &[TaxonomyLogChange],
+    after_hash: &str,
 ) -> CoreResult<i64> {
-    let input_json = serialize_json(input, "taxonomy input")?;
-    let options_json = serialize_json(&options, "taxonomy options")?;
     let changes_json = serialize_json(changes, "taxonomy changes")?;
-    let before_json = before
-        .map(|value| serialize_json(value, "before snapshot"))
-        .transpose()?;
-    let after_json = serialize_json(after, "after snapshot")?;
     transaction.execute(
         r#"
         INSERT INTO taxonomy_operations (
-            batch_id, row_number, taxon_id, status, input_json, options_json,
-            changes_json, before_json, after_json
-        ) VALUES (?, ?, ?, 'applied', ?, ?, ?, ?, ?)
+            batch_id, row_number, operation_type, status, changes_json, after_hash
+        ) VALUES (?, ?, ?, 'applied', ?, ?)
         "#,
         params![
             batch_id,
             row_number as i64,
-            taxon_id,
-            input_json,
-            options_json,
+            operation_type.as_str(),
             changes_json,
-            before_json,
-            after_json
+            after_hash,
         ],
     )?;
     Ok(transaction.last_insert_rowid())
@@ -1343,83 +1451,240 @@ fn name_snapshots(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-fn restore_taxon_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &TaxonSnapshot,
-) -> CoreResult<()> {
-    transaction.execute(
-        r#"
-        UPDATE taxa
-        SET parent_taxon_id = ?, rank = ?, geological_range = ?
-        WHERE taxon_id = ?
-        "#,
-        params![
-            snapshot.parent_taxon_id,
-            snapshot.rank,
-            snapshot.geological_range,
-            snapshot.taxon_id
-        ],
-    )?;
-    for table in ["scientific", "english", "chinese", "taxon_identifiers"] {
-        transaction.execute(
-            &format!("DELETE FROM {table} WHERE taxon_id = ?"),
-            [snapshot.taxon_id],
-        )?;
+fn operation_type(changes: &[TaxonChange]) -> TaxonomyOperationType {
+    if changes
+        .iter()
+        .any(|change| change.kind == TaxonChangeKind::CreateTaxon)
+    {
+        return TaxonomyOperationType::CreateTaxon;
     }
-    restore_names(
-        transaction,
-        snapshot.taxon_id,
-        NameKind::Scientific,
-        &snapshot.scientific,
-    )?;
-    restore_names(
-        transaction,
-        snapshot.taxon_id,
-        NameKind::English,
-        &snapshot.english,
-    )?;
-    restore_names(
-        transaction,
-        snapshot.taxon_id,
-        NameKind::Chinese,
-        &snapshot.chinese,
-    )?;
-    for identifier in &snapshot.identifiers {
-        transaction.execute(
-            r#"
-            INSERT INTO taxon_identifiers (taxon_id, source, external_id)
-            VALUES (?, ?, ?)
-            "#,
-            params![snapshot.taxon_id, identifier.source, identifier.external_id],
-        )?;
+    let switches_name = changes
+        .iter()
+        .any(|change| change.kind == TaxonChangeKind::ChangeAcceptedName);
+    let appends_name = changes
+        .iter()
+        .any(|change| change.kind == TaxonChangeKind::AppendName);
+    let updates_metadata = changes.iter().any(|change| {
+        matches!(
+            change.kind,
+            TaxonChangeKind::Supplement | TaxonChangeKind::Overwrite
+        )
+    });
+    match (switches_name, appends_name, updates_metadata) {
+        (true, _, false) => TaxonomyOperationType::SwitchAcceptedName,
+        (false, true, false) => TaxonomyOperationType::AppendName,
+        (false, false, true) => TaxonomyOperationType::UpdateMetadata,
+        _ => TaxonomyOperationType::Mixed,
+    }
+}
+
+fn diff_taxon_snapshots(
+    before: Option<&TaxonSnapshot>,
+    after: &TaxonSnapshot,
+) -> Vec<TaxonomyLogChange> {
+    let mut changes = Vec::new();
+    let after_taxon = taxon_log_record(after);
+    match before {
+        Some(before) => {
+            let before_taxon = taxon_log_record(before);
+            if before_taxon != after_taxon {
+                changes.push(TaxonomyLogChange::TaxonUpdated {
+                    before: before_taxon,
+                    after: after_taxon,
+                });
+            }
+            for (kind, before_names, after_names) in [
+                (
+                    TaxonomyNameKind::Scientific,
+                    before.scientific.as_slice(),
+                    after.scientific.as_slice(),
+                ),
+                (
+                    TaxonomyNameKind::English,
+                    before.english.as_slice(),
+                    after.english.as_slice(),
+                ),
+                (
+                    TaxonomyNameKind::Chinese,
+                    before.chinese.as_slice(),
+                    after.chinese.as_slice(),
+                ),
+            ] {
+                diff_names(
+                    after.taxon_id,
+                    kind,
+                    before_names,
+                    after_names,
+                    &mut changes,
+                );
+            }
+        }
+        None => {
+            changes.push(TaxonomyLogChange::TaxonInserted { after: after_taxon });
+            for (kind, names) in [
+                (TaxonomyNameKind::Scientific, after.scientific.as_slice()),
+                (TaxonomyNameKind::English, after.english.as_slice()),
+                (TaxonomyNameKind::Chinese, after.chinese.as_slice()),
+            ] {
+                for name in names {
+                    changes.push(TaxonomyLogChange::NameInserted {
+                        name_kind: kind,
+                        after: name_log_record(after.taxon_id, name),
+                    });
+                }
+            }
+        }
+    }
+    changes
+}
+
+fn diff_names(
+    taxon_id: i64,
+    kind: TaxonomyNameKind,
+    before: &[NameSnapshot],
+    after: &[NameSnapshot],
+    changes: &mut Vec<TaxonomyLogChange>,
+) {
+    for after_name in after {
+        match before.iter().find(|before| before.name == after_name.name) {
+            Some(before_name) if before_name != after_name => {
+                changes.push(TaxonomyLogChange::NameUpdated {
+                    name_kind: kind,
+                    before: name_log_record(taxon_id, before_name),
+                    after: name_log_record(taxon_id, after_name),
+                });
+            }
+            None => changes.push(TaxonomyLogChange::NameInserted {
+                name_kind: kind,
+                after: name_log_record(taxon_id, after_name),
+            }),
+            Some(_) => {}
+        }
+    }
+}
+
+fn taxon_log_record(snapshot: &TaxonSnapshot) -> TaxonLogRecord {
+    TaxonLogRecord {
+        taxon_id: snapshot.taxon_id,
+        parent_taxon_id: snapshot.parent_taxon_id,
+        rank: snapshot.rank.clone(),
+        geological_range: snapshot.geological_range.clone(),
+    }
+}
+
+fn name_log_record(taxon_id: i64, snapshot: &NameSnapshot) -> TaxonNameLogRecord {
+    TaxonNameLogRecord {
+        taxon_id,
+        name: snapshot.name.clone(),
+        is_accepted: snapshot.is_accepted,
+        authority_year: snapshot.authority_year.clone(),
+        category: snapshot.category.clone(),
+        source: snapshot.source.clone(),
+    }
+}
+
+fn hash_affected_taxa(
+    transaction: &Transaction<'_>,
+    changes: &[TaxonomyLogChange],
+) -> CoreResult<String> {
+    let taxon_ids = changes
+        .iter()
+        .map(TaxonomyLogChange::taxon_id)
+        .collect::<BTreeSet<_>>();
+    if taxon_ids.is_empty() {
+        return Err(CoreError::InvalidArgument(
+            "taxonomy operation has no affected taxa".into(),
+        ));
+    }
+    let snapshots = taxon_ids
+        .into_iter()
+        .map(|taxon_id| Ok((taxon_id, taxon_snapshot(transaction, taxon_id)?)))
+        .collect::<CoreResult<Vec<_>>>()?;
+    let json = serialize_json(&snapshots, "affected taxa")?;
+    Ok(format!("{:x}", Sha256::digest(json.as_bytes())))
+}
+
+fn revert_changes(
+    transaction: &Transaction<'_>,
+    changes: &[TaxonomyLogChange],
+    operation_id: i64,
+) -> CoreResult<()> {
+    for change in changes.iter().rev() {
+        if let TaxonomyLogChange::NameInserted { name_kind, after } = change {
+            let sql = format!(
+                "DELETE FROM {} WHERE taxon_id = ? AND {} = ?",
+                name_kind.table(),
+                name_kind.column()
+            );
+            transaction.execute(&sql, params![after.taxon_id, after.name])?;
+        }
+    }
+    for change in changes {
+        if let TaxonomyLogChange::NameUpdated {
+            name_kind,
+            before,
+            after,
+        } = change
+            && before.is_accepted != after.is_accepted
+        {
+            let sql = format!(
+                "UPDATE {} SET is_accepted = 0 WHERE taxon_id = ? AND {} = ?",
+                name_kind.table(),
+                name_kind.column()
+            );
+            transaction.execute(&sql, params![after.taxon_id, after.name])?;
+        }
+    }
+    for change in changes.iter().rev() {
+        match change {
+            TaxonomyLogChange::NameUpdated {
+                name_kind, before, ..
+            } => restore_name_record(transaction, *name_kind, before)?,
+            TaxonomyLogChange::TaxonUpdated { before, .. } => {
+                transaction.execute(
+                    r#"
+                    UPDATE taxa
+                    SET parent_taxon_id = ?, rank = ?, geological_range = ?
+                    WHERE taxon_id = ?
+                    "#,
+                    params![
+                        before.parent_taxon_id,
+                        before.rank,
+                        before.geological_range,
+                        before.taxon_id,
+                    ],
+                )?;
+            }
+            TaxonomyLogChange::TaxonInserted { after } => {
+                delete_created_taxon(transaction, after.taxon_id, operation_id)?;
+            }
+            TaxonomyLogChange::NameInserted { .. } => {}
+        }
     }
     Ok(())
 }
 
-fn restore_names(
+fn restore_name_record(
     transaction: &Transaction<'_>,
-    taxon_id: i64,
-    kind: NameKind,
-    names: &[NameSnapshot],
+    kind: TaxonomyNameKind,
+    record: &TaxonNameLogRecord,
 ) -> CoreResult<()> {
     let sql = format!(
-        "INSERT INTO {} (taxon_id, {}, is_accepted, authority_year, category, source) VALUES (?, ?, ?, ?, ?, ?)",
+        "UPDATE {} SET is_accepted = ?, authority_year = ?, category = ?, source = ? WHERE taxon_id = ? AND {} = ?",
         kind.table(),
         kind.column()
     );
-    for name in names {
-        transaction.execute(
-            &sql,
-            params![
-                taxon_id,
-                name.name,
-                i64::from(name.is_accepted),
-                name.authority_year,
-                name.category,
-                name.source
-            ],
-        )?;
-    }
+    transaction.execute(
+        &sql,
+        params![
+            i64::from(record.is_accepted),
+            record.authority_year,
+            record.category,
+            record.source,
+            record.taxon_id,
+            record.name,
+        ],
+    )?;
     Ok(())
 }
 
@@ -2270,6 +2535,66 @@ mod tests {
     }
 
     #[test]
+    fn stores_batch_context_once_and_complete_reversible_changes_per_operation() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        let inputs = vec![
+            species_row(),
+            TaxonInputRow {
+                genus: Some("Vulpes".into()),
+                ..TaxonInputRow::default()
+            },
+        ];
+        let options = TaxonUpdateOptions {
+            allow_new_taxa: true,
+            ..TaxonUpdateOptions::default()
+        };
+        let result = apply_taxon_rows(&database, &inputs, options).unwrap();
+        let batch_id = result.batch_id.unwrap();
+        let connection = database.connect().unwrap();
+        let (options_json, input_json): (String, String) = connection
+            .query_row(
+                r#"
+                SELECT options_json, input_json
+                FROM taxonomy_operation_batches
+                WHERE batch_id = ?
+                "#,
+                [batch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            deserialize_json::<TaxonUpdateOptions>(&options_json, "options").unwrap(),
+            options
+        );
+        assert_eq!(
+            deserialize_json::<Vec<TaxonInputRow>>(&input_json, "inputs").unwrap(),
+            inputs
+        );
+        drop(connection);
+
+        let operations = list_taxonomy_operations(&database, 10).unwrap();
+        assert_eq!(operations.len(), 1);
+        let operation = &operations[0];
+        assert_eq!(operation.row_number, 1);
+        assert_eq!(operation.operation_type, TaxonomyOperationType::CreateTaxon);
+        assert_eq!(operation.after_hash.len(), 64);
+        assert!(
+            operation
+                .changes
+                .iter()
+                .any(|change| matches!(change, TaxonomyLogChange::TaxonInserted { .. }))
+        );
+        assert!(operation.changes.iter().any(|change| matches!(
+            change,
+            TaxonomyLogChange::NameInserted {
+                name_kind: TaxonomyNameKind::Scientific,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn reverts_operations_one_at_a_time() {
         let (_directory, database) = database();
         seed_lineage(&database);
@@ -2327,6 +2652,123 @@ mod tests {
                 .iter()
                 .all(|operation| operation.status == "reverted")
         );
+    }
+
+    #[test]
+    fn reverts_an_accepted_name_switch_from_row_level_changes() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        apply_taxon_rows(
+            &database,
+            &[species_row()],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lycaon".into(),
+                    is_accepted: Some(false),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_new_names: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let switched = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lycaon".into(),
+                    is_accepted: Some(true),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_switch_accepted_name: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let operation_id = switched.rows[0].operation_id.unwrap();
+        let operation = list_taxonomy_operations(&database, 1).unwrap().remove(0);
+        assert_eq!(
+            operation.operation_type,
+            TaxonomyOperationType::SwitchAcceptedName
+        );
+        assert_eq!(
+            operation
+                .changes
+                .iter()
+                .filter(|change| matches!(change, TaxonomyLogChange::NameUpdated { .. }))
+                .count(),
+            2
+        );
+
+        revert_taxonomy_operation(&database, operation_id).unwrap();
+        let connection = database.connect().unwrap();
+        let accepted: String = connection
+            .query_row(
+                "SELECT scientific_name FROM scientific WHERE is_accepted = 1 AND taxon_id = (SELECT taxon_id FROM scientific WHERE scientific_name = 'Canis lupus')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(accepted, "Canis lupus");
+    }
+
+    #[test]
+    fn after_hash_blocks_revert_when_an_unrelated_taxon_field_changes() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        apply_taxon_rows(
+            &database,
+            &[species_row()],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let appended = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                chinese: Some(TaxonNameInput {
+                    name: "wolf".into(),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_new_names: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let operation_id = appended.rows[0].operation_id.unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                "UPDATE taxa SET geological_range = 'Holocene' WHERE rank = 'species'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = revert_taxonomy_operation(&database, operation_id).unwrap_err();
+        assert!(error.to_string().contains("affected taxon changed later"));
     }
 
     #[test]
