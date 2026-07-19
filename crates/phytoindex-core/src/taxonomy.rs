@@ -218,8 +218,7 @@ fn apply_rows(
     options: TaxonUpdateOptions,
 ) -> CoreResult<TaxonBatchResult> {
     let mut connection = database.connect()?;
-    connection.execute("INSERT INTO taxonomy_operation_batches DEFAULT VALUES", [])?;
-    let batch_id = connection.last_insert_rowid();
+    let mut batch_id = None;
     let mut outcomes = Vec::with_capacity(rows.len());
     let mut committed = false;
     for (index, row) in rows.iter().enumerate() {
@@ -250,9 +249,18 @@ fn apply_rows(
         let after = taxon_snapshot(&transaction, taxon_id)?.ok_or_else(|| {
             CoreError::InvalidArgument("applied operation target no longer exists".into())
         })?;
+        let current_batch_id = match batch_id {
+            Some(value) => value,
+            None => {
+                transaction.execute("INSERT INTO taxonomy_operation_batches DEFAULT VALUES", [])?;
+                let value = transaction.last_insert_rowid();
+                batch_id = Some(value);
+                value
+            }
+        };
         let operation_id = insert_operation_log(
             &transaction,
-            batch_id,
+            current_batch_id,
             index + 1,
             taxon_id,
             row,
@@ -269,7 +277,7 @@ fn apply_rows(
         outcomes.push(outcome);
     }
     Ok(TaxonBatchResult {
-        batch_id: Some(batch_id),
+        batch_id,
         committed,
         rows: outcomes,
     })
@@ -2030,6 +2038,40 @@ mod tests {
             })
             .unwrap();
         assert_eq!(operations, 1);
+    }
+
+    #[test]
+    fn does_not_create_empty_operation_batches() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        let result = apply_taxon_rows(
+            &database,
+            &[
+                TaxonInputRow {
+                    genus: Some("Canis".into()),
+                    ..TaxonInputRow::default()
+                },
+                TaxonInputRow {
+                    species: Some("Unknown species".into()),
+                    ..TaxonInputRow::default()
+                },
+            ],
+            TaxonUpdateOptions::default(),
+        )
+        .unwrap();
+        assert!(!result.committed);
+        assert_eq!(result.batch_id, None);
+        assert_eq!(result.rows[0].status, TaxonRowStatus::NoChange);
+        assert_eq!(result.rows[1].status, TaxonRowStatus::NotFound);
+        let connection = database.connect().unwrap();
+        let batch_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM taxonomy_operation_batches",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(batch_count, 0);
     }
 
     #[test]
