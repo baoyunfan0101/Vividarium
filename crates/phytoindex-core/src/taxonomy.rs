@@ -79,10 +79,12 @@ pub struct TaxonInputRow {
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct TaxonUpdateOptions {
     pub allow_new_names: bool,
     pub allow_new_taxa: bool,
     pub allow_overwrite: bool,
+    pub allow_switch_accepted_name: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -970,12 +972,12 @@ fn plan_existing_name(
         }
         let demote_accepted = if is_accepted {
             match accepted_name {
-                Some(value) if options.allow_overwrite => Some(value),
+                Some(value) if options.allow_switch_accepted_name => Some(value),
                 Some(_) => {
                     return Err(RowIssue::new(
                         TaxonRowStatus::Conflict,
                         format!(
-                            "{} already has an accepted name and overwrite is not allowed",
+                            "{} already has an accepted name and switching it is not allowed",
                             kind.table()
                         ),
                     ));
@@ -1067,11 +1069,11 @@ fn plan_existing_name(
                 "the accepted name cannot be demoted without selecting a replacement",
             ));
         }
-        Some(true) if !options.allow_overwrite => {
+        Some(true) if !options.allow_switch_accepted_name => {
             return Err(RowIssue::new(
                 TaxonRowStatus::Conflict,
                 format!(
-                    "{}.is_accepted differs and overwrite is not allowed",
+                    "{}.is_accepted differs and switching the accepted name is not allowed",
                     kind.table()
                 ),
             ));
@@ -1971,20 +1973,32 @@ mod tests {
             },
         )
         .unwrap();
-        let result = apply_taxon_rows(
+        let row = TaxonInputRow {
+            species: Some("Canis lupus".into()),
+            scientific: Some(TaxonNameInput {
+                name: "Canis lycaon".into(),
+                is_accepted: Some(true),
+                ..TaxonNameInput::default()
+            }),
+            ..TaxonInputRow::default()
+        };
+        let blocked = apply_taxon_rows(
             &database,
-            &[TaxonInputRow {
-                species: Some("Canis lupus".into()),
-                scientific: Some(TaxonNameInput {
-                    name: "Canis lycaon".into(),
-                    is_accepted: Some(true),
-                    ..TaxonNameInput::default()
-                }),
-                ..TaxonInputRow::default()
-            }],
+            std::slice::from_ref(&row),
             TaxonUpdateOptions {
                 allow_new_names: true,
                 allow_overwrite: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(blocked.rows[0].status, TaxonRowStatus::Conflict);
+        let result = apply_taxon_rows(
+            &database,
+            &[row],
+            TaxonUpdateOptions {
+                allow_new_names: true,
+                allow_switch_accepted_name: true,
                 ..TaxonUpdateOptions::default()
             },
         )
@@ -1999,6 +2013,74 @@ mod tests {
             )
             .unwrap();
         assert_eq!(accepted, "Canis lycaon");
+    }
+
+    #[test]
+    fn switches_to_an_existing_name_but_never_demotes_without_a_replacement() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        apply_taxon_rows(
+            &database,
+            &[species_row()],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lycaon".into(),
+                    is_accepted: Some(false),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_new_names: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let switched = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lycaon".into(),
+                    is_accepted: Some(true),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_switch_accepted_name: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(switched.committed);
+        let demotion = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lycaon".into(),
+                    is_accepted: Some(false),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_switch_accepted_name: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(demotion.rows[0].status, TaxonRowStatus::Conflict);
     }
 
     #[test]
