@@ -133,6 +133,7 @@ pub enum TaxonRowStatus {
 pub enum TaxonChangeKind {
     CreateTaxon,
     AppendName,
+    Supplement,
     Overwrite,
     ChangeAcceptedName,
 }
@@ -914,6 +915,15 @@ fn plan_geological_range(
     if existing.as_deref() == Some(&value) {
         return Ok(None);
     }
+    if existing.is_none() {
+        changes.push(TaxonChange {
+            kind: TaxonChangeKind::Supplement,
+            field: "taxa.geological_range".into(),
+            old_value: None,
+            new_value: Some(value.clone()),
+        });
+        return Ok(Some(FieldUpdate { value }));
+    }
     if !options.allow_overwrite {
         return Err(RowIssue::new(
             TaxonRowStatus::Conflict,
@@ -1040,6 +1050,16 @@ fn plan_existing_name(
             continue;
         };
         if old.as_deref() == Some(&new) {
+            continue;
+        }
+        if old.is_none() {
+            changes.push(TaxonChange {
+                kind: TaxonChangeKind::Supplement,
+                field: format!("{}.{}", kind.table(), field.as_str()),
+                old_value: None,
+                new_value: Some(new.clone()),
+            });
+            plan.updates.push(NameFieldUpdate { field, value: new });
             continue;
         }
         if !options.allow_overwrite {
@@ -1915,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn overwrites_only_when_the_permission_is_enabled() {
+    fn supplements_empty_taxon_metadata_without_permissions() {
         let (_directory, database) = database();
         seed_lineage(&database);
         apply_taxon_rows(
@@ -1932,16 +1952,38 @@ mod tests {
             geological_range: Some("Holocene".into()),
             ..TaxonInputRow::default()
         };
-        let blocked = apply_taxon_rows(
+        let supplemented = apply_taxon_rows(
             &database,
             std::slice::from_ref(&row),
+            TaxonUpdateOptions::default(),
+        )
+        .unwrap();
+        assert!(supplemented.committed);
+        assert_eq!(
+            supplemented.rows[0].changes,
+            vec![TaxonChange {
+                kind: TaxonChangeKind::Supplement,
+                field: "taxa.geological_range".into(),
+                old_value: None,
+                new_value: Some("Holocene".into()),
+            }]
+        );
+
+        let overwrite = TaxonInputRow {
+            species: Some("Canis lupus".into()),
+            geological_range: Some("Pleistocene".into()),
+            ..TaxonInputRow::default()
+        };
+        let blocked = apply_taxon_rows(
+            &database,
+            std::slice::from_ref(&overwrite),
             TaxonUpdateOptions::default(),
         )
         .unwrap();
         assert_eq!(blocked.rows[0].status, TaxonRowStatus::Conflict);
         let applied = apply_taxon_rows(
             &database,
-            &[row],
+            &[overwrite],
             TaxonUpdateOptions {
                 allow_overwrite: true,
                 ..TaxonUpdateOptions::default()
@@ -1957,7 +1999,78 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(value, "Holocene");
+        assert_eq!(value, "Pleistocene");
+    }
+
+    #[test]
+    fn supplements_empty_name_metadata_without_permissions() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        apply_taxon_rows(
+            &database,
+            &[species_row()],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let supplemented = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lupus".into(),
+                    authority_year: Some("Linnaeus, 1758".into()),
+                    category: Some("zoological".into()),
+                    source: Some("local".into()),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions::default(),
+        )
+        .unwrap();
+        assert!(supplemented.committed);
+        assert!(
+            supplemented.rows[0]
+                .changes
+                .iter()
+                .all(|change| change.kind == TaxonChangeKind::Supplement)
+        );
+        let connection = database.connect().unwrap();
+        let values: (String, String, String) = connection
+            .query_row(
+                r#"
+                SELECT authority_year, category, source
+                FROM scientific
+                WHERE scientific_name = 'Canis lupus'
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            values,
+            ("Linnaeus, 1758".into(), "zoological".into(), "local".into())
+        );
+        drop(connection);
+
+        let conflict = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lupus".into(),
+                    source: Some("biolib".into()),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(conflict.rows[0].status, TaxonRowStatus::Conflict);
     }
 
     #[test]
