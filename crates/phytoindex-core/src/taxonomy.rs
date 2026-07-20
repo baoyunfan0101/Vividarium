@@ -10,9 +10,9 @@ pub use actions::{
 pub use query::{TaxonNameMatch, TaxonSearchResult, search_taxa};
 
 pub use view::{
-    TaxonBreadcrumbItem, TaxonDetail, TaxonDetailNode, TaxonDisplayNames, TaxonIdentifierDetail,
-    TaxonNameDetail, TaxonNamesDetail, TaxonSummary, get_taxon_detail, get_taxon_detail_node,
-    get_taxon_summary,
+    TaxonBreadcrumbItem, TaxonChild, TaxonDetail, TaxonDetailNode, TaxonDisplayNames,
+    TaxonIdentifierDetail, TaxonNameDetail, TaxonNamesDetail, TaxonSummary, get_taxon_detail,
+    get_taxon_detail_node, get_taxon_summary,
 };
 
 use std::collections::BTreeSet;
@@ -2310,6 +2310,11 @@ mod tests {
         assert_eq!(genus.summary.taxon_id, ids[3]);
         assert_eq!(genus.children.len(), 1);
         assert_eq!(genus.children[0].taxon_id, species_id);
+        assert_eq!(genus.children[0].rank, TaxonRank::Species);
+        assert_eq!(
+            genus.children[0].names.scientific.as_deref(),
+            Some("Canis lupus")
+        );
     }
 
     #[test]

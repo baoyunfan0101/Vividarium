@@ -29,6 +29,13 @@ pub struct TaxonSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonChild {
+    pub taxon_id: i64,
+    pub rank: TaxonRank,
+    pub names: TaxonDisplayNames,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonNameDetail {
     pub name: String,
     pub is_accepted: bool,
@@ -64,7 +71,7 @@ pub struct TaxonDetail {
 pub struct TaxonDetailNode {
     pub summary: TaxonSummary,
     pub detail: TaxonDetail,
-    pub children: Vec<TaxonSummary>,
+    pub children: Vec<TaxonChild>,
 }
 
 pub fn get_taxon_summary(database: &Database, taxon_id: i64) -> CoreResult<Option<TaxonSummary>> {
@@ -312,39 +319,67 @@ pub(super) fn load_taxon_detail_node(
     let Some(detail) = load_taxon_detail(connection, taxon_id)? else {
         return Ok(None);
     };
-    let child_ids = load_child_taxon_ids(connection, taxon_id)?;
-    let summary_ids = std::iter::once(taxon_id)
-        .chain(child_ids.iter().copied())
-        .collect::<Vec<_>>();
-    let mut summaries = load_taxon_summaries(connection, &summary_ids)?;
-    if summaries.len() != summary_ids.len() {
-        return Err(CoreError::InvalidArgument(format!(
-            "taxon {taxon_id} children changed while loading summaries"
-        )));
-    }
-    let summary = summaries
-        .first()
-        .cloned()
+    let summary = load_taxon_summary(connection, taxon_id)?
         .ok_or_else(|| CoreError::InvalidArgument(format!("taxon {taxon_id} no longer exists")))?;
-    let children = summaries.split_off(1);
     Ok(Some(TaxonDetailNode {
         summary,
         detail,
-        children,
+        children: load_taxon_children(connection, taxon_id)?,
     }))
 }
 
-fn load_child_taxon_ids(connection: &Connection, taxon_id: i64) -> CoreResult<Vec<i64>> {
+fn load_taxon_children(connection: &Connection, taxon_id: i64) -> CoreResult<Vec<TaxonChild>> {
     let mut statement = connection.prepare(
         r#"
-        SELECT taxon_id
+        SELECT
+            taxa.taxon_id,
+            taxa.rank,
+            COALESCE(
+                (SELECT scientific_name FROM scientific
+                 WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                (SELECT scientific_name FROM scientific
+                 WHERE scientific.taxon_id = taxa.taxon_id
+                 ORDER BY scientific_name LIMIT 1)
+            ),
+            COALESCE(
+                (SELECT english_name FROM english
+                 WHERE english.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                (SELECT english_name FROM english
+                 WHERE english.taxon_id = taxa.taxon_id
+                 ORDER BY english_name LIMIT 1)
+            ),
+            COALESCE(
+                (SELECT chinese_name FROM chinese
+                 WHERE chinese.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                (SELECT chinese_name FROM chinese
+                 WHERE chinese.taxon_id = taxa.taxon_id
+                 ORDER BY chinese_name LIMIT 1)
+            )
         FROM taxa
         WHERE parent_taxon_id = ?
         ORDER BY rank, taxon_id
         "#,
     )?;
-    let rows = statement.query_map([taxon_id], |row| row.get::<_, i64>(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let rows = statement.query_map([taxon_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            TaxonDisplayNames {
+                scientific: row.get(2)?,
+                english: row.get(3)?,
+                chinese: row.get(4)?,
+            },
+        ))
+    })?;
+    rows.map(|row| {
+        let (taxon_id, rank, names) = row?;
+        Ok(TaxonChild {
+            taxon_id,
+            rank: parse_rank(&rank)?,
+            names,
+        })
+    })
+    .collect()
 }
 
 fn load_taxon_bases(connection: &Connection, taxon_ids: &[i64]) -> CoreResult<Vec<TaxonBase>> {
