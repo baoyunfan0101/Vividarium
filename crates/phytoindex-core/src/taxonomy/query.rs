@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, params_from_iter, types::Value as SqlValue};
 use serde::{Deserialize, Serialize};
 
 use super::{TaxonomyNameKind, view::load_taxon_details, view::load_taxon_summaries};
@@ -55,6 +55,7 @@ fn search_taxa_with_connection(
     let ids = ids.into_iter().take(limit).collect::<Vec<_>>();
     let summaries = load_taxon_summaries(connection, &ids)?;
     let details = load_taxon_details(connection, &ids)?;
+    let matches_by_id = load_name_matches_for_taxa(connection, &ids, &pattern)?;
     if summaries.len() != ids.len() || details.len() != ids.len() {
         return Err(CoreError::InvalidArgument(
             "matched taxon no longer exists".into(),
@@ -67,7 +68,7 @@ fn search_taxa_with_connection(
             Ok(TaxonSearchResult {
                 summary,
                 detail,
-                matches: load_name_matches(connection, taxon_id, &pattern)?,
+                matches: matches_by_id.get(&taxon_id).cloned().unwrap_or_default(),
             })
         })
         .collect()
@@ -102,40 +103,63 @@ fn collect_matching_taxon_ids(
     Ok(())
 }
 
-fn load_name_matches(
+fn load_name_matches_for_taxa(
     connection: &Connection,
-    taxon_id: i64,
+    taxon_ids: &[i64],
     pattern: &str,
-) -> CoreResult<Vec<TaxonNameMatch>> {
-    let mut matches = Vec::new();
+) -> CoreResult<HashMap<i64, Vec<TaxonNameMatch>>> {
+    if taxon_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let values_clause = taxon_ids
+        .iter()
+        .map(|_| "(?, ?)")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut matches_by_id: HashMap<i64, Vec<TaxonNameMatch>> = HashMap::new();
     for kind in [
         TaxonomyNameKind::Scientific,
         TaxonomyNameKind::English,
         TaxonomyNameKind::Chinese,
     ] {
+        let mut query_params = Vec::with_capacity(taxon_ids.len() * 2 + 1);
+        for (index, taxon_id) in taxon_ids.iter().enumerate() {
+            query_params.push(SqlValue::Integer(*taxon_id));
+            query_params.push(SqlValue::Integer(index as i64));
+        }
+        query_params.push(SqlValue::Text(pattern.to_string()));
         let sql = format!(
             r#"
-            SELECT {}, is_accepted
-            FROM {}
-            WHERE taxon_id = ? AND {} LIKE ? ESCAPE '\'
-            ORDER BY is_accepted DESC, {}
+            WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
+            SELECT input.taxon_id, {}, is_accepted
+            FROM input
+            JOIN {} ON {}.taxon_id = input.taxon_id
+            WHERE {} LIKE ? ESCAPE '\'
+            ORDER BY input.sort_order, is_accepted DESC, {}
             "#,
             kind.column(),
+            kind.table(),
             kind.table(),
             kind.column(),
             kind.column()
         );
         let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map(params![taxon_id, pattern], |row| {
-            Ok(TaxonNameMatch {
-                name_kind: kind,
-                name: row.get(0)?,
-                is_accepted: row.get::<_, i64>(1)? != 0,
-            })
+        let rows = statement.query_map(params_from_iter(query_params), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                TaxonNameMatch {
+                    name_kind: kind,
+                    name: row.get(1)?,
+                    is_accepted: row.get::<_, i64>(2)? != 0,
+                },
+            ))
         })?;
-        matches.extend(rows.collect::<Result<Vec<_>, _>>()?);
+        for row in rows {
+            let (taxon_id, name_match) = row?;
+            matches_by_id.entry(taxon_id).or_default().push(name_match);
+        }
     }
-    Ok(matches)
+    Ok(matches_by_id)
 }
 
 fn escape_like(value: &str) -> String {
