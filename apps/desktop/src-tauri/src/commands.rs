@@ -7,9 +7,9 @@ use phytoindex_core::models::{
     TaxaMetadata, Taxon,
 };
 use phytoindex_core::taxonomy::{
-    DeleteTaxonNameInput, TaxonDetailNode, TaxonSearchResult, TaxonUpdateInput, TaxonUpdateOptions,
-    TaxonomyActionResult, TaxonomyCustomSqlResult, TaxonomyOperation, TaxonomyOperationBatch,
-    TaxonomyUpdateActionResult,
+    DeleteTaxonNameInput, TaxonChild, TaxonDetailNode, TaxonSearchResult, TaxonUpdateInput,
+    TaxonUpdateOptions, TaxonomyActionResult, TaxonomyCustomSqlResult, TaxonomyOperation,
+    TaxonomyOperationBatch, TaxonomyPage, TaxonomyUpdateActionResult,
 };
 use phytoindex_core::{export, mapping, photos, taxa, taxonomy};
 use serde_json::{Value, json};
@@ -99,19 +99,49 @@ pub fn save_knowledge_base_path(
 pub fn search_taxa(
     state: State<'_, AppState>,
     query: String,
+    cursor: Option<String>,
     limit: Option<usize>,
-) -> CommandResult<Vec<TaxonSearchResult>> {
-    taxonomy::search_taxa(&state.database, &query, limit.unwrap_or(50)).map_err(error)
+) -> CommandResult<TaxonomyPage<TaxonSearchResult>> {
+    taxonomy::search_taxa_page(
+        &state.database,
+        &query,
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
+    .map_err(error)
 }
 
 #[tauri::command]
 pub fn get_taxon_detail_node(
     state: State<'_, AppState>,
     taxon_id: i64,
+    children_cursor: Option<String>,
+    children_limit: Option<usize>,
 ) -> CommandResult<TaxonDetailNode> {
-    taxonomy::get_taxon_detail_node(&state.database, taxon_id)
-        .map_err(error)?
-        .ok_or_else(|| format!("taxon {taxon_id} not found"))
+    taxonomy::get_taxon_detail_node_page(
+        &state.database,
+        taxon_id,
+        children_cursor.as_deref(),
+        children_limit.unwrap_or(50),
+    )
+    .map_err(error)?
+    .ok_or_else(|| format!("taxon {taxon_id} not found"))
+}
+
+#[tauri::command]
+pub fn list_taxon_children(
+    state: State<'_, AppState>,
+    taxon_id: i64,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<TaxonomyPage<TaxonChild>> {
+    taxonomy::list_taxon_children(
+        &state.database,
+        taxon_id,
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
+    .map_err(error)
 }
 
 #[tauri::command]
@@ -150,17 +180,41 @@ pub fn execute_custom_taxonomy_sql(
 #[tauri::command]
 pub fn list_taxonomy_operation_batches(
     state: State<'_, AppState>,
+    cursor: Option<String>,
     limit: Option<usize>,
-) -> CommandResult<Vec<TaxonomyOperationBatch>> {
-    taxonomy::list_taxonomy_operation_batches(&state.database, limit.unwrap_or(50)).map_err(error)
+) -> CommandResult<TaxonomyPage<TaxonomyOperationBatch>> {
+    taxonomy::list_taxonomy_operation_batches_page(
+        &state.database,
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
+    .map_err(error)
+}
+
+#[tauri::command]
+pub fn list_taxonomy_operations(
+    state: State<'_, AppState>,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<TaxonomyPage<TaxonomyOperation>> {
+    taxonomy::list_taxonomy_operations_page(&state.database, cursor.as_deref(), limit.unwrap_or(50))
+        .map_err(error)
 }
 
 #[tauri::command]
 pub fn list_taxonomy_operations_for_batch(
     state: State<'_, AppState>,
     batch_id: i64,
-) -> CommandResult<Vec<TaxonomyOperation>> {
-    taxonomy::list_taxonomy_operations_for_batch(&state.database, batch_id).map_err(error)
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<TaxonomyPage<TaxonomyOperation>> {
+    taxonomy::list_taxonomy_operations_for_batch_page(
+        &state.database,
+        batch_id,
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
+    .map_err(error)
 }
 
 #[tauri::command]

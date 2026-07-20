@@ -1,9 +1,16 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use rusqlite::{Connection, params, params_from_iter, types::Value as SqlValue};
 use serde::{Deserialize, Serialize};
 
-use super::{TaxonomyNameKind, view::load_taxon_details, view::load_taxon_summaries};
+use super::{
+    TaxonomyNameKind,
+    page::{
+        TaxonomyCursor, TaxonomyPage, decode_cursor, encode_cursor, invalid_cursor, page_limit,
+    },
+    view::load_taxon_details,
+    view::load_taxon_summaries,
+};
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,34 +32,82 @@ pub fn search_taxa(
     query: &str,
     limit: usize,
 ) -> CoreResult<Vec<TaxonSearchResult>> {
+    Ok(search_taxa_page(database, query, None, limit)?.items)
+}
+
+pub fn search_taxa_page(
+    database: &Database,
+    query: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> CoreResult<TaxonomyPage<TaxonSearchResult>> {
     let query = query.trim();
     if query.is_empty() {
-        return Ok(Vec::new());
+        return Ok(TaxonomyPage {
+            items: Vec::new(),
+            next_cursor: None,
+        });
     }
     let connection = database.connect()?;
-    search_taxa_with_connection(&connection, query, limit)
+    search_taxa_with_connection(&connection, query, cursor, limit)
 }
 
 fn search_taxa_with_connection(
     connection: &Connection,
     query: &str,
+    cursor: Option<&str>,
     limit: usize,
-) -> CoreResult<Vec<TaxonSearchResult>> {
+) -> CoreResult<TaxonomyPage<TaxonSearchResult>> {
     let pattern = format!("%{}%", escape_like(query));
-    let limit = limit.clamp(1, 500);
-    let mut ids = BTreeSet::new();
-    for kind in [
-        TaxonomyNameKind::Scientific,
-        TaxonomyNameKind::English,
-        TaxonomyNameKind::Chinese,
-    ] {
-        collect_matching_taxon_ids(connection, kind, &pattern, limit, &mut ids)?;
-        if ids.len() >= limit {
-            break;
-        }
+    let cursor_taxon_id = match decode_cursor(cursor)? {
+        None => None,
+        Some(TaxonomyCursor::TaxonSearch {
+            query: cursor_query,
+            taxon_id,
+        }) if cursor_query == query => Some(taxon_id),
+        Some(_) => return Err(invalid_cursor()),
+    };
+    let limit = page_limit(limit);
+    let fetch_limit = limit + 1;
+    let mut statement = connection.prepare(
+        r#"
+        WITH matches(taxon_id) AS (
+            SELECT taxon_id FROM scientific WHERE scientific_name LIKE ?1 ESCAPE '\'
+            UNION
+            SELECT taxon_id FROM english WHERE english_name LIKE ?2 ESCAPE '\'
+            UNION
+            SELECT taxon_id FROM chinese WHERE chinese_name LIKE ?3 ESCAPE '\'
+        )
+        SELECT taxon_id
+        FROM matches
+        WHERE (?4 IS NULL OR taxon_id > ?4)
+        ORDER BY taxon_id
+        LIMIT ?5
+        "#,
+    )?;
+    let rows = statement.query_map(
+        params![
+            pattern,
+            pattern,
+            pattern,
+            cursor_taxon_id,
+            fetch_limit as i64
+        ],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let mut ids = rows.collect::<Result<Vec<_>, _>>()?;
+    let next_cursor = if ids.len() > limit {
+        ids.truncate(limit);
+        ids.last().map(|taxon_id| {
+            encode_cursor(&TaxonomyCursor::TaxonSearch {
+                query: query.to_string(),
+                taxon_id: *taxon_id,
+            })
+        })
+    } else {
+        None
     }
-
-    let ids = ids.into_iter().take(limit).collect::<Vec<_>>();
+    .transpose()?;
     let summaries = load_taxon_summaries(connection, &ids)?;
     let details = load_taxon_details(connection, &ids)?;
     let matches_by_id = load_name_matches_for_taxa(connection, &ids, &pattern)?;
@@ -61,7 +116,8 @@ fn search_taxa_with_connection(
             "matched taxon no longer exists".into(),
         ));
     }
-    ids.into_iter()
+    let items = ids
+        .into_iter()
         .zip(summaries)
         .zip(details)
         .map(|((taxon_id, summary), detail)| {
@@ -71,36 +127,8 @@ fn search_taxa_with_connection(
                 matches: matches_by_id.get(&taxon_id).cloned().unwrap_or_default(),
             })
         })
-        .collect()
-}
-
-fn collect_matching_taxon_ids(
-    connection: &Connection,
-    kind: TaxonomyNameKind,
-    pattern: &str,
-    limit: usize,
-    ids: &mut BTreeSet<i64>,
-) -> CoreResult<()> {
-    let sql = format!(
-        r#"
-        SELECT DISTINCT taxon_id
-        FROM {}
-        WHERE {} LIKE ? ESCAPE '\'
-        ORDER BY taxon_id
-        LIMIT ?
-        "#,
-        kind.table(),
-        kind.column()
-    );
-    let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map(params![pattern, limit as i64], |row| row.get::<_, i64>(0))?;
-    for row in rows {
-        ids.insert(row?);
-        if ids.len() >= limit {
-            break;
-        }
-    }
-    Ok(())
+        .collect::<CoreResult<Vec<_>>>()?;
+    Ok(TaxonomyPage { items, next_cursor })
 }
 
 fn load_name_matches_for_taxa(

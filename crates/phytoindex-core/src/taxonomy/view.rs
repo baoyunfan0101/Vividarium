@@ -1,9 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
+use rusqlite::{Connection, params, params_from_iter, types::Value as SqlValue};
 use serde::{Deserialize, Serialize};
 
-use super::{TaxonRank, TaxonomyNameKind, parse_rank};
+use super::{
+    TaxonRank, TaxonomyNameKind,
+    page::{
+        DEFAULT_PAGE_LIMIT, TaxonomyCursor, TaxonomyPage, decode_cursor, encode_cursor,
+        invalid_cursor, page_limit,
+    },
+    parse_rank,
+};
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,7 +78,7 @@ pub struct TaxonDetail {
 pub struct TaxonDetailNode {
     pub summary: TaxonSummary,
     pub detail: TaxonDetail,
-    pub children: Vec<TaxonChild>,
+    pub children: TaxonomyPage<TaxonChild>,
 }
 
 pub fn get_taxon_summary(database: &Database, taxon_id: i64) -> CoreResult<Option<TaxonSummary>> {
@@ -88,8 +95,27 @@ pub fn get_taxon_detail_node(
     database: &Database,
     taxon_id: i64,
 ) -> CoreResult<Option<TaxonDetailNode>> {
+    get_taxon_detail_node_page(database, taxon_id, None, DEFAULT_PAGE_LIMIT)
+}
+
+pub fn get_taxon_detail_node_page(
+    database: &Database,
+    taxon_id: i64,
+    children_cursor: Option<&str>,
+    children_limit: usize,
+) -> CoreResult<Option<TaxonDetailNode>> {
     let connection = database.connect()?;
-    load_taxon_detail_node(&connection, taxon_id)
+    load_taxon_detail_node(&connection, taxon_id, children_cursor, children_limit)
+}
+
+pub fn list_taxon_children(
+    database: &Database,
+    taxon_id: i64,
+    cursor: Option<&str>,
+    limit: usize,
+) -> CoreResult<TaxonomyPage<TaxonChild>> {
+    let connection = database.connect()?;
+    load_taxon_children(&connection, taxon_id, cursor, limit)
 }
 
 pub(super) fn load_taxon_summary(
@@ -315,6 +341,8 @@ pub(super) fn load_taxon_details(
 pub(super) fn load_taxon_detail_node(
     connection: &Connection,
     taxon_id: i64,
+    children_cursor: Option<&str>,
+    children_limit: usize,
 ) -> CoreResult<Option<TaxonDetailNode>> {
     let Some(detail) = load_taxon_detail(connection, taxon_id)? else {
         return Ok(None);
@@ -324,11 +352,27 @@ pub(super) fn load_taxon_detail_node(
     Ok(Some(TaxonDetailNode {
         summary,
         detail,
-        children: load_taxon_children(connection, taxon_id)?,
+        children: load_taxon_children(connection, taxon_id, children_cursor, children_limit)?,
     }))
 }
 
-fn load_taxon_children(connection: &Connection, taxon_id: i64) -> CoreResult<Vec<TaxonChild>> {
+fn load_taxon_children(
+    connection: &Connection,
+    taxon_id: i64,
+    cursor: Option<&str>,
+    limit: usize,
+) -> CoreResult<TaxonomyPage<TaxonChild>> {
+    let child_cursor = match decode_cursor(cursor)? {
+        None => None,
+        Some(TaxonomyCursor::TaxonChildren {
+            parent_taxon_id,
+            rank,
+            taxon_id: cursor_taxon_id,
+        }) if parent_taxon_id == taxon_id => Some((rank.as_str().to_string(), cursor_taxon_id)),
+        Some(_) => return Err(invalid_cursor()),
+    };
+    let limit = page_limit(limit);
+    let fetch_limit = limit + 1;
     let mut statement = connection.prepare(
         r#"
         SELECT
@@ -356,30 +400,53 @@ fn load_taxon_children(connection: &Connection, taxon_id: i64) -> CoreResult<Vec
                  ORDER BY chinese_name LIMIT 1)
             )
         FROM taxa
-        WHERE parent_taxon_id = ?
+        WHERE parent_taxon_id = ?1
+          AND (?2 IS NULL OR rank > ?2 OR (rank = ?2 AND taxon_id > ?3))
         ORDER BY rank, taxon_id
+        LIMIT ?4
         "#,
     )?;
-    let rows = statement.query_map([taxon_id], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            TaxonDisplayNames {
-                scientific: row.get(2)?,
-                english: row.get(3)?,
-                chinese: row.get(4)?,
-            },
-        ))
-    })?;
-    rows.map(|row| {
-        let (taxon_id, rank, names) = row?;
-        Ok(TaxonChild {
-            taxon_id,
-            rank: parse_rank(&rank)?,
-            names,
+    let (cursor_rank, cursor_taxon_id) = child_cursor
+        .map(|(rank, taxon_id)| (Some(rank), Some(taxon_id)))
+        .unwrap_or((None, None));
+    let rows = statement.query_map(
+        params![taxon_id, cursor_rank, cursor_taxon_id, fetch_limit as i64],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                TaxonDisplayNames {
+                    scientific: row.get(2)?,
+                    english: row.get(3)?,
+                    chinese: row.get(4)?,
+                },
+            ))
+        },
+    )?;
+    let mut items = rows
+        .map(|row| {
+            let (taxon_id, rank, names) = row?;
+            Ok(TaxonChild {
+                taxon_id,
+                rank: parse_rank(&rank)?,
+                names,
+            })
         })
-    })
-    .collect()
+        .collect::<CoreResult<Vec<_>>>()?;
+    let next_cursor = if items.len() > limit {
+        items.truncate(limit);
+        items.last().map(|child| {
+            encode_cursor(&TaxonomyCursor::TaxonChildren {
+                parent_taxon_id: taxon_id,
+                rank: child.rank,
+                taxon_id: child.taxon_id,
+            })
+        })
+    } else {
+        None
+    }
+    .transpose()?;
+    Ok(TaxonomyPage { items, next_cursor })
 }
 
 fn load_taxon_bases(connection: &Connection, taxon_ids: &[i64]) -> CoreResult<Vec<TaxonBase>> {

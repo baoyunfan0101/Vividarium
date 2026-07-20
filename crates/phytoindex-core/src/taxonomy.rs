@@ -1,4 +1,5 @@
 mod actions;
+mod page;
 mod query;
 mod view;
 
@@ -7,12 +8,13 @@ pub use actions::{
     TaxonomyUpdateActionResult, delete_taxon, delete_taxon_name, execute_custom_taxonomy_sql,
     update_taxon,
 };
-pub use query::{TaxonNameMatch, TaxonSearchResult, search_taxa};
+pub use page::TaxonomyPage;
+pub use query::{TaxonNameMatch, TaxonSearchResult, search_taxa, search_taxa_page};
 
 pub use view::{
     TaxonBreadcrumbItem, TaxonChild, TaxonDetail, TaxonDetailNode, TaxonDisplayNames,
     TaxonIdentifierDetail, TaxonNameDetail, TaxonNamesDetail, TaxonSummary, get_taxon_detail,
-    get_taxon_detail_node, get_taxon_summary,
+    get_taxon_detail_node, get_taxon_detail_node_page, get_taxon_summary, list_taxon_children,
 };
 
 use std::collections::BTreeSet;
@@ -22,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use self::page::{TaxonomyCursor, decode_cursor, encode_cursor, invalid_cursor, page_limit};
 use self::view::{load_taxon_summaries, load_taxon_summary};
 use crate::{CoreError, CoreResult, Database};
 
@@ -44,7 +47,7 @@ impl TaxonRank {
         Self::Species,
     ];
 
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Kingdom => "kingdom",
             Self::Order => "order",
@@ -476,17 +479,33 @@ pub fn list_taxonomy_operations(
     database: &Database,
     limit: usize,
 ) -> CoreResult<Vec<TaxonomyOperation>> {
+    Ok(list_taxonomy_operations_page(database, None, limit)?.items)
+}
+
+pub fn list_taxonomy_operations_page(
+    database: &Database,
+    cursor: Option<&str>,
+    limit: usize,
+) -> CoreResult<TaxonomyPage<TaxonomyOperation>> {
     let connection = database.connect()?;
+    let cursor_operation_id = match decode_cursor(cursor)? {
+        None => None,
+        Some(TaxonomyCursor::Operations { operation_id }) => Some(operation_id),
+        Some(_) => return Err(invalid_cursor()),
+    };
+    let limit = page_limit(limit);
+    let fetch_limit = limit + 1;
     let mut statement = connection.prepare(
         r#"
         SELECT operation_id, batch_id, row_number, status, changes_json,
                after_hash, applied_at, reverted_at
         FROM taxonomy_operations
+        WHERE (?1 IS NULL OR operation_id < ?1)
         ORDER BY operation_id DESC
-        LIMIT ?
+        LIMIT ?2
         "#,
     )?;
-    let rows = statement.query_map([limit as i64], |row| {
+    let rows = statement.query_map(params![cursor_operation_id, fetch_limit as i64], |row| {
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, i64>(1)?,
@@ -498,39 +517,102 @@ pub fn list_taxonomy_operations(
             row.get::<_, Option<String>>(7)?,
         ))
     })?;
-    rows.map(taxonomy_operation_from_row).collect()
+    let mut items = rows
+        .map(taxonomy_operation_from_row)
+        .collect::<CoreResult<Vec<_>>>()?;
+    let next_cursor = if items.len() > limit {
+        items.truncate(limit);
+        items.last().map(|operation| {
+            encode_cursor(&TaxonomyCursor::Operations {
+                operation_id: operation.operation_id,
+            })
+        })
+    } else {
+        None
+    }
+    .transpose()?;
+    Ok(TaxonomyPage { items, next_cursor })
 }
 
 pub fn list_taxonomy_operation_batches(
     database: &Database,
     limit: usize,
 ) -> CoreResult<Vec<TaxonomyOperationBatch>> {
+    Ok(list_taxonomy_operation_batches_page(database, None, limit)?.items)
+}
+
+pub fn list_taxonomy_operation_batches_page(
+    database: &Database,
+    cursor: Option<&str>,
+    limit: usize,
+) -> CoreResult<TaxonomyPage<TaxonomyOperationBatch>> {
     let connection = database.connect()?;
+    let batch_cursor = match decode_cursor(cursor)? {
+        None => None,
+        Some(TaxonomyCursor::OperationBatches {
+            created_at,
+            batch_id,
+        }) => Some((created_at, batch_id)),
+        Some(_) => return Err(invalid_cursor()),
+    };
+    let limit = page_limit(limit);
+    let fetch_limit = limit + 1;
     let mut statement = connection.prepare(
         r#"
         SELECT batch_id, context_json, input_json, created_at
         FROM taxonomy_operation_batches
+        WHERE (?1 IS NULL OR created_at < ?1 OR (created_at = ?1 AND batch_id < ?2))
         ORDER BY created_at DESC, batch_id DESC
-        LIMIT ?
+        LIMIT ?3
         "#,
     )?;
-    let rows = statement.query_map([limit as i64], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
-    rows.map(taxonomy_operation_batch_from_row).collect()
+    let (cursor_created_at, cursor_batch_id) = batch_cursor
+        .map(|(created_at, batch_id)| (Some(created_at), Some(batch_id)))
+        .unwrap_or((None, None));
+    let rows = statement.query_map(
+        params![cursor_created_at, cursor_batch_id, fetch_limit as i64],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    )?;
+    let mut items = rows
+        .map(taxonomy_operation_batch_from_row)
+        .collect::<CoreResult<Vec<_>>>()?;
+    let next_cursor = if items.len() > limit {
+        items.truncate(limit);
+        items.last().map(|batch| {
+            encode_cursor(&TaxonomyCursor::OperationBatches {
+                created_at: batch.created_at.clone(),
+                batch_id: batch.batch_id,
+            })
+        })
+    } else {
+        None
+    }
+    .transpose()?;
+    Ok(TaxonomyPage { items, next_cursor })
 }
 
 pub fn list_taxonomy_operations_for_batch(
     database: &Database,
     batch_id: i64,
 ) -> CoreResult<Vec<TaxonomyOperation>> {
+    Ok(list_taxonomy_operations_for_batch_page(database, batch_id, None, usize::MAX)?.items)
+}
+
+pub fn list_taxonomy_operations_for_batch_page(
+    database: &Database,
+    batch_id: i64,
+    cursor: Option<&str>,
+    limit: usize,
+) -> CoreResult<TaxonomyPage<TaxonomyOperation>> {
     let connection = database.connect()?;
-    list_taxonomy_operations_for_batch_from_connection(&connection, batch_id)
+    list_taxonomy_operations_for_batch_page_from_connection(&connection, batch_id, cursor, limit)
 }
 
 fn taxonomy_operation_batch_from_row(
@@ -545,32 +627,74 @@ fn taxonomy_operation_batch_from_row(
     })
 }
 
-fn list_taxonomy_operations_for_batch_from_connection(
+fn list_taxonomy_operations_for_batch_page_from_connection(
     connection: &Connection,
     batch_id: i64,
-) -> CoreResult<Vec<TaxonomyOperation>> {
+    cursor: Option<&str>,
+    limit: usize,
+) -> CoreResult<TaxonomyPage<TaxonomyOperation>> {
+    let operation_cursor = match decode_cursor(cursor)? {
+        None => None,
+        Some(TaxonomyCursor::BatchOperations {
+            batch_id: cursor_batch_id,
+            row_number,
+            operation_id,
+        }) if cursor_batch_id == batch_id => Some((row_number as i64, operation_id)),
+        Some(_) => return Err(invalid_cursor()),
+    };
+    let limit = page_limit(limit);
+    let fetch_limit = limit + 1;
     let mut statement = connection.prepare(
         r#"
         SELECT operation_id, batch_id, row_number, status, changes_json,
                after_hash, applied_at, reverted_at
         FROM taxonomy_operations
-        WHERE batch_id = ?
+        WHERE batch_id = ?1
+          AND (?2 IS NULL OR row_number > ?2 OR (row_number = ?2 AND operation_id > ?3))
         ORDER BY row_number, operation_id
+        LIMIT ?4
         "#,
     )?;
-    let rows = statement.query_map([batch_id], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, Option<String>>(7)?,
-        ))
-    })?;
-    rows.map(taxonomy_operation_from_row).collect()
+    let (cursor_row_number, cursor_operation_id) = operation_cursor
+        .map(|(row_number, operation_id)| (Some(row_number), Some(operation_id)))
+        .unwrap_or((None, None));
+    let rows = statement.query_map(
+        params![
+            batch_id,
+            cursor_row_number,
+            cursor_operation_id,
+            fetch_limit as i64
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        },
+    )?;
+    let mut items = rows
+        .map(taxonomy_operation_from_row)
+        .collect::<CoreResult<Vec<_>>>()?;
+    let next_cursor = if items.len() > limit {
+        items.truncate(limit);
+        items.last().map(|operation| {
+            encode_cursor(&TaxonomyCursor::BatchOperations {
+                batch_id,
+                row_number: operation.row_number,
+                operation_id: operation.operation_id,
+            })
+        })
+    } else {
+        None
+    }
+    .transpose()?;
+    Ok(TaxonomyPage { items, next_cursor })
 }
 
 fn taxonomy_operation_from_row(
@@ -2151,8 +2275,12 @@ mod tests {
     }
 
     fn species_row() -> TaxonInputRow {
+        species_row_named("Canis lupus")
+    }
+
+    fn species_row_named(name: &str) -> TaxonInputRow {
         TaxonInputRow {
-            species: Some("Canis lupus".into()),
+            species: Some(name.into()),
             ..TaxonInputRow::default()
         }
     }
@@ -2308,13 +2436,56 @@ mod tests {
 
         let genus = get_taxon_detail_node(&database, ids[3]).unwrap().unwrap();
         assert_eq!(genus.summary.taxon_id, ids[3]);
-        assert_eq!(genus.children.len(), 1);
-        assert_eq!(genus.children[0].taxon_id, species_id);
-        assert_eq!(genus.children[0].rank, TaxonRank::Species);
+        assert_eq!(genus.children.items.len(), 1);
+        assert_eq!(genus.children.items[0].taxon_id, species_id);
+        assert_eq!(genus.children.items[0].rank, TaxonRank::Species);
         assert_eq!(
-            genus.children[0].names.scientific.as_deref(),
+            genus.children.items[0].names.scientific.as_deref(),
             Some("Canis lupus")
         );
+    }
+
+    #[test]
+    fn pages_taxon_search_and_children_with_cursors() {
+        let (_directory, database) = database();
+        let ids = seed_lineage(&database);
+        apply_taxon_rows(
+            &database,
+            &[
+                species_row_named("Canis lupus"),
+                species_row_named("Canis latrans"),
+                species_row_named("Canis rufus"),
+            ],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+
+        let first_matches = search_taxa_page(&database, "Canis", None, 2).unwrap();
+        assert_eq!(first_matches.items.len(), 2);
+        assert!(first_matches.next_cursor.is_some());
+        let second_matches =
+            search_taxa_page(&database, "Canis", first_matches.next_cursor.as_deref(), 2).unwrap();
+        assert_eq!(second_matches.items.len(), 2);
+        assert!(second_matches.next_cursor.is_none());
+        assert!(first_matches.items[1].summary.taxon_id < second_matches.items[0].summary.taxon_id);
+
+        let first_children = list_taxon_children(&database, ids[3], None, 2).unwrap();
+        assert_eq!(first_children.items.len(), 2);
+        assert!(first_children.next_cursor.is_some());
+        let second_children =
+            list_taxon_children(&database, ids[3], first_children.next_cursor.as_deref(), 2)
+                .unwrap();
+        assert_eq!(second_children.items.len(), 1);
+        assert!(second_children.next_cursor.is_none());
+
+        let genus = get_taxon_detail_node_page(&database, ids[3], None, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(genus.children.items.len(), 2);
+        assert!(genus.children.next_cursor.is_some());
     }
 
     #[test]
@@ -3096,6 +3267,83 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn pages_taxonomy_operation_logs_with_cursors() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        let options = TaxonUpdateOptions {
+            allow_new_taxa: true,
+            ..TaxonUpdateOptions::default()
+        };
+        let first_batch = apply_taxon_rows(
+            &database,
+            &[
+                species_row_named("Canis lupus"),
+                species_row_named("Canis latrans"),
+            ],
+            options,
+        )
+        .unwrap()
+        .batch_id
+        .unwrap();
+        let second_batch =
+            apply_taxon_rows(&database, &[species_row_named("Canis rufus")], options)
+                .unwrap()
+                .batch_id
+                .unwrap();
+        let third_batch =
+            apply_taxon_rows(&database, &[species_row_named("Canis simensis")], options)
+                .unwrap()
+                .batch_id
+                .unwrap();
+
+        let first_batch_page = list_taxonomy_operation_batches_page(&database, None, 2).unwrap();
+        assert_eq!(first_batch_page.items.len(), 2);
+        assert_eq!(first_batch_page.items[0].batch_id, third_batch);
+        assert_eq!(first_batch_page.items[1].batch_id, second_batch);
+        assert!(first_batch_page.next_cursor.is_some());
+        let second_batch_page = list_taxonomy_operation_batches_page(
+            &database,
+            first_batch_page.next_cursor.as_deref(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(second_batch_page.items.len(), 1);
+        assert_eq!(second_batch_page.items[0].batch_id, first_batch);
+        assert!(second_batch_page.next_cursor.is_none());
+
+        let first_operation_page = list_taxonomy_operations_page(&database, None, 2).unwrap();
+        assert_eq!(first_operation_page.items.len(), 2);
+        assert!(
+            first_operation_page.items[0].operation_id > first_operation_page.items[1].operation_id
+        );
+        assert!(first_operation_page.next_cursor.is_some());
+        let second_operation_page = list_taxonomy_operations_page(
+            &database,
+            first_operation_page.next_cursor.as_deref(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(second_operation_page.items.len(), 2);
+        assert!(second_operation_page.next_cursor.is_none());
+
+        let first_batch_operations =
+            list_taxonomy_operations_for_batch_page(&database, first_batch, None, 1).unwrap();
+        assert_eq!(first_batch_operations.items.len(), 1);
+        assert_eq!(first_batch_operations.items[0].row_number, 1);
+        assert!(first_batch_operations.next_cursor.is_some());
+        let second_batch_operations = list_taxonomy_operations_for_batch_page(
+            &database,
+            first_batch,
+            first_batch_operations.next_cursor.as_deref(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(second_batch_operations.items.len(), 1);
+        assert_eq!(second_batch_operations.items[0].row_number, 2);
+        assert!(second_batch_operations.next_cursor.is_none());
     }
 
     #[test]

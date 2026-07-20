@@ -263,6 +263,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_english_one_accepted
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chinese_one_accepted
     ON chinese(taxon_id) WHERE is_accepted = 1;
 CREATE INDEX IF NOT EXISTS idx_taxa_parent ON taxa(parent_taxon_id);
+CREATE INDEX IF NOT EXISTS idx_taxa_parent_rank_id ON taxa(parent_taxon_id, rank, taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
 CREATE INDEX IF NOT EXISTS idx_scientific_name ON scientific(scientific_name);
 CREATE INDEX IF NOT EXISTS idx_english_name ON english(english_name);
@@ -270,6 +271,10 @@ CREATE INDEX IF NOT EXISTS idx_chinese_name ON chinese(chinese_name);
 CREATE INDEX IF NOT EXISTS idx_taxon_identifiers_taxon ON taxon_identifiers(taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_batch
     ON taxonomy_operations(batch_id, row_number);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_batch_page
+    ON taxonomy_operations(batch_id, row_number, operation_id);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_operation_batches_created
+    ON taxonomy_operation_batches(created_at DESC, batch_id DESC);
 CREATE INDEX IF NOT EXISTS idx_photos_root_path ON photos(root, relative_path);
 CREATE INDEX IF NOT EXISTS idx_photos_browse
     ON photos(root, parent_dir, status, filename);
