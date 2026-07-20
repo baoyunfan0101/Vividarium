@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Connection, OptionalExtension, params_from_iter, types::Value as SqlValue};
+use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
 use serde::{Deserialize, Serialize};
 
 use super::{TaxonRank, TaxonomyNameKind, parse_rank};
@@ -99,12 +99,7 @@ pub(super) fn load_taxon_summaries(
     if taxon_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut seen = HashSet::new();
-    let unique_ids = taxon_ids
-        .iter()
-        .copied()
-        .filter(|taxon_id| seen.insert(*taxon_id))
-        .collect::<Vec<_>>();
+    let unique_ids = unique_taxon_ids(taxon_ids);
     let values_clause = unique_ids
         .iter()
         .map(|_| "(?, ?)")
@@ -272,98 +267,52 @@ pub(super) fn load_taxon_detail(
     connection: &Connection,
     taxon_id: i64,
 ) -> CoreResult<Option<TaxonDetail>> {
-    let detail_row = connection
-        .query_row(
-            "SELECT rank, parent_taxon_id, geological_range FROM taxa WHERE taxon_id = ?",
-            [taxon_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((rank, parent_taxon_id, geological_range)) = detail_row else {
-        return Ok(None);
-    };
-    load_taxon_detail_for_existing(
-        connection,
-        taxon_id,
-        parse_rank(&rank)?,
-        parent_taxon_id,
-        geological_range,
-    )
-    .map(Some)
+    Ok(load_taxon_details(connection, &[taxon_id])?.pop())
 }
 
-fn load_taxon_detail_for_existing(
+pub(super) fn load_taxon_details(
     connection: &Connection,
-    taxon_id: i64,
-    rank: TaxonRank,
-    parent_taxon_id: Option<i64>,
-    geological_range: Option<String>,
-) -> CoreResult<TaxonDetail> {
-    let mut identifier_statement = connection.prepare(
-        r#"
-        SELECT source, external_id
-        FROM taxon_identifiers
-        WHERE taxon_id = ?
-        ORDER BY source, external_id
-        "#,
-    )?;
-    let identifiers = identifier_statement
-        .query_map([taxon_id], |row| {
-            Ok(TaxonIdentifierDetail {
-                source: row.get(0)?,
-                external_id: row.get(1)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(TaxonDetail {
-        taxon_id,
-        rank,
-        parent_taxon_id,
-        geological_range,
-        names: TaxonNamesDetail {
-            scientific: load_names(connection, taxon_id, TaxonomyNameKind::Scientific)?,
-            english: load_names(connection, taxon_id, TaxonomyNameKind::English)?,
-            chinese: load_names(connection, taxon_id, TaxonomyNameKind::Chinese)?,
-        },
-        identifiers,
-    })
-}
-
-fn load_taxon_base(
-    connection: &Connection,
-    taxon_id: i64,
-) -> CoreResult<Option<(TaxonRank, Option<i64>, Option<String>)>> {
-    connection
-        .query_row(
-            "SELECT rank, parent_taxon_id, geological_range FROM taxa WHERE taxon_id = ?",
-            [taxon_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
+    taxon_ids: &[i64],
+) -> CoreResult<Vec<TaxonDetail>> {
+    if taxon_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let unique_ids = unique_taxon_ids(taxon_ids);
+    let bases = load_taxon_bases(connection, &unique_ids)?;
+    let scientific = load_names_for_taxa(connection, &unique_ids, TaxonomyNameKind::Scientific)?;
+    let english = load_names_for_taxa(connection, &unique_ids, TaxonomyNameKind::English)?;
+    let chinese = load_names_for_taxa(connection, &unique_ids, TaxonomyNameKind::Chinese)?;
+    let identifiers = load_identifiers_for_taxa(connection, &unique_ids)?;
+    let mut details_by_id = HashMap::new();
+    for base in bases {
+        let taxon_id = base.taxon_id;
+        details_by_id.insert(
+            taxon_id,
+            TaxonDetail {
+                taxon_id,
+                rank: base.rank,
+                parent_taxon_id: base.parent_taxon_id,
+                geological_range: base.geological_range,
+                names: TaxonNamesDetail {
+                    scientific: scientific.get(&taxon_id).cloned().unwrap_or_default(),
+                    english: english.get(&taxon_id).cloned().unwrap_or_default(),
+                    chinese: chinese.get(&taxon_id).cloned().unwrap_or_default(),
+                },
+                identifiers: identifiers.get(&taxon_id).cloned().unwrap_or_default(),
             },
-        )
-        .optional()?
-        .map(|(rank, parent_taxon_id, geological_range)| {
-            Ok((parse_rank(&rank)?, parent_taxon_id, geological_range))
-        })
-        .transpose()
+        );
+    }
+    Ok(taxon_ids
+        .iter()
+        .filter_map(|taxon_id| details_by_id.get(taxon_id).cloned())
+        .collect())
 }
 
 pub(super) fn load_taxon_detail_node(
     connection: &Connection,
     taxon_id: i64,
 ) -> CoreResult<Option<TaxonDetailNode>> {
-    let Some((rank, parent_taxon_id, geological_range)) = load_taxon_base(connection, taxon_id)?
-    else {
+    let Some(detail) = load_taxon_detail(connection, taxon_id)? else {
         return Ok(None);
     };
     let child_ids = load_child_taxon_ids(connection, taxon_id)?;
@@ -383,13 +332,7 @@ pub(super) fn load_taxon_detail_node(
     let children = summaries.split_off(1);
     Ok(Some(TaxonDetailNode {
         summary,
-        detail: load_taxon_detail_for_existing(
-            connection,
-            taxon_id,
-            rank,
-            parent_taxon_id,
-            geological_range,
-        )?,
+        detail,
         children,
     }))
 }
@@ -407,26 +350,149 @@ fn load_child_taxon_ids(connection: &Connection, taxon_id: i64) -> CoreResult<Ve
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-fn load_names(
-    connection: &Connection,
-    taxon_id: i64,
-    kind: TaxonomyNameKind,
-) -> CoreResult<Vec<TaxonNameDetail>> {
+fn load_taxon_bases(connection: &Connection, taxon_ids: &[i64]) -> CoreResult<Vec<TaxonBase>> {
+    if taxon_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (values_clause, params) = input_values(taxon_ids);
     let sql = format!(
-        "SELECT {}, is_accepted, authority_year, category, source FROM {} WHERE taxon_id = ? ORDER BY is_accepted DESC, {}",
+        r#"
+        WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
+        SELECT taxa.taxon_id, taxa.rank, taxa.parent_taxon_id, taxa.geological_range
+        FROM input
+        JOIN taxa ON taxa.taxon_id = input.taxon_id
+        ORDER BY input.sort_order
+        "#
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(params), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (taxon_id, rank, parent_taxon_id, geological_range) = row?;
+        Ok(TaxonBase {
+            taxon_id,
+            rank: parse_rank(&rank)?,
+            parent_taxon_id,
+            geological_range,
+        })
+    })
+    .collect()
+}
+
+fn load_names_for_taxa(
+    connection: &Connection,
+    taxon_ids: &[i64],
+    kind: TaxonomyNameKind,
+) -> CoreResult<HashMap<i64, Vec<TaxonNameDetail>>> {
+    if taxon_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (values_clause, params) = input_values(taxon_ids);
+    let sql = format!(
+        r#"
+        WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
+        SELECT input.taxon_id, {}, is_accepted, authority_year, category, source
+        FROM input
+        JOIN {} ON {}.taxon_id = input.taxon_id
+        ORDER BY input.sort_order, is_accepted DESC, {}
+        "#,
         kind.column(),
+        kind.table(),
         kind.table(),
         kind.column()
     );
     let mut statement = connection.prepare(&sql)?;
-    let names = statement.query_map([taxon_id], |row| {
-        Ok(TaxonNameDetail {
-            name: row.get(0)?,
-            is_accepted: row.get::<_, i64>(1)? != 0,
-            authority_year: row.get(2)?,
-            category: row.get(3)?,
-            source: row.get(4)?,
-        })
+    let rows = statement.query_map(params_from_iter(params), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            TaxonNameDetail {
+                name: row.get(1)?,
+                is_accepted: row.get::<_, i64>(2)? != 0,
+                authority_year: row.get(3)?,
+                category: row.get(4)?,
+                source: row.get(5)?,
+            },
+        ))
     })?;
-    Ok(names.collect::<Result<Vec<_>, _>>()?)
+    let mut names_by_id: HashMap<i64, Vec<TaxonNameDetail>> = HashMap::new();
+    for row in rows {
+        let (taxon_id, name) = row?;
+        names_by_id.entry(taxon_id).or_default().push(name);
+    }
+    Ok(names_by_id)
+}
+
+fn load_identifiers_for_taxa(
+    connection: &Connection,
+    taxon_ids: &[i64],
+) -> CoreResult<HashMap<i64, Vec<TaxonIdentifierDetail>>> {
+    if taxon_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (values_clause, params) = input_values(taxon_ids);
+    let sql = format!(
+        r#"
+        WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
+        SELECT input.taxon_id, taxon_identifiers.source, taxon_identifiers.external_id
+        FROM input
+        JOIN taxon_identifiers ON taxon_identifiers.taxon_id = input.taxon_id
+        ORDER BY input.sort_order, taxon_identifiers.source, taxon_identifiers.external_id
+        "#
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(params), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            TaxonIdentifierDetail {
+                source: row.get(1)?,
+                external_id: row.get(2)?,
+            },
+        ))
+    })?;
+    let mut identifiers_by_id: HashMap<i64, Vec<TaxonIdentifierDetail>> = HashMap::new();
+    for row in rows {
+        let (taxon_id, identifier) = row?;
+        identifiers_by_id
+            .entry(taxon_id)
+            .or_default()
+            .push(identifier);
+    }
+    Ok(identifiers_by_id)
+}
+
+fn unique_taxon_ids(taxon_ids: &[i64]) -> Vec<i64> {
+    let mut seen = HashSet::new();
+    taxon_ids
+        .iter()
+        .copied()
+        .filter(|taxon_id| seen.insert(*taxon_id))
+        .collect()
+}
+
+fn input_values(taxon_ids: &[i64]) -> (String, Vec<SqlValue>) {
+    let values_clause = taxon_ids
+        .iter()
+        .map(|_| "(?, ?)")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut params = Vec::with_capacity(taxon_ids.len() * 2);
+    for (index, taxon_id) in taxon_ids.iter().enumerate() {
+        params.push(SqlValue::Integer(*taxon_id));
+        params.push(SqlValue::Integer(index as i64));
+    }
+    (values_clause, params)
+}
+
+#[derive(Debug)]
+struct TaxonBase {
+    taxon_id: i64,
+    rank: TaxonRank,
+    parent_taxon_id: Option<i64>,
+    geological_range: Option<String>,
 }

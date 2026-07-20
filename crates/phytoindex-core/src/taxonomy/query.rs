@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use super::{TaxonomyNameKind, view::load_taxon_detail, view::load_taxon_summaries};
+use super::{TaxonomyNameKind, view::load_taxon_details, view::load_taxon_summaries};
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,17 +54,16 @@ fn search_taxa_with_connection(
 
     let ids = ids.into_iter().take(limit).collect::<Vec<_>>();
     let summaries = load_taxon_summaries(connection, &ids)?;
-    if summaries.len() != ids.len() {
+    let details = load_taxon_details(connection, &ids)?;
+    if summaries.len() != ids.len() || details.len() != ids.len() {
         return Err(CoreError::InvalidArgument(
             "matched taxon no longer exists".into(),
         ));
     }
     ids.into_iter()
         .zip(summaries)
-        .map(|(taxon_id, summary)| {
-            let detail = load_taxon_detail(connection, taxon_id)?.ok_or_else(|| {
-                CoreError::InvalidArgument(format!("matched taxon {taxon_id} no longer exists"))
-            })?;
+        .zip(details)
+        .map(|((taxon_id, summary), detail)| {
             Ok(TaxonSearchResult {
                 summary,
                 detail,
