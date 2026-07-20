@@ -180,7 +180,7 @@ pub(super) fn load_taxon_summaries(
             JOIN taxa AS parent ON parent.taxon_id = lineage.parent_taxon_id
             WHERE instr(lineage.path, ',' || parent.taxon_id || ',') = 0
         )
-        SELECT root_taxon_id, taxon_id, parent_taxon_id, rank, scientific, english, chinese, depth
+        SELECT root_taxon_id, taxon_id, parent_taxon_id, rank, scientific, english, chinese
         FROM lineage
         ORDER BY sort_order, depth DESC
         "#
@@ -197,7 +197,6 @@ pub(super) fn load_taxon_summaries(
                 english: row.get(5)?,
                 chinese: row.get(6)?,
             },
-            depth: row.get(7)?,
         })
     })?;
     let mut rows_by_root: HashMap<i64, Vec<LineageRow>> = HashMap::new();
@@ -210,7 +209,6 @@ pub(super) fn load_taxon_summaries(
         let Some(mut lineage) = rows_by_root.remove(taxon_id) else {
             continue;
         };
-        lineage.sort_by(|left, right| right.depth.cmp(&left.depth));
         if lineage
             .first()
             .and_then(|ancestor| ancestor.parent_taxon_id)
@@ -260,7 +258,6 @@ struct LineageRow {
     parent_taxon_id: Option<i64>,
     rank: String,
     names: TaxonDisplayNames,
-    depth: i64,
 }
 
 pub(super) fn load_taxon_detail(
