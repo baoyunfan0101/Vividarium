@@ -6,7 +6,11 @@ use phytoindex_core::models::{
     DirectoryListingPage, MappingMetadata, MappingNode, OperationsStatus, Photo, PhotoRootMetadata,
     TaxaMetadata, Taxon,
 };
-use phytoindex_core::{export, mapping, photos, taxa};
+use phytoindex_core::taxonomy::{
+    DeleteTaxonNameInput, TaxonDetailNode, TaxonSearchResult, TaxonomyActionResult,
+    TaxonomyCustomSqlResult,
+};
+use phytoindex_core::{export, mapping, photos, taxa, taxonomy};
 use serde_json::{Value, json};
 use tauri::{AppHandle, State};
 
@@ -88,6 +92,49 @@ pub fn save_knowledge_base_path(
     knowledge_base_path: Option<String>,
 ) -> CommandResult<TaxaMetadata> {
     taxa::save_knowledge_base_path(&state.database, knowledge_base_path.as_deref()).map_err(error)
+}
+
+#[tauri::command]
+pub fn search_taxa(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> CommandResult<Vec<TaxonSearchResult>> {
+    taxonomy::search_taxa(&state.database, &query, limit.unwrap_or(50)).map_err(error)
+}
+
+#[tauri::command]
+pub fn get_taxon_detail_node(
+    state: State<'_, AppState>,
+    taxon_id: i64,
+) -> CommandResult<TaxonDetailNode> {
+    taxonomy::get_taxon_detail_node(&state.database, taxon_id)
+        .map_err(error)?
+        .ok_or_else(|| format!("taxon {taxon_id} not found"))
+}
+
+#[tauri::command]
+pub fn delete_taxon_name(
+    state: State<'_, AppState>,
+    input: DeleteTaxonNameInput,
+) -> CommandResult<TaxonomyActionResult> {
+    taxonomy::delete_taxon_name(&state.database, input).map_err(error)
+}
+
+#[tauri::command]
+pub fn delete_taxon(
+    state: State<'_, AppState>,
+    taxon_id: i64,
+) -> CommandResult<TaxonomyActionResult> {
+    taxonomy::delete_taxon(&state.database, taxon_id).map_err(error)
+}
+
+#[tauri::command]
+pub fn execute_custom_taxonomy_sql(
+    state: State<'_, AppState>,
+    sql: String,
+) -> CommandResult<TaxonomyCustomSqlResult> {
+    taxonomy::execute_custom_taxonomy_sql(&state.database, &sql).map_err(error)
 }
 
 #[tauri::command]
