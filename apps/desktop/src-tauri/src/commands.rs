@@ -8,7 +8,8 @@ use phytoindex_core::models::{
 };
 use phytoindex_core::taxonomy::{
     DeleteTaxonNameInput, TaxonDetailNode, TaxonSearchResult, TaxonUpdateInput, TaxonUpdateOptions,
-    TaxonomyActionResult, TaxonomyCustomSqlResult, TaxonomyUpdateActionResult,
+    TaxonomyActionResult, TaxonomyCustomSqlResult, TaxonomyOperation, TaxonomyOperationBatch,
+    TaxonomyUpdateActionResult,
 };
 use phytoindex_core::{export, mapping, photos, taxa, taxonomy};
 use serde_json::{Value, json};
@@ -144,6 +145,22 @@ pub fn execute_custom_taxonomy_sql(
     sql: String,
 ) -> CommandResult<TaxonomyCustomSqlResult> {
     taxonomy::execute_custom_taxonomy_sql(&state.database, &sql).map_err(error)
+}
+
+#[tauri::command]
+pub fn list_taxonomy_operation_batches(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> CommandResult<Vec<TaxonomyOperationBatch>> {
+    taxonomy::list_taxonomy_operation_batches(&state.database, limit.unwrap_or(50)).map_err(error)
+}
+
+#[tauri::command]
+pub fn list_taxonomy_operations_for_batch(
+    state: State<'_, AppState>,
+    batch_id: i64,
+) -> CommandResult<Vec<TaxonomyOperation>> {
+    taxonomy::list_taxonomy_operations_for_batch(&state.database, batch_id).map_err(error)
 }
 
 #[tauri::command]

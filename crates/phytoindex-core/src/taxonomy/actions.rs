@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ExistingTaxonUpdate, TaxonIdentifierLogRecord, TaxonLogRecord, TaxonNameInput,
-    TaxonNameLogRecord, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyLogChange, TaxonomyNameKind,
-    TaxonomyOperationType, apply_existing_taxon_update_with_log, hash_affected_taxa,
-    insert_operation_batch, insert_operation_log,
+    TaxonNameLogRecord, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
+    TaxonomyLogChange, TaxonomyNameKind, TaxonomyOperationType,
+    apply_existing_taxon_update_with_log, hash_affected_taxa, insert_operation_batch,
+    insert_operation_log,
     view::{TaxonDetailNode, load_taxon_detail_node},
 };
 use crate::{CoreError, CoreResult, Database};
@@ -46,11 +47,6 @@ pub struct TaxonomyCustomSqlResult {
     pub batch_id: i64,
     pub committed: bool,
     pub message: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ActionOptions<'a> {
-    action: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,9 +133,7 @@ pub fn delete_taxon_name(
     let batch_id = insert_operation_batch(
         &transaction,
         &input,
-        ActionOptions {
-            action: "delete_taxon_name",
-        },
+        &TaxonomyBatchContext::QueryDeleteName,
     )?;
     let operation_id = insert_operation_log(
         &transaction,
@@ -180,9 +174,7 @@ pub fn update_taxon(
         options,
         &mut batch_id,
         &input,
-        &ActionOptions {
-            action: "update_taxon",
-        },
+        &TaxonomyBatchContext::QueryUpdate { options },
     )?;
     Ok(TaxonomyUpdateActionResult { batch_id, outcome })
 }
@@ -224,9 +216,7 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyAc
     let batch_id = insert_operation_batch(
         &transaction,
         &DeleteTaxonInput { taxon_id },
-        ActionOptions {
-            action: "delete_taxon",
-        },
+        &TaxonomyBatchContext::QueryDeleteTaxon,
     )?;
     let operation_id = insert_operation_log(
         &transaction,
@@ -259,9 +249,7 @@ pub fn execute_custom_taxonomy_sql(
     let batch_id = insert_operation_batch(
         &transaction,
         &CustomSqlInput { sql },
-        ActionOptions {
-            action: "custom_sql",
-        },
+        &TaxonomyBatchContext::CustomSql,
     )?;
     transaction.commit()?;
     Ok(TaxonomyCustomSqlResult {

@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use self::view::load_taxon_summary;
@@ -284,6 +285,24 @@ pub struct TaxonBatchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum TaxonomyBatchContext {
+    BatchUpdate { options: TaxonUpdateOptions },
+    QueryUpdate { options: TaxonUpdateOptions },
+    QueryDeleteName,
+    QueryDeleteTaxon,
+    CustomSql,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonomyOperationBatch {
+    pub batch_id: i64,
+    pub context_json: Value,
+    pub input_json: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonomyOperation {
     pub operation_id: i64,
     pub batch_id: i64,
@@ -352,7 +371,7 @@ fn apply_rows(
             options,
             &mut batch_id,
             rows,
-            &options,
+            &TaxonomyBatchContext::BatchUpdate { options },
         )?;
         committed |= outcome.status == TaxonRowStatus::Applied;
         outcomes.push(outcome);
@@ -364,14 +383,14 @@ fn apply_rows(
     })
 }
 
-pub(super) fn apply_taxon_row_with_log<T: Serialize + ?Sized, O: Serialize + ?Sized>(
+pub(super) fn apply_taxon_row_with_log<T: Serialize + ?Sized>(
     connection: &mut Connection,
     row_number: usize,
     row: &TaxonInputRow,
     options: TaxonUpdateOptions,
     batch_id: &mut Option<i64>,
     batch_inputs: &T,
-    batch_options: &O,
+    batch_context: &TaxonomyBatchContext,
 ) -> CoreResult<TaxonRowOutcome> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let plan = match prepare_row(&transaction, row, options) {
@@ -387,11 +406,11 @@ pub(super) fn apply_taxon_row_with_log<T: Serialize + ?Sized, O: Serialize + ?Si
         plan,
         batch_id,
         batch_inputs,
-        batch_options,
+        batch_context,
     )
 }
 
-pub(super) fn apply_existing_taxon_update_with_log<T: Serialize + ?Sized, O: Serialize + ?Sized>(
+pub(super) fn apply_existing_taxon_update_with_log<T: Serialize + ?Sized>(
     connection: &mut Connection,
     row_number: usize,
     taxon_id: i64,
@@ -399,7 +418,7 @@ pub(super) fn apply_existing_taxon_update_with_log<T: Serialize + ?Sized, O: Ser
     options: TaxonUpdateOptions,
     batch_id: &mut Option<i64>,
     batch_inputs: &T,
-    batch_options: &O,
+    batch_context: &TaxonomyBatchContext,
 ) -> CoreResult<TaxonRowOutcome> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let plan = match prepare_existing_taxon(&transaction, update, options, taxon_id) {
@@ -415,17 +434,17 @@ pub(super) fn apply_existing_taxon_update_with_log<T: Serialize + ?Sized, O: Ser
         plan,
         batch_id,
         batch_inputs,
-        batch_options,
+        batch_context,
     )
 }
 
-fn apply_prepared_taxon_plan_with_log<T: Serialize + ?Sized, O: Serialize + ?Sized>(
+fn apply_prepared_taxon_plan_with_log<T: Serialize + ?Sized>(
     transaction: Transaction<'_>,
     row_number: usize,
     plan: RowPlan,
     batch_id: &mut Option<i64>,
     batch_inputs: &T,
-    batch_options: &O,
+    batch_context: &TaxonomyBatchContext,
 ) -> CoreResult<TaxonRowOutcome> {
     let before = match &plan.target {
         PlannedTarget::Existing(taxon_id) => taxon_snapshot(&transaction, *taxon_id)?,
@@ -450,7 +469,7 @@ fn apply_prepared_taxon_plan_with_log<T: Serialize + ?Sized, O: Serialize + ?Siz
     let current_batch_id = match *batch_id {
         Some(value) => value,
         None => {
-            let value = insert_operation_batch(&transaction, batch_inputs, batch_options)?;
+            let value = insert_operation_batch(&transaction, batch_inputs, batch_context)?;
             *batch_id = Some(value);
             value
         }
@@ -497,31 +516,117 @@ pub fn list_taxonomy_operations(
             row.get::<_, Option<String>>(8)?,
         ))
     })?;
-    rows.map(|row| {
-        let (
-            operation_id,
-            batch_id,
-            row_number,
-            operation_type,
-            status,
-            changes_json,
-            after_hash,
-            applied_at,
-            reverted_at,
-        ) = row?;
-        Ok(TaxonomyOperation {
-            operation_id,
-            batch_id,
-            row_number: row_number as usize,
-            operation_type: TaxonomyOperationType::from_str(&operation_type)?,
-            status,
-            changes: deserialize_json(&changes_json, "operation changes")?,
-            after_hash,
-            applied_at,
-            reverted_at,
-        })
+    rows.map(taxonomy_operation_from_row).collect()
+}
+
+pub fn list_taxonomy_operation_batches(
+    database: &Database,
+    limit: usize,
+) -> CoreResult<Vec<TaxonomyOperationBatch>> {
+    let connection = database.connect()?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT batch_id, context_json, input_json, created_at
+        FROM taxonomy_operation_batches
+        ORDER BY created_at DESC, batch_id DESC
+        LIMIT ?
+        "#,
+    )?;
+    let rows = statement.query_map([limit as i64], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    rows.map(taxonomy_operation_batch_from_row).collect()
+}
+
+pub fn list_taxonomy_operations_for_batch(
+    database: &Database,
+    batch_id: i64,
+) -> CoreResult<Vec<TaxonomyOperation>> {
+    let connection = database.connect()?;
+    list_taxonomy_operations_for_batch_from_connection(&connection, batch_id)
+}
+
+fn taxonomy_operation_batch_from_row(
+    row: rusqlite::Result<(i64, String, String, String)>,
+) -> CoreResult<TaxonomyOperationBatch> {
+    let (batch_id, context_json, input_json, created_at) = row?;
+    Ok(TaxonomyOperationBatch {
+        batch_id,
+        context_json: deserialize_json(&context_json, "batch context")?,
+        input_json: deserialize_json(&input_json, "batch input")?,
+        created_at,
     })
-    .collect()
+}
+
+fn list_taxonomy_operations_for_batch_from_connection(
+    connection: &Connection,
+    batch_id: i64,
+) -> CoreResult<Vec<TaxonomyOperation>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT operation_id, batch_id, row_number, operation_type, status,
+               changes_json, after_hash, applied_at, reverted_at
+        FROM taxonomy_operations
+        WHERE batch_id = ?
+        ORDER BY row_number, operation_id
+        "#,
+    )?;
+    let rows = statement.query_map([batch_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
+        ))
+    })?;
+    rows.map(taxonomy_operation_from_row).collect()
+}
+
+fn taxonomy_operation_from_row(
+    row: rusqlite::Result<(
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    )>,
+) -> CoreResult<TaxonomyOperation> {
+    let (
+        operation_id,
+        batch_id,
+        row_number,
+        operation_type,
+        status,
+        changes_json,
+        after_hash,
+        applied_at,
+        reverted_at,
+    ) = row?;
+    Ok(TaxonomyOperation {
+        operation_id,
+        batch_id,
+        row_number: row_number as usize,
+        operation_type: TaxonomyOperationType::from_str(&operation_type)?,
+        status,
+        changes: deserialize_json(&changes_json, "operation changes")?,
+        after_hash,
+        applied_at,
+        reverted_at,
+    })
 }
 
 pub fn revert_taxonomy_operation(
@@ -1446,19 +1551,19 @@ fn execute_name_plan(
     Ok(())
 }
 
-pub(super) fn insert_operation_batch<T: Serialize + ?Sized, O: Serialize>(
+pub(super) fn insert_operation_batch<T: Serialize + ?Sized>(
     transaction: &Transaction<'_>,
     inputs: &T,
-    options: O,
+    context: &TaxonomyBatchContext,
 ) -> CoreResult<i64> {
     let input_json = serialize_json(inputs, "taxonomy inputs")?;
-    let options_json = serialize_json(&options, "taxonomy options")?;
+    let context_json = serialize_json(context, "taxonomy batch context")?;
     transaction.execute(
         r#"
-        INSERT INTO taxonomy_operation_batches (options_json, input_json)
+        INSERT INTO taxonomy_operation_batches (context_json, input_json)
         VALUES (?, ?)
         "#,
-        params![options_json, input_json],
+        params![context_json, input_json],
     )?;
     Ok(transaction.last_insert_rowid())
 }
@@ -2416,14 +2521,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(range, "Holocene");
-        let batch_count: i64 = connection
+        let context_json: String = connection
             .query_row(
-                "SELECT COUNT(*) FROM taxonomy_operation_batches WHERE batch_id = ?",
+                "SELECT context_json FROM taxonomy_operation_batches WHERE batch_id = ?",
                 [result.batch_id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(batch_count, 1);
+        assert_eq!(
+            deserialize_json::<TaxonomyBatchContext>(&context_json, "context").unwrap(),
+            TaxonomyBatchContext::CustomSql
+        );
     }
 
     #[test]
@@ -2986,10 +3094,10 @@ mod tests {
         let result = apply_taxon_rows(&database, &inputs, options).unwrap();
         let batch_id = result.batch_id.unwrap();
         let connection = database.connect().unwrap();
-        let (options_json, input_json): (String, String) = connection
+        let (context_json, input_json): (String, String) = connection
             .query_row(
                 r#"
-                SELECT options_json, input_json
+                SELECT context_json, input_json
                 FROM taxonomy_operation_batches
                 WHERE batch_id = ?
                 "#,
@@ -2997,15 +3105,33 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
+        let context = deserialize_json::<TaxonomyBatchContext>(&context_json, "context").unwrap();
         assert_eq!(
-            deserialize_json::<TaxonUpdateOptions>(&options_json, "options").unwrap(),
-            options
+            context,
+            TaxonomyBatchContext::BatchUpdate { options }
         );
         assert_eq!(
             deserialize_json::<Vec<TaxonInputRow>>(&input_json, "inputs").unwrap(),
             inputs
         );
         drop(connection);
+
+        let batches = list_taxonomy_operation_batches(&database, 10).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].batch_id, batch_id);
+        assert_eq!(
+            serde_json::from_value::<TaxonomyBatchContext>(batches[0].context_json.clone())
+                .unwrap(),
+            TaxonomyBatchContext::BatchUpdate { options }
+        );
+        assert_eq!(
+            serde_json::from_value::<Vec<TaxonInputRow>>(batches[0].input_json.clone()).unwrap(),
+            inputs
+        );
+
+        let batch_operations = list_taxonomy_operations_for_batch(&database, batch_id).unwrap();
+        assert_eq!(batch_operations.len(), 1);
+        assert_eq!(batch_operations[0].batch_id, batch_id);
 
         let operations = list_taxonomy_operations(&database, 10).unwrap();
         assert_eq!(operations.len(), 1);

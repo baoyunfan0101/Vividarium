@@ -35,6 +35,8 @@ pub fn run() {
             commands::update_taxon,
             commands::delete_taxon,
             commands::execute_custom_taxonomy_sql,
+            commands::list_taxonomy_operation_batches,
+            commands::list_taxonomy_operations_for_batch,
             commands::get_mapping_metadata,
             commands::get_mapping_root,
             commands::get_mapping_taxon,

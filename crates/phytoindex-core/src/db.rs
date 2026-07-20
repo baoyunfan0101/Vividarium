@@ -69,11 +69,24 @@ fn reset_prerelease_taxonomy_logs(connection: &Connection) -> CoreResult<()> {
     let has_obsolete_schema: bool = connection.query_row(
         r#"
         SELECT
-            EXISTS (
-                SELECT 1
-                FROM pragma_table_info('taxonomy_operations')
-                WHERE name IN (
-                    'taxon_id', 'input_json', 'options_json', 'before_json', 'after_json'
+            (
+                EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'taxonomy_operations'
+                )
+                AND (
+                    SELECT json_group_array(name)
+                    FROM pragma_table_info('taxonomy_operations')
+                ) != json_array(
+                    'operation_id',
+                    'batch_id',
+                    'row_number',
+                    'operation_type',
+                    'status',
+                    'changes_json',
+                    'after_hash',
+                    'applied_at',
+                    'reverted_at'
                 )
             )
             OR (
@@ -84,7 +97,7 @@ fn reset_prerelease_taxonomy_logs(connection: &Connection) -> CoreResult<()> {
                 AND NOT EXISTS (
                     SELECT 1
                     FROM pragma_table_info('taxonomy_operation_batches')
-                    WHERE name = 'options_json'
+                    WHERE name = 'context_json'
                 )
             )
         "#,
@@ -199,7 +212,7 @@ CREATE TABLE IF NOT EXISTS taxon_identifiers (
 
 CREATE TABLE IF NOT EXISTS taxonomy_operation_batches (
     batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    options_json TEXT NOT NULL,
+    context_json TEXT NOT NULL,
     input_json TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -375,7 +388,7 @@ mod tests {
         let batch_columns = table_columns(&connection, "taxonomy_operation_batches");
         assert_eq!(
             batch_columns,
-            ["batch_id", "options_json", "input_json", "created_at"]
+            ["batch_id", "context_json", "input_json", "created_at"]
         );
         let operation_columns = table_columns(&connection, "taxonomy_operations");
         assert_eq!(
@@ -413,7 +426,7 @@ mod tests {
                     taxon_id INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     input_json TEXT NOT NULL,
-                    options_json TEXT NOT NULL,
+                    legacy_options TEXT NOT NULL,
                     changes_json TEXT NOT NULL,
                     before_json TEXT,
                     after_json TEXT NOT NULL,
@@ -439,7 +452,7 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(
             table_columns(&connection, "taxonomy_operation_batches"),
-            ["batch_id", "options_json", "input_json", "created_at"]
+            ["batch_id", "context_json", "input_json", "created_at"]
         );
         let operation_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM taxonomy_operations", [], |row| {
