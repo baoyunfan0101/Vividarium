@@ -1,8 +1,17 @@
+mod actions;
+mod query;
 mod view;
 
+pub use actions::{
+    DeleteTaxonNameInput, TaxonomyActionResult, TaxonomyCustomSqlResult, delete_taxon,
+    delete_taxon_name, execute_custom_taxonomy_sql,
+};
+pub use query::{TaxonNameMatch, TaxonSearchResult, search_taxa};
+
 pub use view::{
-    TaxonBreadcrumbItem, TaxonDetail, TaxonDisplayNames, TaxonIdentifierDetail, TaxonNameDetail,
-    TaxonNamesDetail, TaxonSummary, get_taxon_detail, get_taxon_summary,
+    TaxonBreadcrumbItem, TaxonDetail, TaxonDetailNode, TaxonDisplayNames, TaxonIdentifierDetail,
+    TaxonNameDetail, TaxonNamesDetail, TaxonSummary, get_taxon_detail, get_taxon_detail_node,
+    get_taxon_summary,
 };
 
 use std::collections::BTreeSet;
@@ -145,7 +154,7 @@ pub enum TaxonomyNameKind {
 }
 
 impl TaxonomyNameKind {
-    fn table(self) -> &'static str {
+    pub(super) fn table(self) -> &'static str {
         match self {
             Self::Scientific => "scientific",
             Self::English => "english",
@@ -153,7 +162,7 @@ impl TaxonomyNameKind {
         }
     }
 
-    fn column(self) -> &'static str {
+    pub(super) fn column(self) -> &'static str {
         match self {
             Self::Scientific => "scientific_name",
             Self::English => "english_name",
@@ -224,6 +233,17 @@ pub enum TaxonomyLogChange {
         before: TaxonNameLogRecord,
         after: TaxonNameLogRecord,
     },
+    NameDeleted {
+        name_kind: TaxonomyNameKind,
+        before: TaxonNameLogRecord,
+    },
+    TaxonDeleted {
+        before: TaxonLogRecord,
+        scientific: Vec<TaxonNameLogRecord>,
+        english: Vec<TaxonNameLogRecord>,
+        chinese: Vec<TaxonNameLogRecord>,
+        identifiers: Vec<TaxonIdentifierLogRecord>,
+    },
 }
 
 impl TaxonomyLogChange {
@@ -231,8 +251,17 @@ impl TaxonomyLogChange {
         match self {
             Self::TaxonInserted { after } | Self::TaxonUpdated { after, .. } => after.taxon_id,
             Self::NameInserted { after, .. } | Self::NameUpdated { after, .. } => after.taxon_id,
+            Self::NameDeleted { before, .. } => before.taxon_id,
+            Self::TaxonDeleted { before, .. } => before.taxon_id,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonIdentifierLogRecord {
+    pub taxon_id: i64,
+    pub source: String,
+    pub external_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1313,10 +1342,10 @@ fn execute_name_plan(
     Ok(())
 }
 
-fn insert_operation_batch(
+pub(super) fn insert_operation_batch<T: Serialize + ?Sized, O: Serialize>(
     transaction: &Transaction<'_>,
-    inputs: &[TaxonInputRow],
-    options: TaxonUpdateOptions,
+    inputs: &T,
+    options: O,
 ) -> CoreResult<i64> {
     let input_json = serialize_json(inputs, "taxonomy inputs")?;
     let options_json = serialize_json(&options, "taxonomy options")?;
@@ -1330,7 +1359,7 @@ fn insert_operation_batch(
     Ok(transaction.last_insert_rowid())
 }
 
-fn insert_operation_log(
+pub(super) fn insert_operation_log(
     transaction: &Transaction<'_>,
     batch_id: i64,
     row_number: usize,
@@ -1564,7 +1593,7 @@ fn name_log_record(taxon_id: i64, snapshot: &NameSnapshot) -> TaxonNameLogRecord
     }
 }
 
-fn hash_affected_taxa(
+pub(super) fn hash_affected_taxa(
     transaction: &Transaction<'_>,
     changes: &[TaxonomyLogChange],
 ) -> CoreResult<String> {
@@ -1621,6 +1650,9 @@ fn revert_changes(
             TaxonomyLogChange::NameUpdated {
                 name_kind, before, ..
             } => restore_name_record(transaction, *name_kind, before)?,
+            TaxonomyLogChange::NameDeleted { name_kind, before } => {
+                insert_name_record(transaction, *name_kind, before)?;
+            }
             TaxonomyLogChange::TaxonUpdated { before, .. } => {
                 transaction.execute(
                     r#"
@@ -1638,6 +1670,44 @@ fn revert_changes(
             }
             TaxonomyLogChange::TaxonInserted { after } => {
                 delete_created_taxon(transaction, after.taxon_id, operation_id)?;
+            }
+            TaxonomyLogChange::TaxonDeleted {
+                before,
+                scientific,
+                english,
+                chinese,
+                identifiers,
+            } => {
+                transaction.execute(
+                    r#"
+                    INSERT INTO taxa (taxon_id, parent_taxon_id, rank, geological_range)
+                    VALUES (?, ?, ?, ?)
+                    "#,
+                    params![
+                        before.taxon_id,
+                        before.parent_taxon_id,
+                        before.rank,
+                        before.geological_range,
+                    ],
+                )?;
+                for record in scientific {
+                    insert_name_record(transaction, TaxonomyNameKind::Scientific, record)?;
+                }
+                for record in english {
+                    insert_name_record(transaction, TaxonomyNameKind::English, record)?;
+                }
+                for record in chinese {
+                    insert_name_record(transaction, TaxonomyNameKind::Chinese, record)?;
+                }
+                for record in identifiers {
+                    transaction.execute(
+                        r#"
+                        INSERT INTO taxon_identifiers (taxon_id, source, external_id)
+                        VALUES (?, ?, ?)
+                        "#,
+                        params![record.taxon_id, record.source, record.external_id],
+                    )?;
+                }
             }
             TaxonomyLogChange::NameInserted { .. } => {}
         }
@@ -1669,6 +1739,30 @@ fn restore_name_record(
     Ok(())
 }
 
+fn insert_name_record(
+    transaction: &Transaction<'_>,
+    kind: TaxonomyNameKind,
+    record: &TaxonNameLogRecord,
+) -> CoreResult<()> {
+    let sql = format!(
+        "INSERT INTO {} (taxon_id, {}, is_accepted, authority_year, category, source) VALUES (?, ?, ?, ?, ?, ?)",
+        kind.table(),
+        kind.column()
+    );
+    transaction.execute(
+        &sql,
+        params![
+            record.taxon_id,
+            record.name,
+            i64::from(record.is_accepted),
+            record.authority_year,
+            record.category,
+            record.source,
+        ],
+    )?;
+    Ok(())
+}
+
 fn delete_created_taxon(
     transaction: &Transaction<'_>,
     taxon_id: i64,
@@ -1693,7 +1787,7 @@ fn delete_created_taxon(
     Ok(())
 }
 
-fn serialize_json<T: Serialize + ?Sized>(value: &T, label: &str) -> CoreResult<String> {
+pub(super) fn serialize_json<T: Serialize + ?Sized>(value: &T, label: &str) -> CoreResult<String> {
     serde_json::to_string(value)
         .map_err(|error| CoreError::InvalidArgument(format!("invalid {label}: {error}")))
 }
@@ -2020,6 +2114,159 @@ mod tests {
         );
         assert_eq!(detail.identifiers.len(), 1);
         assert_eq!(detail.identifiers[0].external_id, "123");
+    }
+
+    #[test]
+    fn searches_taxa_by_any_name_and_loads_child_summaries() {
+        let (_directory, database) = database();
+        let ids = seed_lineage(&database);
+        let result = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                english: Some(TaxonNameInput {
+                    name: "gray wolf".into(),
+                    ..TaxonNameInput::default()
+                }),
+                chinese: Some(TaxonNameInput {
+                    name: "wolf".into(),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                allow_new_names: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let species_id = result.rows[0].target.as_ref().unwrap().taxon_id;
+
+        let matches = search_taxa(&database, "wolf", 10).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].taxon_id, species_id);
+        assert!(matches[0].matches.iter().any(|value| {
+            value.name_kind == TaxonomyNameKind::English && value.name == "gray wolf"
+        }));
+        assert_eq!(
+            matches[0].detail.detail.summary.breadcrumb[3].taxon_id,
+            ids[3]
+        );
+
+        let genus = get_taxon_detail_node(&database, ids[3]).unwrap().unwrap();
+        assert_eq!(genus.children.len(), 1);
+        assert_eq!(genus.children[0].taxon_id, species_id);
+    }
+
+    #[test]
+    fn deletes_a_taxon_name_and_can_revert_it() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        let result = apply_taxon_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("Canis lupus".into()),
+                scientific: Some(TaxonNameInput {
+                    name: "Canis lycaon".into(),
+                    category: Some("synonym".into()),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                allow_new_names: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let taxon_id = result.rows[0].target.as_ref().unwrap().taxon_id;
+
+        let deleted = delete_taxon_name(
+            &database,
+            DeleteTaxonNameInput {
+                taxon_id,
+                name_kind: TaxonomyNameKind::Scientific,
+                name: "Canis lycaon".into(),
+                replacement_accepted_name: None,
+            },
+        )
+        .unwrap();
+        let connection = database.connect().unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM scientific WHERE scientific_name = 'Canis lycaon'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(connection);
+
+        revert_taxonomy_operation(&database, deleted.operation_id).unwrap();
+        let connection = database.connect().unwrap();
+        let restored: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM scientific WHERE scientific_name = 'Canis lycaon'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored, 1);
+    }
+
+    #[test]
+    fn deletes_a_leaf_taxon_and_can_revert_it() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        let result = apply_taxon_rows(
+            &database,
+            &[species_row()],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let taxon_id = result.rows[0].target.as_ref().unwrap().taxon_id;
+
+        let deleted = delete_taxon(&database, taxon_id).unwrap();
+        assert!(get_taxon_detail(&database, taxon_id).unwrap().is_none());
+        revert_taxonomy_operation(&database, deleted.operation_id).unwrap();
+        assert!(get_taxon_detail(&database, taxon_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn executes_custom_sql_and_records_a_batch() {
+        let (_directory, database) = database();
+        let ids = seed_lineage(&database);
+        let result = execute_custom_taxonomy_sql(
+            &database,
+            &format!(
+                "UPDATE taxa SET geological_range = 'Holocene' WHERE taxon_id = {}",
+                ids[3]
+            ),
+        )
+        .unwrap();
+        assert!(result.committed);
+        let connection = database.connect().unwrap();
+        let range: String = connection
+            .query_row(
+                "SELECT geological_range FROM taxa WHERE taxon_id = ?",
+                [ids[3]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(range, "Holocene");
+        let batch_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM taxonomy_operation_batches WHERE batch_id = ?",
+                [result.batch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(batch_count, 1);
     }
 
     #[test]

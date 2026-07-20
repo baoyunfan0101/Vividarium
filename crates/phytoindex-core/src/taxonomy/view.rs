@@ -59,6 +59,12 @@ pub struct TaxonDetail {
     pub identifiers: Vec<TaxonIdentifierDetail>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonDetailNode {
+    pub detail: TaxonDetail,
+    pub children: Vec<TaxonSummary>,
+}
+
 pub fn get_taxon_summary(database: &Database, taxon_id: i64) -> CoreResult<Option<TaxonSummary>> {
     let connection = database.connect()?;
     load_taxon_summary(&connection, taxon_id)
@@ -67,6 +73,14 @@ pub fn get_taxon_summary(database: &Database, taxon_id: i64) -> CoreResult<Optio
 pub fn get_taxon_detail(database: &Database, taxon_id: i64) -> CoreResult<Option<TaxonDetail>> {
     let connection = database.connect()?;
     load_taxon_detail(&connection, taxon_id)
+}
+
+pub fn get_taxon_detail_node(
+    database: &Database,
+    taxon_id: i64,
+) -> CoreResult<Option<TaxonDetailNode>> {
+    let connection = database.connect()?;
+    load_taxon_detail_node(&connection, taxon_id)
 }
 
 pub(super) fn load_taxon_summary(
@@ -155,7 +169,10 @@ pub(super) fn load_taxon_summary(
     }))
 }
 
-fn load_taxon_detail(connection: &Connection, taxon_id: i64) -> CoreResult<Option<TaxonDetail>> {
+pub(super) fn load_taxon_detail(
+    connection: &Connection,
+    taxon_id: i64,
+) -> CoreResult<Option<TaxonDetail>> {
     let Some(summary) = load_taxon_summary(connection, taxon_id)? else {
         return Ok(None);
     };
@@ -191,6 +208,41 @@ fn load_taxon_detail(connection: &Connection, taxon_id: i64) -> CoreResult<Optio
         },
         identifiers,
     }))
+}
+
+pub(super) fn load_taxon_detail_node(
+    connection: &Connection,
+    taxon_id: i64,
+) -> CoreResult<Option<TaxonDetailNode>> {
+    let Some(detail) = load_taxon_detail(connection, taxon_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(TaxonDetailNode {
+        children: load_taxon_children(connection, taxon_id)?,
+        detail,
+    }))
+}
+
+pub(super) fn load_taxon_children(
+    connection: &Connection,
+    taxon_id: i64,
+) -> CoreResult<Vec<TaxonSummary>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT taxon_id
+        FROM taxa
+        WHERE parent_taxon_id = ?
+        ORDER BY rank, taxon_id
+        "#,
+    )?;
+    let rows = statement.query_map([taxon_id], |row| row.get::<_, i64>(0))?;
+    rows.map(|row| {
+        let child_id = row?;
+        load_taxon_summary(connection, child_id)?.ok_or_else(|| {
+            CoreError::InvalidArgument(format!("child taxon {child_id} no longer exists"))
+        })
+    })
+    .collect()
 }
 
 fn load_names(
