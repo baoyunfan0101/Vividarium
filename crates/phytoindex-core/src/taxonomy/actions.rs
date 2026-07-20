@@ -2,12 +2,28 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    TaxonIdentifierLogRecord, TaxonLogRecord, TaxonNameLogRecord, TaxonomyLogChange,
-    TaxonomyNameKind, TaxonomyOperationType, hash_affected_taxa, insert_operation_batch,
-    insert_operation_log,
+    ExistingTaxonUpdate, TaxonIdentifierLogRecord, TaxonLogRecord, TaxonNameInput,
+    TaxonNameLogRecord, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyLogChange, TaxonomyNameKind,
+    TaxonomyOperationType, apply_existing_taxon_update_with_log, hash_affected_taxa,
+    insert_operation_batch, insert_operation_log,
     view::{TaxonDetailNode, load_taxon_detail_node},
 };
 use crate::{CoreError, CoreResult, Database};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonUpdateInput {
+    pub taxon_id: i64,
+    pub geological_range: Option<String>,
+    pub scientific: Option<TaxonNameInput>,
+    pub english: Option<TaxonNameInput>,
+    pub chinese: Option<TaxonNameInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonomyUpdateActionResult {
+    pub batch_id: Option<i64>,
+    pub outcome: TaxonRowOutcome,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeleteTaxonNameInput {
@@ -141,6 +157,34 @@ pub fn delete_taxon_name(
         target,
         message: "deleted taxon name".into(),
     })
+}
+
+pub fn update_taxon(
+    database: &Database,
+    input: TaxonUpdateInput,
+    options: TaxonUpdateOptions,
+) -> CoreResult<TaxonomyUpdateActionResult> {
+    let mut connection = database.connect()?;
+    let update = ExistingTaxonUpdate::new(
+        input.geological_range.as_deref(),
+        input.scientific.as_ref(),
+        input.english.as_ref(),
+        input.chinese.as_ref(),
+    );
+    let mut batch_id = None;
+    let outcome = apply_existing_taxon_update_with_log(
+        &mut connection,
+        1,
+        input.taxon_id,
+        update,
+        options,
+        &mut batch_id,
+        &input,
+        &ActionOptions {
+            action: "update_taxon",
+        },
+    )?;
+    Ok(TaxonomyUpdateActionResult { batch_id, outcome })
 }
 
 pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyActionResult> {

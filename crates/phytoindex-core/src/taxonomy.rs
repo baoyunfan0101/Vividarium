@@ -3,8 +3,9 @@ mod query;
 mod view;
 
 pub use actions::{
-    DeleteTaxonNameInput, TaxonomyActionResult, TaxonomyCustomSqlResult, delete_taxon,
-    delete_taxon_name, execute_custom_taxonomy_sql,
+    DeleteTaxonNameInput, TaxonUpdateInput, TaxonomyActionResult, TaxonomyCustomSqlResult,
+    TaxonomyUpdateActionResult, delete_taxon, delete_taxon_name, execute_custom_taxonomy_sql,
+    update_taxon,
 };
 pub use query::{TaxonNameMatch, TaxonSearchResult, search_taxa};
 
@@ -16,7 +17,7 @@ pub use view::{
 
 use std::collections::BTreeSet;
 
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -344,57 +345,16 @@ fn apply_rows(
     let mut outcomes = Vec::with_capacity(rows.len());
     let mut committed = false;
     for (index, row) in rows.iter().enumerate() {
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let plan = match prepare_row(&transaction, row, options) {
-            Ok(plan) => plan,
-            Err(issue) => {
-                transaction.rollback()?;
-                outcomes.push(issue_outcome(index + 1, issue));
-                continue;
-            }
-        };
-        let before = match &plan.target {
-            PlannedTarget::Existing(taxon_id) => taxon_snapshot(&transaction, *taxon_id)?,
-            PlannedTarget::New { .. } => None,
-        };
-        let mut outcome = execute_plan(&transaction, index + 1, plan)?;
-        if outcome.status == TaxonRowStatus::NoChange {
-            transaction.rollback()?;
-            outcomes.push(outcome);
-            continue;
-        }
-        let taxon_id = outcome
-            .target
-            .as_ref()
-            .map(|target| target.taxon_id)
-            .ok_or_else(|| CoreError::InvalidArgument("applied operation has no target".into()))?;
-        let after = taxon_snapshot(&transaction, taxon_id)?.ok_or_else(|| {
-            CoreError::InvalidArgument("applied operation target no longer exists".into())
-        })?;
-        let log_changes = diff_taxon_snapshots(before.as_ref(), &after);
-        let operation_type = operation_type(&outcome.changes);
-        let after_hash = hash_affected_taxa(&transaction, &log_changes)?;
-        let current_batch_id = match batch_id {
-            Some(value) => value,
-            None => {
-                let value = insert_operation_batch(&transaction, rows, options)?;
-                batch_id = Some(value);
-                value
-            }
-        };
-        let operation_id = insert_operation_log(
-            &transaction,
-            current_batch_id,
+        let outcome = apply_taxon_row_with_log(
+            &mut connection,
             index + 1,
-            operation_type,
-            &log_changes,
-            &after_hash,
+            row,
+            options,
+            &mut batch_id,
+            rows,
+            &options,
         )?;
-        transaction.commit()?;
-        outcome.operation_id = Some(operation_id);
-        outcome.status = TaxonRowStatus::Applied;
-        outcome.message = "applied".into();
-        committed = true;
+        committed |= outcome.status == TaxonRowStatus::Applied;
         outcomes.push(outcome);
     }
     Ok(TaxonBatchResult {
@@ -402,6 +362,112 @@ fn apply_rows(
         committed,
         rows: outcomes,
     })
+}
+
+pub(super) fn apply_taxon_row_with_log<T: Serialize + ?Sized, O: Serialize + ?Sized>(
+    connection: &mut Connection,
+    row_number: usize,
+    row: &TaxonInputRow,
+    options: TaxonUpdateOptions,
+    batch_id: &mut Option<i64>,
+    batch_inputs: &T,
+    batch_options: &O,
+) -> CoreResult<TaxonRowOutcome> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let plan = match prepare_row(&transaction, row, options) {
+        Ok(plan) => plan,
+        Err(issue) => {
+            transaction.rollback()?;
+            return Ok(issue_outcome(row_number, issue));
+        }
+    };
+    apply_prepared_taxon_plan_with_log(
+        transaction,
+        row_number,
+        plan,
+        batch_id,
+        batch_inputs,
+        batch_options,
+    )
+}
+
+pub(super) fn apply_existing_taxon_update_with_log<T: Serialize + ?Sized, O: Serialize + ?Sized>(
+    connection: &mut Connection,
+    row_number: usize,
+    taxon_id: i64,
+    update: ExistingTaxonUpdate<'_>,
+    options: TaxonUpdateOptions,
+    batch_id: &mut Option<i64>,
+    batch_inputs: &T,
+    batch_options: &O,
+) -> CoreResult<TaxonRowOutcome> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let plan = match prepare_existing_taxon(&transaction, update, options, taxon_id) {
+        Ok(plan) => plan,
+        Err(issue) => {
+            transaction.rollback()?;
+            return Ok(issue_outcome(row_number, issue));
+        }
+    };
+    apply_prepared_taxon_plan_with_log(
+        transaction,
+        row_number,
+        plan,
+        batch_id,
+        batch_inputs,
+        batch_options,
+    )
+}
+
+fn apply_prepared_taxon_plan_with_log<T: Serialize + ?Sized, O: Serialize + ?Sized>(
+    transaction: Transaction<'_>,
+    row_number: usize,
+    plan: RowPlan,
+    batch_id: &mut Option<i64>,
+    batch_inputs: &T,
+    batch_options: &O,
+) -> CoreResult<TaxonRowOutcome> {
+    let before = match &plan.target {
+        PlannedTarget::Existing(taxon_id) => taxon_snapshot(&transaction, *taxon_id)?,
+        PlannedTarget::New { .. } => None,
+    };
+    let mut outcome = execute_plan(&transaction, row_number, plan)?;
+    if outcome.status == TaxonRowStatus::NoChange {
+        transaction.rollback()?;
+        return Ok(outcome);
+    }
+    let taxon_id = outcome
+        .target
+        .as_ref()
+        .map(|target| target.taxon_id)
+        .ok_or_else(|| CoreError::InvalidArgument("applied operation has no target".into()))?;
+    let after = taxon_snapshot(&transaction, taxon_id)?.ok_or_else(|| {
+        CoreError::InvalidArgument("applied operation target no longer exists".into())
+    })?;
+    let log_changes = diff_taxon_snapshots(before.as_ref(), &after);
+    let operation_type = operation_type(&outcome.changes);
+    let after_hash = hash_affected_taxa(&transaction, &log_changes)?;
+    let current_batch_id = match *batch_id {
+        Some(value) => value,
+        None => {
+            let value = insert_operation_batch(&transaction, batch_inputs, batch_options)?;
+            *batch_id = Some(value);
+            value
+        }
+    };
+    let operation_id = insert_operation_log(
+        &transaction,
+        current_batch_id,
+        row_number,
+        operation_type,
+        &log_changes,
+        &after_hash,
+    )?;
+    transaction.commit()?;
+    outcome.operation_id = Some(operation_id);
+    outcome.status = TaxonRowStatus::Applied;
+    outcome.message = "applied".into();
+    Ok(outcome)
 }
 
 pub fn list_taxonomy_operations(
@@ -674,6 +740,39 @@ struct NameFieldUpdate {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub(super) struct ExistingTaxonUpdate<'a> {
+    geological_range: Option<&'a str>,
+    scientific: Option<&'a TaxonNameInput>,
+    english: Option<&'a TaxonNameInput>,
+    chinese: Option<&'a TaxonNameInput>,
+}
+
+impl<'a> ExistingTaxonUpdate<'a> {
+    fn from_row(row: &'a TaxonInputRow) -> Self {
+        Self::new(
+            row.geological_range.as_deref(),
+            row.scientific.as_ref(),
+            row.english.as_ref(),
+            row.chinese.as_ref(),
+        )
+    }
+
+    pub(super) fn new(
+        geological_range: Option<&'a str>,
+        scientific: Option<&'a TaxonNameInput>,
+        english: Option<&'a TaxonNameInput>,
+        chinese: Option<&'a TaxonNameInput>,
+    ) -> Self {
+        Self {
+            geological_range,
+            scientific,
+            english,
+            chinese,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 enum NameField {
     AuthorityYear,
     Category,
@@ -739,7 +838,12 @@ fn prepare_row(
             format!("{} '{}' was not found", target_rank.as_str(), target_name),
         )),
         0 => prepare_new_taxon(transaction, row, options, path, target_rank, target_name),
-        1 => prepare_existing_taxon(transaction, row, options, candidates[0].taxon_id),
+        1 => prepare_existing_taxon(
+            transaction,
+            ExistingTaxonUpdate::from_row(row),
+            options,
+            candidates[0].taxon_id,
+        ),
         _ => Err(RowIssue::ambiguous(
             format!(
                 "{} '{}' matched multiple taxa",
@@ -971,7 +1075,7 @@ fn insert_name_plan(
 
 fn prepare_existing_taxon(
     transaction: &Transaction<'_>,
-    row: &TaxonInputRow,
+    update: ExistingTaxonUpdate<'_>,
     options: TaxonUpdateOptions,
     taxon_id: i64,
 ) -> Result<RowPlan, RowIssue> {
@@ -979,15 +1083,15 @@ fn prepare_existing_taxon(
     let geological_range = plan_geological_range(
         transaction,
         taxon_id,
-        row.geological_range.as_deref(),
+        update.geological_range,
         options,
         &mut changes,
     )?;
     let mut names = Vec::new();
     for (kind, input) in [
-        (NameKind::Scientific, row.scientific.as_ref()),
-        (NameKind::English, row.english.as_ref()),
-        (NameKind::Chinese, row.chinese.as_ref()),
+        (NameKind::Scientific, update.scientific),
+        (NameKind::English, update.english),
+        (NameKind::Chinese, update.chinese),
     ] {
         if let Some(input) = input {
             names.push(plan_existing_name(
@@ -2157,6 +2261,59 @@ mod tests {
         let genus = get_taxon_detail_node(&database, ids[3]).unwrap().unwrap();
         assert_eq!(genus.children.len(), 1);
         assert_eq!(genus.children[0].taxon_id, species_id);
+    }
+
+    #[test]
+    fn updates_a_taxon_from_query_through_the_shared_operation_log() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        let created = apply_taxon_rows(
+            &database,
+            &[species_row()],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let taxon_id = created.rows[0].target.as_ref().unwrap().taxon_id;
+
+        let updated = update_taxon(
+            &database,
+            TaxonUpdateInput {
+                taxon_id,
+                geological_range: None,
+                scientific: None,
+                english: Some(TaxonNameInput {
+                    name: "gray wolf".into(),
+                    ..TaxonNameInput::default()
+                }),
+                chinese: None,
+            },
+            TaxonUpdateOptions {
+                allow_new_names: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.outcome.status, TaxonRowStatus::Applied);
+        assert!(updated.batch_id.is_some());
+        let operation_id = updated.outcome.operation_id.unwrap();
+        let operation = list_taxonomy_operations(&database, 1).unwrap().remove(0);
+        assert_eq!(operation.operation_id, operation_id);
+        assert!(operation.changes.iter().any(|change| matches!(
+            change,
+            TaxonomyLogChange::NameInserted {
+                name_kind: TaxonomyNameKind::English,
+                ..
+            }
+        )));
+
+        let detail = get_taxon_detail(&database, taxon_id).unwrap().unwrap();
+        assert_eq!(detail.names.english[0].name, "gray wolf");
+        revert_taxonomy_operation(&database, operation_id).unwrap();
+        let reverted = get_taxon_detail(&database, taxon_id).unwrap().unwrap();
+        assert!(reverted.names.english.is_empty());
     }
 
     #[test]

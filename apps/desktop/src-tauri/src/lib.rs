@@ -32,6 +32,7 @@ pub fn run() {
             commands::search_taxa,
             commands::get_taxon_detail_node,
             commands::delete_taxon_name,
+            commands::update_taxon,
             commands::delete_taxon,
             commands::execute_custom_taxonomy_sql,
             commands::get_mapping_metadata,
