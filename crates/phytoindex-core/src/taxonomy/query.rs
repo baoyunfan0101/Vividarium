@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use super::{TaxonomyNameKind, view::load_taxon_detail};
+use super::{TaxonomyNameKind, view::load_taxon_detail, view::load_taxon_summaries};
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -15,6 +15,7 @@ pub struct TaxonNameMatch {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonSearchResult {
+    pub summary: super::TaxonSummary,
     pub detail: super::TaxonDetail,
     pub matches: Vec<TaxonNameMatch>,
 }
@@ -51,13 +52,21 @@ fn search_taxa_with_connection(
         }
     }
 
+    let ids = ids.into_iter().take(limit).collect::<Vec<_>>();
+    let summaries = load_taxon_summaries(connection, &ids)?;
+    if summaries.len() != ids.len() {
+        return Err(CoreError::InvalidArgument(
+            "matched taxon no longer exists".into(),
+        ));
+    }
     ids.into_iter()
-        .take(limit)
-        .map(|taxon_id| {
+        .zip(summaries)
+        .map(|(taxon_id, summary)| {
             let detail = load_taxon_detail(connection, taxon_id)?.ok_or_else(|| {
                 CoreError::InvalidArgument(format!("matched taxon {taxon_id} no longer exists"))
             })?;
             Ok(TaxonSearchResult {
+                summary,
                 detail,
                 matches: load_name_matches(connection, taxon_id, &pattern)?,
             })

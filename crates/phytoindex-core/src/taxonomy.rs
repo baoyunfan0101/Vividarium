@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use self::view::load_taxon_summary;
+use self::view::{load_taxon_summaries, load_taxon_summary};
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1986,7 +1986,7 @@ fn find_candidates(
     })?;
     let ids = rows.collect::<Result<Vec<_>, _>>()?;
     let had_name_match = !ids.is_empty();
-    let mut candidates = Vec::new();
+    let mut candidate_ids = Vec::new();
     for taxon_id in ids {
         let mut matches = true;
         for rank in TaxonRank::ALL.into_iter().take(target_rank.index()) {
@@ -1998,11 +1998,14 @@ fn find_candidates(
             }
         }
         if matches {
-            let candidate = load_taxon_summary(transaction, taxon_id)?.ok_or_else(|| {
-                CoreError::InvalidArgument(format!("candidate taxon {taxon_id} no longer exists"))
-            })?;
-            candidates.push(candidate);
+            candidate_ids.push(taxon_id);
         }
+    }
+    let candidates = load_taxon_summaries(transaction, &candidate_ids)?;
+    if candidates.len() != candidate_ids.len() {
+        return Err(CoreError::InvalidArgument(
+            "candidate taxon no longer exists".into(),
+        ));
     }
     Ok(CandidateSearch {
         had_name_match,
@@ -2253,6 +2256,8 @@ mod tests {
         );
 
         let detail = get_taxon_detail(&database, taxon_id).unwrap().unwrap();
+        assert_eq!(detail.taxon_id, taxon_id);
+        assert_eq!(detail.rank, TaxonRank::Species);
         assert_eq!(detail.parent_taxon_id, Some(ids[3]));
         assert_eq!(detail.geological_range.as_deref(), Some("Holocene"));
         assert_eq!(detail.names.scientific.len(), 2);
@@ -2294,13 +2299,15 @@ mod tests {
 
         let matches = search_taxa(&database, "wolf", 10).unwrap();
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].detail.summary.taxon_id, species_id);
+        assert_eq!(matches[0].summary.taxon_id, species_id);
+        assert_eq!(matches[0].detail.taxon_id, species_id);
         assert!(matches[0].matches.iter().any(|value| {
             value.name_kind == TaxonomyNameKind::English && value.name == "gray wolf"
         }));
-        assert_eq!(matches[0].detail.summary.breadcrumb[3].taxon_id, ids[3]);
+        assert_eq!(matches[0].summary.breadcrumb[3].taxon_id, ids[3]);
 
         let genus = get_taxon_detail_node(&database, ids[3]).unwrap().unwrap();
+        assert_eq!(genus.summary.taxon_id, ids[3]);
         assert_eq!(genus.children.len(), 1);
         assert_eq!(genus.children[0].taxon_id, species_id);
     }
