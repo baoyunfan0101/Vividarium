@@ -258,6 +258,32 @@ pub enum TaxonomyBatchContext {
     CustomSql,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaxonomyOperationStatus {
+    Applied,
+    Reverted,
+}
+
+impl TaxonomyOperationStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Reverted => "reverted",
+        }
+    }
+
+    fn from_str(value: &str) -> CoreResult<Self> {
+        match value {
+            "applied" => Ok(Self::Applied),
+            "reverted" => Ok(Self::Reverted),
+            _ => Err(CoreError::InvalidArgument(format!(
+                "invalid taxonomy operation status: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonomyOperationBatch {
     pub batch_id: i64,
@@ -271,7 +297,7 @@ pub struct TaxonomyOperation {
     pub operation_id: i64,
     pub batch_id: i64,
     pub row_number: usize,
-    pub status: String,
+    pub status: TaxonomyOperationStatus,
     pub changes: Vec<TaxonomyLogChange>,
     pub after_hash: String,
     pub applied_at: String,
@@ -573,7 +599,7 @@ fn taxonomy_operation_from_row(
         operation_id,
         batch_id,
         row_number: row_number as usize,
-        status,
+        status: TaxonomyOperationStatus::from_str(&status)?,
         changes: deserialize_json(&changes_json, "operation changes")?,
         after_hash,
         applied_at,
@@ -581,10 +607,7 @@ fn taxonomy_operation_from_row(
     })
 }
 
-pub fn revert_taxonomy_operation(
-    database: &Database,
-    operation_id: i64,
-) -> CoreResult<TaxonomyOperation> {
+pub fn revert_taxonomy_operation(database: &Database, operation_id: i64) -> CoreResult<()> {
     let mut connection = database.connect()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (status, changes_json, after_hash): (String, String, String) = transaction
@@ -599,9 +622,11 @@ pub fn revert_taxonomy_operation(
         )
         .optional()?
         .ok_or_else(|| CoreError::NotFound(format!("taxonomy operation {operation_id}")))?;
-    if status != "applied" {
+    let status = TaxonomyOperationStatus::from_str(&status)?;
+    if status != TaxonomyOperationStatus::Applied {
         return Err(CoreError::InvalidArgument(format!(
-            "taxonomy operation {operation_id} is already {status}"
+            "taxonomy operation {operation_id} is already {}",
+            status.as_str()
         )));
     }
     let changes: Vec<TaxonomyLogChange> = deserialize_json(&changes_json, "operation changes")?;
@@ -620,10 +645,7 @@ pub fn revert_taxonomy_operation(
         [operation_id],
     )?;
     transaction.commit()?;
-    list_taxonomy_operations(database, usize::MAX)?
-        .into_iter()
-        .find(|operation| operation.operation_id == operation_id)
-        .ok_or_else(|| CoreError::NotFound(format!("taxonomy operation {operation_id}")))
+    Ok(())
 }
 
 fn issue_outcome(row_number: usize, issue: RowIssue) -> TaxonRowOutcome {
@@ -3096,8 +3118,7 @@ mod tests {
         .unwrap();
         let append_operation = appended.rows[0].operation_id.unwrap();
 
-        let reverted = revert_taxonomy_operation(&database, append_operation).unwrap();
-        assert_eq!(reverted.status, "reverted");
+        revert_taxonomy_operation(&database, append_operation).unwrap();
         let connection = database.connect().unwrap();
         let chinese_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM chinese", [], |row| row.get(0))
@@ -3120,7 +3141,7 @@ mod tests {
         assert!(
             operations
                 .iter()
-                .all(|operation| operation.status == "reverted")
+                .all(|operation| operation.status == TaxonomyOperationStatus::Reverted)
         );
     }
 
