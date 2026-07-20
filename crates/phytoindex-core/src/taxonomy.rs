@@ -139,16 +139,6 @@ pub struct TaxonChange {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TaxonomyOperationType {
-    CreateTaxon,
-    AppendName,
-    UpdateMetadata,
-    SwitchAcceptedName,
-    Mixed,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum TaxonomyNameKind {
     Scientific,
     English,
@@ -169,31 +159,6 @@ impl TaxonomyNameKind {
             Self::Scientific => "scientific_name",
             Self::English => "english_name",
             Self::Chinese => "chinese_name",
-        }
-    }
-}
-
-impl TaxonomyOperationType {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::CreateTaxon => "create_taxon",
-            Self::AppendName => "append_name",
-            Self::UpdateMetadata => "update_metadata",
-            Self::SwitchAcceptedName => "switch_accepted_name",
-            Self::Mixed => "mixed",
-        }
-    }
-
-    fn from_str(value: &str) -> CoreResult<Self> {
-        match value {
-            "create_taxon" => Ok(Self::CreateTaxon),
-            "append_name" => Ok(Self::AppendName),
-            "update_metadata" => Ok(Self::UpdateMetadata),
-            "switch_accepted_name" => Ok(Self::SwitchAcceptedName),
-            "mixed" => Ok(Self::Mixed),
-            _ => Err(CoreError::InvalidArgument(format!(
-                "invalid taxonomy operation type: {value}"
-            ))),
         }
     }
 }
@@ -280,7 +245,6 @@ pub struct TaxonRowOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonBatchResult {
     pub batch_id: Option<i64>,
-    pub committed: bool,
     pub rows: Vec<TaxonRowOutcome>,
 }
 
@@ -297,8 +261,8 @@ pub enum TaxonomyBatchContext {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonomyOperationBatch {
     pub batch_id: i64,
-    pub context_json: Value,
-    pub input_json: Value,
+    pub context: TaxonomyBatchContext,
+    pub input: Value,
     pub created_at: String,
 }
 
@@ -307,7 +271,6 @@ pub struct TaxonomyOperation {
     pub operation_id: i64,
     pub batch_id: i64,
     pub row_number: usize,
-    pub operation_type: TaxonomyOperationType,
     pub status: String,
     pub changes: Vec<TaxonomyLogChange>,
     pub after_hash: String,
@@ -349,7 +312,6 @@ fn preview_rows(
     transaction.rollback()?;
     Ok(TaxonBatchResult {
         batch_id: None,
-        committed: false,
         rows: outcomes,
     })
 }
@@ -362,7 +324,6 @@ fn apply_rows(
     let mut connection = database.connect()?;
     let mut batch_id = None;
     let mut outcomes = Vec::with_capacity(rows.len());
-    let mut committed = false;
     for (index, row) in rows.iter().enumerate() {
         let outcome = apply_taxon_row_with_log(
             &mut connection,
@@ -373,12 +334,10 @@ fn apply_rows(
             rows,
             &TaxonomyBatchContext::BatchUpdate { options },
         )?;
-        committed |= outcome.status == TaxonRowStatus::Applied;
         outcomes.push(outcome);
     }
     Ok(TaxonBatchResult {
         batch_id,
-        committed,
         rows: outcomes,
     })
 }
@@ -464,7 +423,6 @@ fn apply_prepared_taxon_plan_with_log<T: Serialize + ?Sized>(
         CoreError::InvalidArgument("applied operation target no longer exists".into())
     })?;
     let log_changes = diff_taxon_snapshots(before.as_ref(), &after);
-    let operation_type = operation_type(&outcome.changes);
     let after_hash = hash_affected_taxa(&transaction, &log_changes)?;
     let current_batch_id = match *batch_id {
         Some(value) => value,
@@ -478,7 +436,6 @@ fn apply_prepared_taxon_plan_with_log<T: Serialize + ?Sized>(
         &transaction,
         current_batch_id,
         row_number,
-        operation_type,
         &log_changes,
         &after_hash,
     )?;
@@ -496,8 +453,8 @@ pub fn list_taxonomy_operations(
     let connection = database.connect()?;
     let mut statement = connection.prepare(
         r#"
-        SELECT operation_id, batch_id, row_number, operation_type, status,
-               changes_json, after_hash, applied_at, reverted_at
+        SELECT operation_id, batch_id, row_number, status, changes_json,
+               after_hash, applied_at, reverted_at
         FROM taxonomy_operations
         ORDER BY operation_id DESC
         LIMIT ?
@@ -512,8 +469,7 @@ pub fn list_taxonomy_operations(
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
-            row.get::<_, String>(7)?,
-            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     rows.map(taxonomy_operation_from_row).collect()
@@ -557,8 +513,8 @@ fn taxonomy_operation_batch_from_row(
     let (batch_id, context_json, input_json, created_at) = row?;
     Ok(TaxonomyOperationBatch {
         batch_id,
-        context_json: deserialize_json(&context_json, "batch context")?,
-        input_json: deserialize_json(&input_json, "batch input")?,
+        context: deserialize_json(&context_json, "batch context")?,
+        input: deserialize_json(&input_json, "batch input")?,
         created_at,
     })
 }
@@ -569,8 +525,8 @@ fn list_taxonomy_operations_for_batch_from_connection(
 ) -> CoreResult<Vec<TaxonomyOperation>> {
     let mut statement = connection.prepare(
         r#"
-        SELECT operation_id, batch_id, row_number, operation_type, status,
-               changes_json, after_hash, applied_at, reverted_at
+        SELECT operation_id, batch_id, row_number, status, changes_json,
+               after_hash, applied_at, reverted_at
         FROM taxonomy_operations
         WHERE batch_id = ?
         ORDER BY row_number, operation_id
@@ -585,8 +541,7 @@ fn list_taxonomy_operations_for_batch_from_connection(
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
-            row.get::<_, String>(7)?,
-            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     rows.map(taxonomy_operation_from_row).collect()
@@ -601,7 +556,6 @@ fn taxonomy_operation_from_row(
         String,
         String,
         String,
-        String,
         Option<String>,
     )>,
 ) -> CoreResult<TaxonomyOperation> {
@@ -609,7 +563,6 @@ fn taxonomy_operation_from_row(
         operation_id,
         batch_id,
         row_number,
-        operation_type,
         status,
         changes_json,
         after_hash,
@@ -620,7 +573,6 @@ fn taxonomy_operation_from_row(
         operation_id,
         batch_id,
         row_number: row_number as usize,
-        operation_type: TaxonomyOperationType::from_str(&operation_type)?,
         status,
         changes: deserialize_json(&changes_json, "operation changes")?,
         after_hash,
@@ -1572,7 +1524,6 @@ pub(super) fn insert_operation_log(
     transaction: &Transaction<'_>,
     batch_id: i64,
     row_number: usize,
-    operation_type: TaxonomyOperationType,
     changes: &[TaxonomyLogChange],
     after_hash: &str,
 ) -> CoreResult<i64> {
@@ -1580,16 +1531,10 @@ pub(super) fn insert_operation_log(
     transaction.execute(
         r#"
         INSERT INTO taxonomy_operations (
-            batch_id, row_number, operation_type, status, changes_json, after_hash
-        ) VALUES (?, ?, ?, 'applied', ?, ?)
+            batch_id, row_number, status, changes_json, after_hash
+        ) VALUES (?, ?, 'applied', ?, ?)
         "#,
-        params![
-            batch_id,
-            row_number as i64,
-            operation_type.as_str(),
-            changes_json,
-            after_hash,
-        ],
+        params![batch_id, row_number as i64, changes_json, after_hash,],
     )?;
     Ok(transaction.last_insert_rowid())
 }
@@ -1668,33 +1613,6 @@ fn name_snapshots(
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-fn operation_type(changes: &[TaxonChange]) -> TaxonomyOperationType {
-    if changes
-        .iter()
-        .any(|change| change.kind == TaxonChangeKind::CreateTaxon)
-    {
-        return TaxonomyOperationType::CreateTaxon;
-    }
-    let switches_name = changes
-        .iter()
-        .any(|change| change.kind == TaxonChangeKind::ChangeAcceptedName);
-    let appends_name = changes
-        .iter()
-        .any(|change| change.kind == TaxonChangeKind::AppendName);
-    let updates_metadata = changes.iter().any(|change| {
-        matches!(
-            change.kind,
-            TaxonChangeKind::Supplement | TaxonChangeKind::Overwrite
-        )
-    });
-    match (switches_name, appends_name, updates_metadata) {
-        (true, _, false) => TaxonomyOperationType::SwitchAcceptedName,
-        (false, true, false) => TaxonomyOperationType::AppendName,
-        (false, false, true) => TaxonomyOperationType::UpdateMetadata,
-        _ => TaxonomyOperationType::Mixed,
-    }
 }
 
 fn diff_taxon_snapshots(
@@ -2227,7 +2145,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(result.committed);
+        assert!(result.batch_id.is_some());
         assert_eq!(result.rows[0].status, TaxonRowStatus::Applied);
         let connection = database.connect().unwrap();
         let parent: i64 = connection
@@ -2354,14 +2272,11 @@ mod tests {
 
         let matches = search_taxa(&database, "wolf", 10).unwrap();
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].taxon_id, species_id);
+        assert_eq!(matches[0].detail.summary.taxon_id, species_id);
         assert!(matches[0].matches.iter().any(|value| {
             value.name_kind == TaxonomyNameKind::English && value.name == "gray wolf"
         }));
-        assert_eq!(
-            matches[0].detail.detail.summary.breadcrumb[3].taxon_id,
-            ids[3]
-        );
+        assert_eq!(matches[0].detail.summary.breadcrumb[3].taxon_id, ids[3]);
 
         let genus = get_taxon_detail_node(&database, ids[3]).unwrap().unwrap();
         assert_eq!(genus.children.len(), 1);
@@ -2511,7 +2426,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(result.committed);
+        assert!(result.batch_id > 0);
         let connection = database.connect().unwrap();
         let range: String = connection
             .query_row(
@@ -2681,7 +2596,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!result.committed);
+        assert_eq!(result.batch_id, None);
         assert_eq!(result.rows[0].status, TaxonRowStatus::Conflict);
         let connection = database.connect().unwrap();
         let count: i64 = connection
@@ -2721,7 +2636,7 @@ mod tests {
             TaxonUpdateOptions::default(),
         )
         .unwrap();
-        assert!(!blocked.committed);
+        assert_eq!(blocked.batch_id, None);
         assert_eq!(blocked.rows[0].status, TaxonRowStatus::Conflict);
 
         let applied = apply_taxon_rows(
@@ -2733,7 +2648,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(applied.committed);
+        assert!(applied.batch_id.is_some());
         let connection = database.connect().unwrap();
         let accepted: i64 = connection
             .query_row("SELECT is_accepted FROM chinese", [], |row| row.get(0))
@@ -2765,7 +2680,7 @@ mod tests {
             TaxonUpdateOptions::default(),
         )
         .unwrap();
-        assert!(supplemented.committed);
+        assert!(supplemented.batch_id.is_some());
         assert_eq!(
             supplemented.rows[0].changes,
             vec![TaxonChange {
@@ -2797,7 +2712,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(applied.committed);
+        assert!(applied.batch_id.is_some());
         let connection = database.connect().unwrap();
         let value: String = connection
             .query_row(
@@ -2838,7 +2753,7 @@ mod tests {
             TaxonUpdateOptions::default(),
         )
         .unwrap();
-        assert!(supplemented.committed);
+        assert!(supplemented.batch_id.is_some());
         assert!(
             supplemented.rows[0]
                 .changes
@@ -2923,7 +2838,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(result.committed);
+        assert!(result.batch_id.is_some());
         let connection = database.connect().unwrap();
         let accepted: String = connection
             .query_row(
@@ -2982,7 +2897,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(switched.committed);
+        assert!(switched.batch_id.is_some());
         let demotion = apply_taxon_rows(
             &database,
             &[TaxonInputRow {
@@ -3022,7 +2937,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(result.committed);
+        assert!(result.batch_id.is_some());
         assert_eq!(result.rows[0].status, TaxonRowStatus::Applied);
         assert_eq!(result.rows[1].status, TaxonRowStatus::Invalid);
         let connection = database.connect().unwrap();
@@ -3061,7 +2976,7 @@ mod tests {
             TaxonUpdateOptions::default(),
         )
         .unwrap();
-        assert!(!result.committed);
+        assert_eq!(result.batch_id, None);
         assert_eq!(result.batch_id, None);
         assert_eq!(result.rows[0].status, TaxonRowStatus::NoChange);
         assert_eq!(result.rows[1].status, TaxonRowStatus::NotFound);
@@ -3106,10 +3021,7 @@ mod tests {
             )
             .unwrap();
         let context = deserialize_json::<TaxonomyBatchContext>(&context_json, "context").unwrap();
-        assert_eq!(
-            context,
-            TaxonomyBatchContext::BatchUpdate { options }
-        );
+        assert_eq!(context, TaxonomyBatchContext::BatchUpdate { options });
         assert_eq!(
             deserialize_json::<Vec<TaxonInputRow>>(&input_json, "inputs").unwrap(),
             inputs
@@ -3120,12 +3032,11 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].batch_id, batch_id);
         assert_eq!(
-            serde_json::from_value::<TaxonomyBatchContext>(batches[0].context_json.clone())
-                .unwrap(),
+            batches[0].context,
             TaxonomyBatchContext::BatchUpdate { options }
         );
         assert_eq!(
-            serde_json::from_value::<Vec<TaxonInputRow>>(batches[0].input_json.clone()).unwrap(),
+            serde_json::from_value::<Vec<TaxonInputRow>>(batches[0].input.clone()).unwrap(),
             inputs
         );
 
@@ -3137,7 +3048,6 @@ mod tests {
         assert_eq!(operations.len(), 1);
         let operation = &operations[0];
         assert_eq!(operation.row_number, 1);
-        assert_eq!(operation.operation_type, TaxonomyOperationType::CreateTaxon);
         assert_eq!(operation.after_hash.len(), 64);
         assert!(
             operation
@@ -3263,10 +3173,6 @@ mod tests {
         .unwrap();
         let operation_id = switched.rows[0].operation_id.unwrap();
         let operation = list_taxonomy_operations(&database, 1).unwrap().remove(0);
-        assert_eq!(
-            operation.operation_type,
-            TaxonomyOperationType::SwitchAcceptedName
-        );
         assert_eq!(
             operation
                 .changes

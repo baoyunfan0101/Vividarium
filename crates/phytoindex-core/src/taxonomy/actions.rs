@@ -4,10 +4,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     ExistingTaxonUpdate, TaxonIdentifierLogRecord, TaxonLogRecord, TaxonNameInput,
     TaxonNameLogRecord, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
-    TaxonomyLogChange, TaxonomyNameKind, TaxonomyOperationType,
-    apply_existing_taxon_update_with_log, hash_affected_taxa, insert_operation_batch,
-    insert_operation_log,
-    view::{TaxonDetailNode, load_taxon_detail_node},
+    TaxonomyLogChange, TaxonomyNameKind, apply_existing_taxon_update_with_log, hash_affected_taxa,
+    insert_operation_batch, insert_operation_log,
 };
 use crate::{CoreError, CoreResult, Database};
 
@@ -38,15 +36,11 @@ pub struct DeleteTaxonNameInput {
 pub struct TaxonomyActionResult {
     pub batch_id: i64,
     pub operation_id: i64,
-    pub target: Option<TaxonDetailNode>,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonomyCustomSqlResult {
     pub batch_id: i64,
-    pub committed: bool,
-    pub message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,8 +59,7 @@ pub fn delete_taxon_name(
 ) -> CoreResult<TaxonomyActionResult> {
     let mut connection = database.connect()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let target_before = load_taxon_detail_node(&transaction, input.taxon_id)?
-        .ok_or_else(|| CoreError::NotFound(format!("taxon {}", input.taxon_id)))?;
+    ensure_taxon_exists(&transaction, input.taxon_id)?;
     let mut changes = Vec::new();
     let before = load_name_record(&transaction, input.taxon_id, input.name_kind, &input.name)?
         .ok_or_else(|| {
@@ -130,26 +123,13 @@ pub fn delete_taxon_name(
         before,
     });
     let after_hash = hash_affected_taxa(&transaction, &changes)?;
-    let batch_id = insert_operation_batch(
-        &transaction,
-        &input,
-        &TaxonomyBatchContext::QueryDeleteName,
-    )?;
-    let operation_id = insert_operation_log(
-        &transaction,
-        batch_id,
-        1,
-        TaxonomyOperationType::Mixed,
-        &changes,
-        &after_hash,
-    )?;
-    let target = load_taxon_detail_node(&transaction, input.taxon_id)?.or(Some(target_before));
+    let batch_id =
+        insert_operation_batch(&transaction, &input, &TaxonomyBatchContext::QueryDeleteName)?;
+    let operation_id = insert_operation_log(&transaction, batch_id, 1, &changes, &after_hash)?;
     transaction.commit()?;
     Ok(TaxonomyActionResult {
         batch_id,
         operation_id,
-        target,
-        message: "deleted taxon name".into(),
     })
 }
 
@@ -218,20 +198,11 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyAc
         &DeleteTaxonInput { taxon_id },
         &TaxonomyBatchContext::QueryDeleteTaxon,
     )?;
-    let operation_id = insert_operation_log(
-        &transaction,
-        batch_id,
-        1,
-        TaxonomyOperationType::Mixed,
-        &changes,
-        &after_hash,
-    )?;
+    let operation_id = insert_operation_log(&transaction, batch_id, 1, &changes, &after_hash)?;
     transaction.commit()?;
     Ok(TaxonomyActionResult {
         batch_id,
         operation_id,
-        target: None,
-        message: "deleted taxon".into(),
     })
 }
 
@@ -252,11 +223,7 @@ pub fn execute_custom_taxonomy_sql(
         &TaxonomyBatchContext::CustomSql,
     )?;
     transaction.commit()?;
-    Ok(TaxonomyCustomSqlResult {
-        batch_id,
-        committed: true,
-        message: "executed custom taxonomy sql".into(),
-    })
+    Ok(TaxonomyCustomSqlResult { batch_id })
 }
 
 #[derive(Debug)]
@@ -300,6 +267,18 @@ fn load_deleted_taxon(
         chinese: load_name_records(transaction, taxon_id, TaxonomyNameKind::Chinese)?,
         identifiers: load_identifier_records(transaction, taxon_id)?,
     }))
+}
+
+fn ensure_taxon_exists(transaction: &Transaction<'_>, taxon_id: i64) -> CoreResult<()> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM taxa WHERE taxon_id = ?)",
+        [taxon_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(CoreError::NotFound(format!("taxon {taxon_id}")));
+    }
+    Ok(())
 }
 
 fn load_name_record(

@@ -81,7 +81,6 @@ fn reset_prerelease_taxonomy_logs(connection: &Connection) -> CoreResult<()> {
                     'operation_id',
                     'batch_id',
                     'row_number',
-                    'operation_type',
                     'status',
                     'changes_json',
                     'after_hash',
@@ -221,20 +220,12 @@ CREATE TABLE IF NOT EXISTS taxonomy_operations (
     operation_id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id INTEGER NOT NULL,
     row_number INTEGER NOT NULL,
-    operation_type TEXT NOT NULL,
     status TEXT NOT NULL,
     changes_json TEXT NOT NULL,
     after_hash TEXT NOT NULL,
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     reverted_at TEXT,
     UNIQUE (batch_id, row_number),
-    CHECK (operation_type IN (
-        'create_taxon',
-        'append_name',
-        'update_metadata',
-        'switch_accepted_name',
-        'mixed'
-    )),
     CHECK (status IN ('applied', 'reverted')),
     FOREIGN KEY (batch_id) REFERENCES taxonomy_operation_batches(batch_id) ON DELETE RESTRICT
 );
@@ -397,7 +388,6 @@ mod tests {
                 "operation_id",
                 "batch_id",
                 "row_number",
-                "operation_type",
                 "status",
                 "changes_json",
                 "after_hash",
