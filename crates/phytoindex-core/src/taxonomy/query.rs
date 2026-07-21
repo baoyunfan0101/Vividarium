@@ -166,18 +166,13 @@ fn load_name_matches_for_taxa(
     );
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(query_params), |row| {
-        let name_kind = match row.get::<_, String>(1)?.as_str() {
-            "scientific" => TaxonomyNameKind::Scientific,
-            "english" => TaxonomyNameKind::English,
-            "chinese" => TaxonomyNameKind::Chinese,
-            value => {
-                return Err(rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Text,
-                    format!("invalid taxonomy name kind: {value}").into(),
-                ));
-            }
-        };
+        let name_kind = TaxonomyNameKind::from_code(row.get::<_, i64>(1)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Integer,
+                error.to_string().into(),
+            )
+        })?;
         Ok((
             row.get::<_, i64>(0)?,
             TaxonNameMatch {

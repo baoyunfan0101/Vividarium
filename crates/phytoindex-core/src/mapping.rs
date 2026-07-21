@@ -5,6 +5,7 @@ use crate::db::{Database, taxon_from_row};
 use crate::error::{CoreError, CoreResult};
 use crate::models::{MappingMetadata, MappingNode, MappingSyncResult, Photo, Taxon};
 use crate::photos::{self, ProgressCallback};
+use crate::taxonomy::TaxonomyNameKind;
 
 const SPECIAL_UNMAPPED_TAXON_ID: i64 = 0;
 
@@ -279,10 +280,10 @@ fn taxon_id_for_photo(transaction: &Transaction<'_>, photo: &Photo) -> CoreResul
             r#"
             SELECT taxon_id
             FROM taxon_names
-            WHERE name_kind = 'scientific' AND name = ?
+            WHERE name_kind = ? AND name = ?
             ORDER BY is_accepted DESC, taxon_id
             "#,
-            [binomial_name],
+            params![TaxonomyNameKind::Scientific.code(), binomial_name],
             |row| row.get::<_, i64>(0),
         )
         .optional()?

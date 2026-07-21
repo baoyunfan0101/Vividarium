@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ExistingTaxonUpdate, TaxonIdentifierLogRecord, TaxonLogRecord, TaxonNameInput,
-    TaxonNameLogRecord, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
+    TaxonNameLogRecord, TaxonRank, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
     TaxonomyLogChange, TaxonomyNameKind, apply_existing_taxon_update_with_log, hash_affected_taxa,
     insert_operation_batch, insert_operation_log,
 };
@@ -248,17 +248,22 @@ fn load_deleted_taxon(
             "#,
             [taxon_id],
             |row| {
-                Ok(TaxonLogRecord {
-                    taxon_id,
-                    parent_taxon_id: row.get(0)?,
-                    rank: row.get(1)?,
-                    geological_range: row.get(2)?,
-                })
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             },
         )
         .optional()?;
-    let Some(taxon) = taxon else {
+    let Some((parent_taxon_id, rank_code, geological_range)) = taxon else {
         return Ok(None);
+    };
+    let taxon = TaxonLogRecord {
+        taxon_id,
+        parent_taxon_id,
+        rank: TaxonRank::from_code(rank_code)?,
+        geological_range,
     };
     Ok(Some(DeletedTaxon {
         taxon,
@@ -294,7 +299,7 @@ fn load_name_record(
             FROM taxon_names
             WHERE taxon_id = ? AND name_kind = ? AND name = ?
             "#,
-            params![taxon_id, kind.as_str(), name],
+            params![taxon_id, kind.code(), name],
             |row| {
                 Ok(TaxonNameLogRecord {
                     taxon_id,
@@ -322,7 +327,7 @@ fn load_name_records(
         ORDER BY name
         "#,
     )?;
-    let rows = statement.query_map(params![taxon_id, kind.as_str()], |row| {
+    let rows = statement.query_map(params![taxon_id, kind.code()], |row| {
         Ok(TaxonNameLogRecord {
             taxon_id,
             name: row.get(0)?,
@@ -369,7 +374,7 @@ fn count_other_names(
         FROM taxon_names
         WHERE taxon_id = ? AND name_kind = ? AND name != ?
         "#,
-        params![taxon_id, kind.as_str(), name],
+        params![taxon_id, kind.code(), name],
         |row| row.get(0),
     )?)
 }
@@ -382,7 +387,7 @@ fn promote_name(
 ) -> CoreResult<()> {
     transaction.execute(
         "UPDATE taxon_names SET is_accepted = 0 WHERE taxon_id = ? AND name_kind = ?",
-        params![taxon_id, kind.as_str()],
+        params![taxon_id, kind.code()],
     )?;
     transaction.execute(
         r#"
@@ -390,7 +395,7 @@ fn promote_name(
         SET is_accepted = 1
         WHERE taxon_id = ? AND name_kind = ? AND name = ?
         "#,
-        params![taxon_id, kind.as_str(), name],
+        params![taxon_id, kind.code(), name],
     )?;
     Ok(())
 }
@@ -403,7 +408,7 @@ fn delete_name_record(
 ) -> CoreResult<()> {
     transaction.execute(
         "DELETE FROM taxon_names WHERE taxon_id = ? AND name_kind = ? AND name = ?",
-        params![taxon_id, kind.as_str(), name],
+        params![taxon_id, kind.code(), name],
     )?;
     Ok(())
 }

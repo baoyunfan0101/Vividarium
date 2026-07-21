@@ -57,6 +57,29 @@ impl TaxonRank {
         }
     }
 
+    pub(crate) fn code(self) -> i64 {
+        match self {
+            Self::Kingdom => 1,
+            Self::Order => 2,
+            Self::Family => 3,
+            Self::Genus => 4,
+            Self::Species => 5,
+        }
+    }
+
+    pub(crate) fn from_code(value: i64) -> CoreResult<Self> {
+        match value {
+            1 => Ok(Self::Kingdom),
+            2 => Ok(Self::Order),
+            3 => Ok(Self::Family),
+            4 => Ok(Self::Genus),
+            5 => Ok(Self::Species),
+            _ => Err(CoreError::InvalidArgument(format!(
+                "invalid taxon rank code: {value}"
+            ))),
+        }
+    }
+
     fn index(self) -> usize {
         match self {
             Self::Kingdom => 0,
@@ -156,13 +179,32 @@ impl TaxonomyNameKind {
             Self::Chinese => "chinese",
         }
     }
+
+    pub(crate) fn code(self) -> i64 {
+        match self {
+            Self::Scientific => 1,
+            Self::English => 2,
+            Self::Chinese => 3,
+        }
+    }
+
+    pub(crate) fn from_code(value: i64) -> CoreResult<Self> {
+        match value {
+            1 => Ok(Self::Scientific),
+            2 => Ok(Self::English),
+            3 => Ok(Self::Chinese),
+            _ => Err(CoreError::InvalidArgument(format!(
+                "invalid taxonomy name kind code: {value}"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonLogRecord {
     pub taxon_id: i64,
     pub parent_taxon_id: Option<i64>,
-    pub rank: String,
+    pub rank: TaxonRank,
     pub geological_range: Option<String>,
 }
 
@@ -868,26 +910,9 @@ struct FieldUpdate {
     value: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NameKind {
-    Scientific,
-    English,
-    Chinese,
-}
-
-impl NameKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Scientific => "scientific",
-            Self::English => "english",
-            Self::Chinese => "chinese",
-        }
-    }
-}
-
 #[derive(Debug)]
 struct NamePlan {
-    kind: NameKind,
+    kind: TaxonomyNameKind,
     name: String,
     insert: Option<NameRecord>,
     updates: Vec<NameFieldUpdate>,
@@ -907,7 +932,7 @@ struct NameRecord {
 struct TaxonSnapshot {
     taxon_id: i64,
     parent_taxon_id: Option<i64>,
-    rank: String,
+    rank: TaxonRank,
     geological_range: Option<String>,
     scientific: Vec<NameSnapshot>,
     english: Vec<NameSnapshot>,
@@ -1152,8 +1177,8 @@ fn prepare_new_taxon(
     }];
     let mut names = prepare_new_taxon_names(row, target_name, &mut changes)?;
     for (kind, input) in [
-        (NameKind::English, row.english.as_ref()),
-        (NameKind::Chinese, row.chinese.as_ref()),
+        (TaxonomyNameKind::English, row.english.as_ref()),
+        (TaxonomyNameKind::Chinese, row.chinese.as_ref()),
     ] {
         if let Some(input) = input {
             names.push(new_first_name(kind, input, &mut changes)?);
@@ -1186,7 +1211,7 @@ fn prepare_new_taxon_names(
                 ));
             }
             names.push(insert_name_plan(
-                NameKind::Scientific,
+                TaxonomyNameKind::Scientific,
                 locator_name,
                 input,
                 true,
@@ -1197,14 +1222,14 @@ fn prepare_new_taxon_names(
             let input_name = required_name(input)?;
             let input_accepted = input.is_accepted == Some(true);
             names.push(insert_name_plan(
-                NameKind::Scientific,
+                TaxonomyNameKind::Scientific,
                 locator_name,
                 &TaxonNameInput::default(),
                 !input_accepted,
                 changes,
             )?);
             names.push(insert_name_plan(
-                NameKind::Scientific,
+                TaxonomyNameKind::Scientific,
                 input_name,
                 input,
                 input_accepted,
@@ -1212,7 +1237,7 @@ fn prepare_new_taxon_names(
             )?);
         }
         None => names.push(insert_name_plan(
-            NameKind::Scientific,
+            TaxonomyNameKind::Scientific,
             locator_name,
             &TaxonNameInput::default(),
             true,
@@ -1223,7 +1248,7 @@ fn prepare_new_taxon_names(
 }
 
 fn new_first_name(
-    kind: NameKind,
+    kind: TaxonomyNameKind,
     input: &TaxonNameInput,
     changes: &mut Vec<TaxonChange>,
 ) -> Result<NamePlan, RowIssue> {
@@ -1237,7 +1262,7 @@ fn new_first_name(
 }
 
 fn insert_name_plan(
-    kind: NameKind,
+    kind: TaxonomyNameKind,
     name: String,
     input: &TaxonNameInput,
     is_accepted: bool,
@@ -1286,9 +1311,9 @@ fn prepare_existing_taxon(
     )?;
     let mut names = Vec::new();
     for (kind, input) in [
-        (NameKind::Scientific, update.scientific),
-        (NameKind::English, update.english),
-        (NameKind::Chinese, update.chinese),
+        (TaxonomyNameKind::Scientific, update.scientific),
+        (TaxonomyNameKind::English, update.english),
+        (TaxonomyNameKind::Chinese, update.chinese),
     ] {
         if let Some(input) = input {
             names.push(plan_existing_name(
@@ -1356,7 +1381,7 @@ fn plan_geological_range(
 fn plan_existing_name(
     transaction: &Transaction<'_>,
     taxon_id: i64,
-    kind: NameKind,
+    kind: TaxonomyNameKind,
     input: &TaxonNameInput,
     options: TaxonUpdateOptions,
     changes: &mut Vec<TaxonChange>,
@@ -1369,7 +1394,7 @@ fn plan_existing_name(
             FROM taxon_names
             WHERE taxon_id = ? AND name_kind = ? AND name = ?
             "#,
-            params![taxon_id, kind.as_str(), name],
+            params![taxon_id, kind.code(), name],
             |row| {
                 Ok(NameRecord {
                     is_accepted: row.get::<_, i64>(0)? != 0,
@@ -1524,7 +1549,7 @@ fn plan_existing_name(
     Ok(plan)
 }
 
-fn accepted_change(kind: NameKind, old: Option<String>, new: String) -> TaxonChange {
+fn accepted_change(kind: TaxonomyNameKind, old: Option<String>, new: String) -> TaxonChange {
     TaxonChange {
         kind: TaxonChangeKind::ChangeAcceptedName,
         field: format!("{}.is_accepted", kind.as_str()),
@@ -1555,7 +1580,7 @@ fn execute_plan(
         } => {
             transaction.execute(
                 "INSERT INTO taxa (parent_taxon_id, rank, geological_range) VALUES (?, ?, ?)",
-                params![parent_taxon_id, rank.as_str(), geological_range],
+                params![parent_taxon_id, rank.code(), geological_range],
             )?;
             transaction.last_insert_rowid()
         }
@@ -1563,7 +1588,11 @@ fn execute_plan(
     for name in &plan.names {
         execute_name_plan(transaction, taxon_id, name)?;
     }
-    for kind in [NameKind::Scientific, NameKind::English, NameKind::Chinese] {
+    for kind in [
+        TaxonomyNameKind::Scientific,
+        TaxonomyNameKind::English,
+        TaxonomyNameKind::Chinese,
+    ] {
         if plan.names.iter().any(|name| name.kind == kind) {
             validate_accepted_name(transaction, taxon_id, kind)?;
         }
@@ -1603,7 +1632,7 @@ fn execute_name_plan(
             SET is_accepted = 0
             WHERE taxon_id = ? AND name_kind = ? AND name = ?
             "#,
-            params![taxon_id, plan.kind.as_str(), old_name],
+            params![taxon_id, plan.kind.code(), old_name],
         )?;
     }
     if let Some(record) = plan.insert.as_ref() {
@@ -1616,7 +1645,7 @@ fn execute_name_plan(
             "#,
             params![
                 taxon_id,
-                plan.kind.as_str(),
+                plan.kind.code(),
                 plan.name,
                 i64::from(record.is_accepted),
                 record.authority_year,
@@ -1632,7 +1661,7 @@ fn execute_name_plan(
         );
         transaction.execute(
             &sql,
-            params![update.value, taxon_id, plan.kind.as_str(), plan.name],
+            params![update.value, taxon_id, plan.kind.code(), plan.name],
         )?;
     }
     if plan.promote {
@@ -1642,7 +1671,7 @@ fn execute_name_plan(
             SET is_accepted = 1
             WHERE taxon_id = ? AND name_kind = ? AND name = ?
             "#,
-            params![taxon_id, plan.kind.as_str(), plan.name],
+            params![taxon_id, plan.kind.code(), plan.name],
         )?;
     }
     Ok(())
@@ -1699,15 +1728,16 @@ fn taxon_snapshot(
             |row| {
                 Ok((
                     row.get::<_, Option<i64>>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(1)?,
                     row.get::<_, Option<String>>(2)?,
                 ))
             },
         )
         .optional()?;
-    let Some((parent_taxon_id, rank, geological_range)) = base else {
+    let Some((parent_taxon_id, rank_code, geological_range)) = base else {
         return Ok(None);
     };
+    let rank = TaxonRank::from_code(rank_code)?;
     let mut identifiers_statement = transaction.prepare(
         r#"
         SELECT source, external_id
@@ -1729,9 +1759,9 @@ fn taxon_snapshot(
         parent_taxon_id,
         rank,
         geological_range,
-        scientific: name_snapshots(transaction, taxon_id, NameKind::Scientific)?,
-        english: name_snapshots(transaction, taxon_id, NameKind::English)?,
-        chinese: name_snapshots(transaction, taxon_id, NameKind::Chinese)?,
+        scientific: name_snapshots(transaction, taxon_id, TaxonomyNameKind::Scientific)?,
+        english: name_snapshots(transaction, taxon_id, TaxonomyNameKind::English)?,
+        chinese: name_snapshots(transaction, taxon_id, TaxonomyNameKind::Chinese)?,
         identifiers,
     }))
 }
@@ -1739,7 +1769,7 @@ fn taxon_snapshot(
 fn name_snapshots(
     transaction: &Transaction<'_>,
     taxon_id: i64,
-    kind: NameKind,
+    kind: TaxonomyNameKind,
 ) -> CoreResult<Vec<NameSnapshot>> {
     let mut statement = transaction.prepare(
         r#"
@@ -1749,7 +1779,7 @@ fn name_snapshots(
         ORDER BY name
         "#,
     )?;
-    let rows = statement.query_map(params![taxon_id, kind.as_str()], |row| {
+    let rows = statement.query_map(params![taxon_id, kind.code()], |row| {
         Ok(NameSnapshot {
             name: row.get(0)?,
             is_accepted: row.get::<_, i64>(1)? != 0,
@@ -1850,7 +1880,7 @@ fn taxon_log_record(snapshot: &TaxonSnapshot) -> TaxonLogRecord {
     TaxonLogRecord {
         taxon_id: snapshot.taxon_id,
         parent_taxon_id: snapshot.parent_taxon_id,
-        rank: snapshot.rank.clone(),
+        rank: snapshot.rank,
         geological_range: snapshot.geological_range.clone(),
     }
 }
@@ -1899,7 +1929,7 @@ fn revert_changes(
                 DELETE FROM taxon_names
                 WHERE taxon_id = ? AND name_kind = ? AND name = ?
                 "#,
-                params![after.taxon_id, name_kind.as_str(), after.name],
+                params![after.taxon_id, name_kind.code(), after.name],
             )?;
         }
     }
@@ -1917,7 +1947,7 @@ fn revert_changes(
                 SET is_accepted = 0
                 WHERE taxon_id = ? AND name_kind = ? AND name = ?
                 "#,
-                params![after.taxon_id, name_kind.as_str(), after.name],
+                params![after.taxon_id, name_kind.code(), after.name],
             )?;
         }
     }
@@ -1938,7 +1968,7 @@ fn revert_changes(
                     "#,
                     params![
                         before.parent_taxon_id,
-                        before.rank,
+                        before.rank.code(),
                         before.geological_range,
                         before.taxon_id,
                     ],
@@ -1962,7 +1992,7 @@ fn revert_changes(
                     params![
                         before.taxon_id,
                         before.parent_taxon_id,
-                        before.rank,
+                        before.rank.code(),
                         before.geological_range,
                     ],
                 )?;
@@ -2008,7 +2038,7 @@ fn restore_name_record(
             record.category,
             record.source,
             record.taxon_id,
-            kind.as_str(),
+            kind.code(),
             record.name,
         ],
     )?;
@@ -2029,7 +2059,7 @@ fn insert_name_record(
         "#,
         params![
             record.taxon_id,
-            kind.as_str(),
+            kind.code(),
             record.name,
             i64::from(record.is_accepted),
             record.authority_year,
@@ -2077,7 +2107,7 @@ fn deserialize_json<T: for<'de> Deserialize<'de>>(value: &str, label: &str) -> C
 fn validate_accepted_name(
     transaction: &Transaction<'_>,
     taxon_id: i64,
-    kind: NameKind,
+    kind: TaxonomyNameKind,
 ) -> CoreResult<()> {
     let (total, accepted): (i64, i64) = transaction.query_row(
         r#"
@@ -2085,7 +2115,7 @@ fn validate_accepted_name(
         FROM taxon_names
         WHERE taxon_id = ? AND name_kind = ?
         "#,
-        params![taxon_id, kind.as_str()],
+        params![taxon_id, kind.code()],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     if total > 0 && accepted != 1 {
@@ -2109,14 +2139,19 @@ fn find_candidates(
         FROM taxa
         JOIN taxon_names ON taxon_names.taxon_id = taxa.taxon_id
         WHERE taxa.rank = ?
-          AND taxon_names.name_kind = 'scientific'
+          AND taxon_names.name_kind = ?
           AND taxon_names.name = ? COLLATE BINARY
         ORDER BY taxa.taxon_id
         "#,
     )?;
-    let rows = statement.query_map(params![target_rank.as_str(), target_name], |row| {
-        row.get::<_, i64>(0)
-    })?;
+    let rows = statement.query_map(
+        params![
+            target_rank.code(),
+            TaxonomyNameKind::Scientific.code(),
+            target_name
+        ],
+        |row| row.get::<_, i64>(0),
+    )?;
     let ids = rows.collect::<Result<Vec<_>, _>>()?;
     let had_name_match = !ids.is_empty();
     let mut candidate_ids = Vec::new();
@@ -2171,11 +2206,16 @@ fn lineage_has_name(
             FROM lineage
             JOIN taxon_names ON taxon_names.taxon_id = lineage.taxon_id
             WHERE lineage.rank = ?
-              AND taxon_names.name_kind = 'scientific'
+              AND taxon_names.name_kind = ?
               AND taxon_names.name = ? COLLATE BINARY
         )
         "#,
-        params![taxon_id, rank.as_str(), name],
+        params![
+            taxon_id,
+            rank.code(),
+            TaxonomyNameKind::Scientific.code(),
+            name
+        ],
         |row| row.get(0),
     )?)
 }
@@ -2183,7 +2223,7 @@ fn lineage_has_name(
 fn accepted_name(
     transaction: &Transaction<'_>,
     taxon_id: i64,
-    kind: NameKind,
+    kind: TaxonomyNameKind,
 ) -> rusqlite::Result<Option<String>> {
     transaction
         .query_row(
@@ -2192,7 +2232,7 @@ fn accepted_name(
             FROM taxon_names
             WHERE taxon_id = ? AND name_kind = ? AND is_accepted = 1
             "#,
-            params![taxon_id, kind.as_str()],
+            params![taxon_id, kind.code()],
             |row| row.get(0),
         )
         .optional()
@@ -2201,11 +2241,11 @@ fn accepted_name(
 fn count_names(
     transaction: &Transaction<'_>,
     taxon_id: i64,
-    kind: NameKind,
+    kind: TaxonomyNameKind,
 ) -> rusqlite::Result<i64> {
     transaction.query_row(
         "SELECT COUNT(*) FROM taxon_names WHERE taxon_id = ? AND name_kind = ?",
-        params![taxon_id, kind.as_str()],
+        params![taxon_id, kind.code()],
         |row| row.get(0),
     )
 }
@@ -2224,19 +2264,6 @@ fn normalize(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-fn parse_rank(value: &str) -> CoreResult<TaxonRank> {
-    match value {
-        "kingdom" => Ok(TaxonRank::Kingdom),
-        "order" => Ok(TaxonRank::Order),
-        "family" => Ok(TaxonRank::Family),
-        "genus" => Ok(TaxonRank::Genus),
-        "species" => Ok(TaxonRank::Species),
-        value => Err(CoreError::InvalidArgument(format!(
-            "invalid taxon rank: {value}"
-        ))),
-    }
 }
 
 fn database_issue(error: rusqlite::Error) -> RowIssue {
@@ -2263,10 +2290,10 @@ mod tests {
         let mut ids = [0; 4];
         let mut parent = None;
         for (index, (rank, name)) in [
-            ("kingdom", "Animalia"),
-            ("order", "Carnivora"),
-            ("family", "Canidae"),
-            ("genus", "Canis"),
+            (TaxonRank::Kingdom, "Animalia"),
+            (TaxonRank::Order, "Carnivora"),
+            (TaxonRank::Family, "Canidae"),
+            (TaxonRank::Genus, "Canis"),
         ]
         .into_iter()
         .enumerate()
@@ -2274,14 +2301,14 @@ mod tests {
             transaction
                 .execute(
                     "INSERT INTO taxa (parent_taxon_id, rank) VALUES (?, ?)",
-                    params![parent, rank],
+                    params![parent, rank.code()],
                 )
                 .unwrap();
             let id = transaction.last_insert_rowid();
             transaction
                 .execute(
-                    "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 'scientific', ?, 1)",
-                    params![id, name],
+                    "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, ?, ?, 1)",
+                    params![id, TaxonomyNameKind::Scientific.code(), name],
                 )
                 .unwrap();
             ids[index] = id;
@@ -2320,7 +2347,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let parent: i64 = connection
             .query_row(
-                "SELECT parent_taxon_id FROM taxa WHERE rank = 'species'",
+                "SELECT parent_taxon_id FROM taxa WHERE rank = 5",
                 [],
                 |row| row.get(0),
             )
@@ -2328,7 +2355,7 @@ mod tests {
         assert_eq!(parent, ids[3]);
         let accepted: i64 = connection
             .query_row(
-                "SELECT is_accepted FROM taxon_names WHERE name_kind = 'scientific' AND name = 'Canis lupus'",
+                "SELECT is_accepted FROM taxon_names WHERE name_kind = 1 AND name = 'Canis lupus'",
                 [],
                 |row| row.get(0),
             )
@@ -2374,7 +2401,7 @@ mod tests {
                 r#"
                 INSERT INTO taxon_names (
                     taxon_id, name_kind, name, is_accepted, category, source
-                ) VALUES (?, 'scientific', 'Canis lycaon', 0, 'synonym', 'local')
+                ) VALUES (?, 1, 'Canis lycaon', 0, 'synonym', 'local')
                 "#,
                 [taxon_id],
             )
@@ -2600,7 +2627,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM taxon_names WHERE name_kind = 'scientific' AND name = 'Canis lycaon'",
+                "SELECT COUNT(*) FROM taxon_names WHERE name_kind = 1 AND name = 'Canis lycaon'",
                 [],
                 |row| row.get(0),
             )
@@ -2612,7 +2639,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let restored: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM taxon_names WHERE name_kind = 'scientific' AND name = 'Canis lycaon'",
+                "SELECT COUNT(*) FROM taxon_names WHERE name_kind = 1 AND name = 'Canis lycaon'",
                 [],
                 |row| row.get(0),
             )
@@ -2719,37 +2746,40 @@ mod tests {
         let connection = database.connect().unwrap();
         connection
             .execute(
-                "INSERT INTO taxa (parent_taxon_id, rank) VALUES (?, 'species')",
-                [ids[3]],
+                "INSERT INTO taxa (parent_taxon_id, rank) VALUES (?, ?)",
+                params![ids[3], TaxonRank::Species.code()],
             )
             .unwrap();
         let first = connection.last_insert_rowid();
         connection
             .execute(
-                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 'scientific', 'Canis lupus', 1)",
+                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 1, 'Canis lupus', 1)",
                 [first],
             )
             .unwrap();
         connection
-            .execute("INSERT INTO taxa (rank) VALUES ('genus')", [])
+            .execute(
+                "INSERT INTO taxa (rank) VALUES (?)",
+                [TaxonRank::Genus.code()],
+            )
             .unwrap();
         let other_genus = connection.last_insert_rowid();
         connection
             .execute(
-                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 'scientific', 'Canis', 1)",
+                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 1, 'Canis', 1)",
                 [other_genus],
             )
             .unwrap();
         connection
             .execute(
-                "INSERT INTO taxa (parent_taxon_id, rank) VALUES (?, 'species')",
-                [other_genus],
+                "INSERT INTO taxa (parent_taxon_id, rank) VALUES (?, ?)",
+                params![other_genus, TaxonRank::Species.code()],
             )
             .unwrap();
         let second = connection.last_insert_rowid();
         connection
             .execute(
-                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 'scientific', 'Canis lupus', 1)",
+                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 1, 'Canis lupus', 1)",
                 [second],
             )
             .unwrap();
@@ -2796,14 +2826,14 @@ mod tests {
         let connection = database.connect().unwrap();
         connection
             .execute(
-                "INSERT INTO taxa (parent_taxon_id, rank) VALUES (?, 'species')",
-                [ids[3]],
+                "INSERT INTO taxa (parent_taxon_id, rank) VALUES (?, ?)",
+                params![ids[3], TaxonRank::Species.code()],
             )
             .unwrap();
         let species_id = connection.last_insert_rowid();
         connection
             .execute(
-                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 'scientific', 'Canis lupus', 1)",
+                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 1, 'Canis lupus', 1)",
                 [species_id],
             )
             .unwrap();
@@ -2828,7 +2858,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM taxon_names WHERE name_kind = 'scientific' AND name = 'Canis lupus'",
+                "SELECT COUNT(*) FROM taxon_names WHERE name_kind = 1 AND name = 'Canis lupus'",
                 [],
                 |row| row.get(0),
             )
@@ -2879,7 +2909,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let accepted: i64 = connection
             .query_row(
-                "SELECT is_accepted FROM taxon_names WHERE name_kind = 'chinese'",
+                "SELECT is_accepted FROM taxon_names WHERE name_kind = 3",
                 [],
                 |row| row.get(0),
             )
@@ -2947,7 +2977,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let value: String = connection
             .query_row(
-                "SELECT geological_range FROM taxa WHERE rank = 'species'",
+                "SELECT geological_range FROM taxa WHERE rank = 5",
                 [],
                 |row| row.get(0),
             )
@@ -2997,7 +3027,7 @@ mod tests {
                 r#"
                 SELECT authority_year, category, source
                 FROM taxon_names
-                WHERE name_kind = 'scientific' AND name = 'Canis lupus'
+                WHERE name_kind = 1 AND name = 'Canis lupus'
                 "#,
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -3073,7 +3103,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let accepted: String = connection
             .query_row(
-                "SELECT name FROM taxon_names WHERE name_kind = 'scientific' AND is_accepted = 1 AND taxon_id = (SELECT taxon_id FROM taxon_names WHERE name_kind = 'scientific' AND name = 'Canis lupus')",
+                "SELECT name FROM taxon_names WHERE name_kind = 1 AND is_accepted = 1 AND taxon_id = (SELECT taxon_id FROM taxon_names WHERE name_kind = 1 AND name = 'Canis lupus')",
                 [],
                 |row| row.get(0),
             )
@@ -3173,11 +3203,9 @@ mod tests {
         assert_eq!(result.rows[1].status, TaxonRowStatus::Invalid);
         let connection = database.connect().unwrap();
         let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM taxa WHERE rank = 'species'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM taxa WHERE rank = 5", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
         let operations: i64 = connection
@@ -3404,7 +3432,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let chinese_count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM taxon_names WHERE name_kind = 'chinese'",
+                "SELECT COUNT(*) FROM taxon_names WHERE name_kind = 3",
                 [],
                 |row| row.get(0),
             )
@@ -3415,11 +3443,9 @@ mod tests {
         revert_taxonomy_operation(&database, create_operation).unwrap();
         let connection = database.connect().unwrap();
         let species_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM taxa WHERE rank = 'species'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM taxa WHERE rank = 5", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(species_count, 0);
         let operations = list_taxonomy_operations(&database, None, 10).unwrap().items;
@@ -3496,7 +3522,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let accepted: String = connection
             .query_row(
-                "SELECT name FROM taxon_names WHERE name_kind = 'scientific' AND is_accepted = 1 AND taxon_id = (SELECT taxon_id FROM taxon_names WHERE name_kind = 'scientific' AND name = 'Canis lupus')",
+                "SELECT name FROM taxon_names WHERE name_kind = 1 AND is_accepted = 1 AND taxon_id = (SELECT taxon_id FROM taxon_names WHERE name_kind = 1 AND name = 'Canis lupus')",
                 [],
                 |row| row.get(0),
             )
@@ -3537,7 +3563,7 @@ mod tests {
         let connection = database.connect().unwrap();
         connection
             .execute(
-                "UPDATE taxa SET geological_range = 'Holocene' WHERE rank = 'species'",
+                "UPDATE taxa SET geological_range = 'Holocene' WHERE rank = 5",
                 [],
             )
             .unwrap();
@@ -3595,7 +3621,7 @@ mod tests {
         let connection = database.connect().unwrap();
         let value: Option<String> = connection
             .query_row(
-                "SELECT geological_range FROM taxa WHERE rank = 'species'",
+                "SELECT geological_range FROM taxa WHERE rank = 5",
                 [],
                 |row| row.get(0),
             )

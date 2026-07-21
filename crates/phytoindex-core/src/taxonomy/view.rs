@@ -8,7 +8,6 @@ use super::{
     page::{
         TaxonomyCursor, TaxonomyPage, decode_cursor, encode_cursor, invalid_cursor, page_limit,
     },
-    parse_rank,
 };
 use crate::{CoreError, CoreResult, Database};
 
@@ -148,23 +147,23 @@ pub(super) fn load_taxon_summaries(
                 taxa.rank,
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 1 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 1
                      ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 2 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 2
                      ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 3 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 3
                      ORDER BY name LIMIT 1)
                 ),
                 0,
@@ -180,23 +179,23 @@ pub(super) fn load_taxon_summaries(
                 parent.rank,
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 1 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'scientific'
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 1
                      ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 2 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'english'
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 2
                      ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 3 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'chinese'
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 3
                      ORDER BY name LIMIT 1)
                 ),
                 lineage.depth + 1,
@@ -255,7 +254,7 @@ pub(super) fn load_taxon_summaries(
             .map(|row| {
                 Ok(TaxonBreadcrumbItem {
                     taxon_id: row.taxon_id,
-                    rank: parse_rank(&row.rank)?,
+                    rank: TaxonRank::from_code(row.rank)?,
                     names: row.names,
                 })
             })
@@ -264,7 +263,7 @@ pub(super) fn load_taxon_summaries(
             *taxon_id,
             TaxonSummary {
                 taxon_id: current.taxon_id,
-                rank: parse_rank(&current.rank)?,
+                rank: TaxonRank::from_code(current.rank)?,
                 breadcrumb,
                 names: current.names,
             },
@@ -281,7 +280,7 @@ struct LineageRow {
     root_taxon_id: i64,
     taxon_id: i64,
     parent_taxon_id: Option<i64>,
-    rank: String,
+    rank: i64,
     names: TaxonDisplayNames,
 }
 
@@ -301,9 +300,7 @@ pub(super) fn load_taxon_details(
     }
     let unique_ids = unique_taxon_ids(taxon_ids);
     let bases = load_taxon_bases(connection, &unique_ids)?;
-    let scientific = load_names_for_taxa(connection, &unique_ids, TaxonomyNameKind::Scientific)?;
-    let english = load_names_for_taxa(connection, &unique_ids, TaxonomyNameKind::English)?;
-    let chinese = load_names_for_taxa(connection, &unique_ids, TaxonomyNameKind::Chinese)?;
+    let names = load_names_for_taxa(connection, &unique_ids)?;
     let identifiers = load_identifiers_for_taxa(connection, &unique_ids)?;
     let mut details_by_id = HashMap::new();
     for base in bases {
@@ -315,11 +312,7 @@ pub(super) fn load_taxon_details(
                 rank: base.rank,
                 parent_taxon_id: base.parent_taxon_id,
                 geological_range: base.geological_range,
-                names: TaxonNamesDetail {
-                    scientific: scientific.get(&taxon_id).cloned().unwrap_or_default(),
-                    english: english.get(&taxon_id).cloned().unwrap_or_default(),
-                    chinese: chinese.get(&taxon_id).cloned().unwrap_or_default(),
-                },
+                names: names.get(&taxon_id).cloned().unwrap_or_default(),
                 identifiers: identifiers.get(&taxon_id).cloned().unwrap_or_default(),
             },
         );
@@ -360,7 +353,7 @@ fn load_taxon_children(
             parent_taxon_id,
             rank,
             taxon_id: cursor_taxon_id,
-        }) if parent_taxon_id == taxon_id => Some((rank.as_str().to_string(), cursor_taxon_id)),
+        }) if parent_taxon_id == taxon_id => Some((rank.code(), cursor_taxon_id)),
         Some(_) => return Err(invalid_cursor()),
     };
     let limit = page_limit(limit);
@@ -373,23 +366,23 @@ fn load_taxon_children(
                 taxa.rank,
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 1 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 1
                      ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 2 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 2
                      ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 3 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 3
                      ORDER BY name LIMIT 1)
                 )
             FROM taxa
@@ -412,23 +405,23 @@ fn load_taxon_children(
                 taxa.rank,
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 1 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 1
                      ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 2 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 2
                      ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 3 AND is_accepted = 1),
                     (SELECT name FROM taxon_names
-                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese'
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 3
                      ORDER BY name LIMIT 1)
                 )
             FROM taxa
@@ -457,10 +450,10 @@ fn load_taxon_children(
     Ok(TaxonomyPage { items, next_cursor })
 }
 
-fn taxon_child_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, TaxonDisplayNames)> {
+fn taxon_child_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, i64, TaxonDisplayNames)> {
     Ok((
         row.get::<_, i64>(0)?,
-        row.get::<_, String>(1)?,
+        row.get::<_, i64>(1)?,
         TaxonDisplayNames {
             scientific: row.get(2)?,
             english: row.get(3)?,
@@ -470,12 +463,12 @@ fn taxon_child_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, Ta
 }
 
 fn taxon_child_from_row(
-    row: rusqlite::Result<(i64, String, TaxonDisplayNames)>,
+    row: rusqlite::Result<(i64, i64, TaxonDisplayNames)>,
 ) -> CoreResult<TaxonChild> {
     let (taxon_id, rank, names) = row?;
     Ok(TaxonChild {
         taxon_id,
-        rank: parse_rank(&rank)?,
+        rank: TaxonRank::from_code(rank)?,
         names,
     })
 }
@@ -498,7 +491,7 @@ fn load_taxon_bases(connection: &Connection, taxon_ids: &[i64]) -> CoreResult<Ve
     let rows = statement.query_map(params_from_iter(params), |row| {
         Ok((
             row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
+            row.get::<_, i64>(1)?,
             row.get::<_, Option<i64>>(2)?,
             row.get::<_, Option<String>>(3)?,
         ))
@@ -507,7 +500,7 @@ fn load_taxon_bases(connection: &Connection, taxon_ids: &[i64]) -> CoreResult<Ve
         let (taxon_id, rank, parent_taxon_id, geological_range) = row?;
         Ok(TaxonBase {
             taxon_id,
-            rank: parse_rank(&rank)?,
+            rank: TaxonRank::from_code(rank)?,
             parent_taxon_id,
             geological_range,
         })
@@ -518,40 +511,44 @@ fn load_taxon_bases(connection: &Connection, taxon_ids: &[i64]) -> CoreResult<Ve
 fn load_names_for_taxa(
     connection: &Connection,
     taxon_ids: &[i64],
-    kind: TaxonomyNameKind,
-) -> CoreResult<HashMap<i64, Vec<TaxonNameDetail>>> {
+) -> CoreResult<HashMap<i64, TaxonNamesDetail>> {
     if taxon_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let (values_clause, mut params) = input_values(taxon_ids);
-    params.push(SqlValue::Text(kind.as_str().to_string()));
+    let (values_clause, params) = input_values(taxon_ids);
     let sql = format!(
         r#"
         WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
-        SELECT input.taxon_id, taxon_names.name, is_accepted, authority_year, category, source
+        SELECT input.taxon_id, taxon_names.name_kind, taxon_names.name, is_accepted,
+               authority_year, category, source
         FROM input
         JOIN taxon_names ON taxon_names.taxon_id = input.taxon_id
-        WHERE taxon_names.name_kind = ?
-        ORDER BY input.sort_order, is_accepted DESC, taxon_names.name
+        ORDER BY input.sort_order, taxon_names.name_kind, is_accepted DESC, taxon_names.name
         "#
     );
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(params), |row| {
         Ok((
             row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
             TaxonNameDetail {
-                name: row.get(1)?,
-                is_accepted: row.get::<_, i64>(2)? != 0,
-                authority_year: row.get(3)?,
-                category: row.get(4)?,
-                source: row.get(5)?,
+                name: row.get(2)?,
+                is_accepted: row.get::<_, i64>(3)? != 0,
+                authority_year: row.get(4)?,
+                category: row.get(5)?,
+                source: row.get(6)?,
             },
         ))
     })?;
-    let mut names_by_id: HashMap<i64, Vec<TaxonNameDetail>> = HashMap::new();
+    let mut names_by_id: HashMap<i64, TaxonNamesDetail> = HashMap::new();
     for row in rows {
-        let (taxon_id, name) = row?;
-        names_by_id.entry(taxon_id).or_default().push(name);
+        let (taxon_id, name_kind, name) = row?;
+        let entry = names_by_id.entry(taxon_id).or_default();
+        match TaxonomyNameKind::from_code(name_kind)? {
+            TaxonomyNameKind::Scientific => entry.scientific.push(name),
+            TaxonomyNameKind::English => entry.english.push(name),
+            TaxonomyNameKind::Chinese => entry.chinese.push(name),
+        }
     }
     Ok(names_by_id)
 }

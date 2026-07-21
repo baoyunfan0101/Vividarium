@@ -47,13 +47,11 @@ impl Database {
         match version {
             0 => connection.execute_batch(SCHEMA)?,
             SCHEMA_VERSION => {
-                reset_prerelease_taxonomy_logs(&connection)?;
                 connection.execute_batch(SCHEMA)?;
-                migrate_legacy_taxon_name_tables(&connection)?;
             }
             1 => {
                 return Err(CoreError::InvalidArgument(
-                    "legacy database version 1 is not supported; open a new vividarium.db".into(),
+                    "legacy database schema is not supported; open a new vividarium.db".into(),
                 ));
             }
             _ => {
@@ -64,83 +62,6 @@ impl Database {
         }
         Ok(())
     }
-}
-
-fn migrate_legacy_taxon_name_tables(connection: &Connection) -> CoreResult<()> {
-    for (table, kind, column) in [
-        ("scientific", "scientific", "scientific_name"),
-        ("english", "english", "english_name"),
-        ("chinese", "chinese", "chinese_name"),
-    ] {
-        let exists: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
-            [table],
-            |row| row.get(0),
-        )?;
-        if exists {
-            let sql = format!(
-                r#"
-                INSERT OR IGNORE INTO taxon_names (
-                    taxon_id, name_kind, name, is_accepted, authority_year, category, source
-                )
-                SELECT taxon_id, ?1, {column}, is_accepted, authority_year, category, source
-                FROM {table}
-                "#
-            );
-            connection.execute(&sql, [kind])?;
-            connection.execute(&format!("DROP TABLE {table}"), [])?;
-        }
-    }
-    Ok(())
-}
-
-fn reset_prerelease_taxonomy_logs(connection: &Connection) -> CoreResult<()> {
-    let has_obsolete_schema: bool = connection.query_row(
-        r#"
-        SELECT
-            (
-                EXISTS (
-                    SELECT 1 FROM sqlite_master
-                    WHERE type = 'table' AND name = 'taxonomy_operations'
-                )
-                AND (
-                    SELECT json_group_array(name)
-                    FROM pragma_table_info('taxonomy_operations')
-                ) != json_array(
-                    'operation_id',
-                    'batch_id',
-                    'row_number',
-                    'status',
-                    'changes_json',
-                    'after_hash',
-                    'applied_at',
-                    'reverted_at'
-                )
-            )
-            OR (
-                EXISTS (
-                    SELECT 1 FROM sqlite_master
-                    WHERE type = 'table' AND name = 'taxonomy_operation_batches'
-                )
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM pragma_table_info('taxonomy_operation_batches')
-                    WHERE name = 'context_json'
-                )
-            )
-        "#,
-        [],
-        |row| row.get(0),
-    )?;
-    if has_obsolete_schema {
-        connection.execute_batch(
-            r#"
-            DROP TABLE IF EXISTS taxonomy_operations;
-            DROP TABLE IF EXISTS taxonomy_operation_batches;
-            "#,
-        )?;
-    }
-    Ok(())
 }
 
 const SCHEMA: &str = r#"
@@ -185,22 +106,22 @@ CREATE TABLE IF NOT EXISTS photos_metadata (
 CREATE TABLE IF NOT EXISTS taxa (
     taxon_id INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_taxon_id INTEGER,
-    rank TEXT NOT NULL,
+    rank INTEGER NOT NULL,
     geological_range TEXT,
-    CHECK (rank IN ('kingdom', 'order', 'family', 'genus', 'species')),
+    CHECK (rank IN (1, 2, 3, 4, 5)),
     FOREIGN KEY (parent_taxon_id) REFERENCES taxa(taxon_id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS taxon_names (
     taxon_id INTEGER NOT NULL,
-    name_kind TEXT NOT NULL,
+    name_kind INTEGER NOT NULL,
     name TEXT NOT NULL,
     is_accepted INTEGER NOT NULL DEFAULT 0,
     authority_year TEXT,
     category TEXT,
     source TEXT,
     PRIMARY KEY (taxon_id, name_kind, name),
-    CHECK (name_kind IN ('scientific', 'english', 'chinese')),
+    CHECK (name_kind IN (1, 2, 3)),
     CHECK (is_accepted IN (0, 1)),
     CHECK (length(trim(name)) > 0),
     FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
@@ -300,19 +221,25 @@ DROP VIEW IF EXISTS taxa_display;
 CREATE VIEW IF NOT EXISTS taxa_display AS
 SELECT
     taxa.taxon_id,
-    taxa.rank,
+    CASE taxa.rank
+        WHEN 1 THEN 'kingdom'
+        WHEN 2 THEN 'order'
+        WHEN 3 THEN 'family'
+        WHEN 4 THEN 'genus'
+        WHEN 5 THEN 'species'
+    END AS rank,
     COALESCE(
         (SELECT name FROM taxon_names
-         WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+         WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 3 AND is_accepted = 1),
         (SELECT name FROM taxon_names
-         WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+         WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 2 AND is_accepted = 1),
         (SELECT name FROM taxon_names
-         WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+         WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 1 AND is_accepted = 1),
         ''
     ) AS name,
     taxa.parent_taxon_id AS parent_id,
     (SELECT name FROM taxon_names
-     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific' AND is_accepted = 1) AS binomial_name
+     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 1 AND is_accepted = 1) AS binomial_name
 FROM taxa;
 
 PRAGMA user_version = 2;
@@ -416,168 +343,29 @@ mod tests {
     }
 
     #[test]
-    fn resets_prerelease_taxonomy_logs_without_changing_the_schema_version() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("vividarium.db");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                r#"
-                CREATE TABLE taxonomy_operation_batches (
-                    batch_id INTEGER PRIMARY KEY,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE taxonomy_operations (
-                    operation_id INTEGER PRIMARY KEY,
-                    batch_id INTEGER NOT NULL,
-                    row_number INTEGER NOT NULL,
-                    taxon_id INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    input_json TEXT NOT NULL,
-                    legacy_options TEXT NOT NULL,
-                    changes_json TEXT NOT NULL,
-                    before_json TEXT,
-                    after_json TEXT NOT NULL,
-                    applied_at TEXT NOT NULL,
-                    reverted_at TEXT
-                );
-                INSERT INTO taxonomy_operation_batches VALUES (1, CURRENT_TIMESTAMP);
-                INSERT INTO taxonomy_operations VALUES (
-                    1, 1, 1, 1, 'applied', '{}', '{}', '[]', NULL, '{}',
-                    CURRENT_TIMESTAMP, NULL
-                );
-                PRAGMA user_version = 2;
-                "#,
-            )
-            .unwrap();
-        drop(connection);
-
-        let database = Database::open(&path).unwrap();
-        let connection = database.connect().unwrap();
-        let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(
-            table_columns(&connection, "taxonomy_operation_batches"),
-            ["batch_id", "context_json", "input_json", "created_at"]
-        );
-        let operation_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM taxonomy_operations", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(operation_count, 0);
-    }
-
-    #[test]
-    fn migrates_legacy_taxon_name_tables_into_one_table() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("vividarium.db");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                r#"
-                CREATE TABLE taxa (
-                    taxon_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    parent_taxon_id INTEGER,
-                    rank TEXT NOT NULL,
-                    geological_range TEXT
-                );
-                CREATE TABLE scientific (
-                    taxon_id INTEGER NOT NULL,
-                    scientific_name TEXT NOT NULL,
-                    is_accepted INTEGER NOT NULL DEFAULT 0,
-                    authority_year TEXT,
-                    category TEXT,
-                    source TEXT,
-                    PRIMARY KEY (taxon_id, scientific_name)
-                );
-                CREATE TABLE english (
-                    taxon_id INTEGER NOT NULL,
-                    english_name TEXT NOT NULL,
-                    is_accepted INTEGER NOT NULL DEFAULT 0,
-                    authority_year TEXT,
-                    category TEXT,
-                    source TEXT,
-                    PRIMARY KEY (taxon_id, english_name)
-                );
-                CREATE TABLE chinese (
-                    taxon_id INTEGER NOT NULL,
-                    chinese_name TEXT NOT NULL,
-                    is_accepted INTEGER NOT NULL DEFAULT 0,
-                    authority_year TEXT,
-                    category TEXT,
-                    source TEXT,
-                    PRIMARY KEY (taxon_id, chinese_name)
-                );
-                INSERT INTO taxa (taxon_id, rank) VALUES (1, 'species');
-                INSERT INTO scientific VALUES (1, 'Canis lupus', 1, '1758', 'valid', 'local');
-                INSERT INTO english VALUES (1, 'gray wolf', 1, NULL, NULL, NULL);
-                INSERT INTO chinese VALUES (1, 'wolf', 1, NULL, NULL, NULL);
-                PRAGMA user_version = 2;
-                "#,
-            )
-            .unwrap();
-        drop(connection);
-
-        let database = Database::open(&path).unwrap();
-        let connection = database.connect().unwrap();
-        assert_eq!(
-            table_columns(&connection, "scientific"),
-            Vec::<String>::new()
-        );
-        let names: Vec<(String, String, i64)> = {
-            let mut statement = connection
-                .prepare(
-                    r#"
-                    SELECT name_kind, name, is_accepted
-                    FROM taxon_names
-                    WHERE taxon_id = 1
-                    ORDER BY name_kind, name
-                    "#,
-                )
-                .unwrap();
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
-        };
-        assert_eq!(
-            names,
-            [
-                ("chinese".into(), "wolf".into(), 1),
-                ("english".into(), "gray wolf".into(), 1),
-                ("scientific".into(), "Canis lupus".into(), 1),
-            ]
-        );
-    }
-
-    #[test]
     fn rejects_a_second_accepted_name_of_the_same_kind() {
         let directory = tempfile::tempdir().unwrap();
         let database = Database::open(directory.path().join("vividarium.db")).unwrap();
         let connection = database.connect().unwrap();
         connection
-            .execute("INSERT INTO taxa (rank) VALUES ('species')", [])
+            .execute("INSERT INTO taxa (rank) VALUES (5)", [])
             .unwrap();
         let taxon_id = connection.last_insert_rowid();
         connection
             .execute(
-                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 'scientific', 'A a', 1)",
+                "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 1, 'A a', 1)",
                 [taxon_id],
             )
             .unwrap();
         let result = connection.execute(
-            "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 'scientific', 'A b', 1)",
+            "INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted) VALUES (?, 1, 'A b', 1)",
             [taxon_id],
         );
         assert!(result.is_err());
     }
 
     #[test]
-    fn refuses_to_open_the_abandoned_schema() {
+    fn refuses_to_open_legacy_schema_versions() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("phytoindex.db");
         let connection = Connection::open(&path).unwrap();
@@ -586,7 +374,7 @@ mod tests {
             .unwrap();
         drop(connection);
         let error = Database::open(path).unwrap_err();
-        assert!(error.to_string().contains("legacy database version 1"));
+        assert!(error.to_string().contains("legacy database schema"));
     }
 
     fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
