@@ -5,7 +5,6 @@ use super::TaxonRank;
 use crate::{CoreError, CoreResult};
 
 const MAX_PAGE_LIMIT: usize = 500;
-pub(super) const DEFAULT_PAGE_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonomyPage<T> {

@@ -30,14 +30,6 @@ pub struct TaxonSearchResult {
 pub fn search_taxa(
     database: &Database,
     query: &str,
-    limit: usize,
-) -> CoreResult<Vec<TaxonSearchResult>> {
-    Ok(search_taxa_page(database, query, None, limit)?.items)
-}
-
-pub fn search_taxa_page(
-    database: &Database,
-    query: &str,
     cursor: Option<&str>,
     limit: usize,
 ) -> CoreResult<TaxonomyPage<TaxonSearchResult>> {

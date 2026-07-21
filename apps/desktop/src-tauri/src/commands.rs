@@ -102,7 +102,7 @@ pub fn search_taxa(
     cursor: Option<String>,
     limit: Option<usize>,
 ) -> CommandResult<TaxonomyPage<TaxonSearchResult>> {
-    taxonomy::search_taxa_page(
+    taxonomy::search_taxa(
         &state.database,
         &query,
         cursor.as_deref(),
@@ -118,7 +118,7 @@ pub fn get_taxon_detail_node(
     children_cursor: Option<String>,
     children_limit: Option<usize>,
 ) -> CommandResult<TaxonDetailNode> {
-    taxonomy::get_taxon_detail_node_page(
+    taxonomy::get_taxon_detail_node(
         &state.database,
         taxon_id,
         children_cursor.as_deref(),
@@ -183,7 +183,7 @@ pub fn list_taxonomy_operation_batches(
     cursor: Option<String>,
     limit: Option<usize>,
 ) -> CommandResult<TaxonomyPage<TaxonomyOperationBatch>> {
-    taxonomy::list_taxonomy_operation_batches_page(
+    taxonomy::list_taxonomy_operation_batches(
         &state.database,
         cursor.as_deref(),
         limit.unwrap_or(50),
@@ -197,7 +197,7 @@ pub fn list_taxonomy_operations(
     cursor: Option<String>,
     limit: Option<usize>,
 ) -> CommandResult<TaxonomyPage<TaxonomyOperation>> {
-    taxonomy::list_taxonomy_operations_page(&state.database, cursor.as_deref(), limit.unwrap_or(50))
+    taxonomy::list_taxonomy_operations(&state.database, cursor.as_deref(), limit.unwrap_or(50))
         .map_err(error)
 }
 
@@ -208,7 +208,7 @@ pub fn list_taxonomy_operations_for_batch(
     cursor: Option<String>,
     limit: Option<usize>,
 ) -> CommandResult<TaxonomyPage<TaxonomyOperation>> {
-    taxonomy::list_taxonomy_operations_for_batch_page(
+    taxonomy::list_taxonomy_operations_for_batch(
         &state.database,
         batch_id,
         cursor.as_deref(),

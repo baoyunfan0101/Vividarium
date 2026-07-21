@@ -9,12 +9,12 @@ pub use actions::{
     update_taxon,
 };
 pub use page::TaxonomyPage;
-pub use query::{TaxonNameMatch, TaxonSearchResult, search_taxa, search_taxa_page};
+pub use query::{TaxonNameMatch, TaxonSearchResult, search_taxa};
 
 pub use view::{
     TaxonBreadcrumbItem, TaxonChild, TaxonDetail, TaxonDetailNode, TaxonDisplayNames,
     TaxonIdentifierDetail, TaxonNameDetail, TaxonNamesDetail, TaxonSummary, get_taxon_detail,
-    get_taxon_detail_node, get_taxon_detail_node_page, get_taxon_summary, list_taxon_children,
+    get_taxon_detail_node, get_taxon_summary, list_taxon_children,
 };
 
 use std::collections::BTreeSet;
@@ -307,23 +307,7 @@ pub struct TaxonomyOperation {
     pub reverted_at: Option<String>,
 }
 
-pub fn preview_taxon_rows(
-    database: &Database,
-    rows: &[TaxonInputRow],
-    options: TaxonUpdateOptions,
-) -> CoreResult<TaxonBatchResult> {
-    preview_rows(database, rows, options)
-}
-
-pub fn apply_taxon_rows(
-    database: &Database,
-    rows: &[TaxonInputRow],
-    options: TaxonUpdateOptions,
-) -> CoreResult<TaxonBatchResult> {
-    apply_rows(database, rows, options)
-}
-
-fn preview_rows(
+pub fn preview_rows(
     database: &Database,
     rows: &[TaxonInputRow],
     options: TaxonUpdateOptions,
@@ -345,7 +329,7 @@ fn preview_rows(
     })
 }
 
-fn apply_rows(
+pub fn apply_rows(
     database: &Database,
     rows: &[TaxonInputRow],
     options: TaxonUpdateOptions,
@@ -477,13 +461,6 @@ fn apply_prepared_taxon_plan_with_log<T: Serialize + ?Sized>(
 
 pub fn list_taxonomy_operations(
     database: &Database,
-    limit: usize,
-) -> CoreResult<Vec<TaxonomyOperation>> {
-    Ok(list_taxonomy_operations_page(database, None, limit)?.items)
-}
-
-pub fn list_taxonomy_operations_page(
-    database: &Database,
     cursor: Option<&str>,
     limit: usize,
 ) -> CoreResult<TaxonomyPage<TaxonomyOperation>> {
@@ -535,13 +512,6 @@ pub fn list_taxonomy_operations_page(
 }
 
 pub fn list_taxonomy_operation_batches(
-    database: &Database,
-    limit: usize,
-) -> CoreResult<Vec<TaxonomyOperationBatch>> {
-    Ok(list_taxonomy_operation_batches_page(database, None, limit)?.items)
-}
-
-pub fn list_taxonomy_operation_batches_page(
     database: &Database,
     cursor: Option<&str>,
     limit: usize,
@@ -601,18 +571,11 @@ pub fn list_taxonomy_operation_batches_page(
 pub fn list_taxonomy_operations_for_batch(
     database: &Database,
     batch_id: i64,
-) -> CoreResult<Vec<TaxonomyOperation>> {
-    Ok(list_taxonomy_operations_for_batch_page(database, batch_id, None, usize::MAX)?.items)
-}
-
-pub fn list_taxonomy_operations_for_batch_page(
-    database: &Database,
-    batch_id: i64,
     cursor: Option<&str>,
     limit: usize,
 ) -> CoreResult<TaxonomyPage<TaxonomyOperation>> {
     let connection = database.connect()?;
-    list_taxonomy_operations_for_batch_page_from_connection(&connection, batch_id, cursor, limit)
+    list_taxonomy_operations_for_batch_from_connection(&connection, batch_id, cursor, limit)
 }
 
 fn taxonomy_operation_batch_from_row(
@@ -627,7 +590,7 @@ fn taxonomy_operation_batch_from_row(
     })
 }
 
-fn list_taxonomy_operations_for_batch_page_from_connection(
+fn list_taxonomy_operations_for_batch_from_connection(
     connection: &Connection,
     batch_id: i64,
     cursor: Option<&str>,
@@ -2289,7 +2252,7 @@ mod tests {
     fn creates_a_species_and_derives_its_genus() {
         let (_directory, database) = database();
         let ids = seed_lineage(&database);
-        let result = apply_taxon_rows(
+        let result = apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -2323,7 +2286,7 @@ mod tests {
     fn loads_summary_and_detail_views_for_a_taxon() {
         let (_directory, database) = database();
         let ids = seed_lineage(&database);
-        let created = apply_taxon_rows(
+        let created = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -2402,7 +2365,7 @@ mod tests {
     fn searches_taxa_by_any_name_and_loads_child_summaries() {
         let (_directory, database) = database();
         let ids = seed_lineage(&database);
-        let result = apply_taxon_rows(
+        let result = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -2425,7 +2388,7 @@ mod tests {
         .unwrap();
         let species_id = result.rows[0].target.as_ref().unwrap().taxon_id;
 
-        let matches = search_taxa(&database, "wolf", 10).unwrap();
+        let matches = search_taxa(&database, "wolf", None, 10).unwrap().items;
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].summary.taxon_id, species_id);
         assert_eq!(matches[0].detail.taxon_id, species_id);
@@ -2434,7 +2397,9 @@ mod tests {
         }));
         assert_eq!(matches[0].summary.breadcrumb[3].taxon_id, ids[3]);
 
-        let genus = get_taxon_detail_node(&database, ids[3]).unwrap().unwrap();
+        let genus = get_taxon_detail_node(&database, ids[3], None, 50)
+            .unwrap()
+            .unwrap();
         assert_eq!(genus.summary.taxon_id, ids[3]);
         assert_eq!(genus.children.items.len(), 1);
         assert_eq!(genus.children.items[0].taxon_id, species_id);
@@ -2449,7 +2414,7 @@ mod tests {
     fn pages_taxon_search_and_children_with_cursors() {
         let (_directory, database) = database();
         let ids = seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[
                 species_row_named("Canis lupus"),
@@ -2463,11 +2428,11 @@ mod tests {
         )
         .unwrap();
 
-        let first_matches = search_taxa_page(&database, "Canis", None, 2).unwrap();
+        let first_matches = search_taxa(&database, "Canis", None, 2).unwrap();
         assert_eq!(first_matches.items.len(), 2);
         assert!(first_matches.next_cursor.is_some());
         let second_matches =
-            search_taxa_page(&database, "Canis", first_matches.next_cursor.as_deref(), 2).unwrap();
+            search_taxa(&database, "Canis", first_matches.next_cursor.as_deref(), 2).unwrap();
         assert_eq!(second_matches.items.len(), 2);
         assert!(second_matches.next_cursor.is_none());
         assert!(first_matches.items[1].summary.taxon_id < second_matches.items[0].summary.taxon_id);
@@ -2481,7 +2446,7 @@ mod tests {
         assert_eq!(second_children.items.len(), 1);
         assert!(second_children.next_cursor.is_none());
 
-        let genus = get_taxon_detail_node_page(&database, ids[3], None, 2)
+        let genus = get_taxon_detail_node(&database, ids[3], None, 2)
             .unwrap()
             .unwrap();
         assert_eq!(genus.children.items.len(), 2);
@@ -2492,7 +2457,7 @@ mod tests {
     fn updates_a_taxon_from_query_through_the_shared_operation_log() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        let created = apply_taxon_rows(
+        let created = apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -2524,7 +2489,10 @@ mod tests {
         assert_eq!(updated.outcome.status, TaxonRowStatus::Applied);
         assert!(updated.batch_id.is_some());
         let operation_id = updated.outcome.operation_id.unwrap();
-        let operation = list_taxonomy_operations(&database, 1).unwrap().remove(0);
+        let operation = list_taxonomy_operations(&database, None, 1)
+            .unwrap()
+            .items
+            .remove(0);
         assert_eq!(operation.operation_id, operation_id);
         assert!(operation.changes.iter().any(|change| matches!(
             change,
@@ -2545,7 +2513,7 @@ mod tests {
     fn deletes_a_taxon_name_and_can_revert_it() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        let result = apply_taxon_rows(
+        let result = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -2602,7 +2570,7 @@ mod tests {
     fn deletes_a_leaf_taxon_and_can_revert_it() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        let result = apply_taxon_rows(
+        let result = apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -2657,7 +2625,7 @@ mod tests {
     #[test]
     fn requires_the_immediate_parent_for_non_species_taxa() {
         let (_directory, database) = database();
-        let result = preview_taxon_rows(
+        let result = preview_rows(
             &database,
             &[TaxonInputRow {
                 genus: Some("Canis".into()),
@@ -2677,7 +2645,7 @@ mod tests {
     fn does_not_require_the_parent_when_new_taxa_are_disabled() {
         let (_directory, database) = database();
         let ids = seed_lineage(&database);
-        let result = preview_taxon_rows(
+        let result = preview_rows(
             &database,
             &[TaxonInputRow {
                 genus: Some("Canis".into()),
@@ -2734,7 +2702,7 @@ mod tests {
         drop(connection);
 
         let ambiguous =
-            preview_taxon_rows(&database, &[species_row()], TaxonUpdateOptions::default()).unwrap();
+            preview_rows(&database, &[species_row()], TaxonUpdateOptions::default()).unwrap();
         assert_eq!(ambiguous.rows[0].status, TaxonRowStatus::Ambiguous);
         assert_eq!(ambiguous.rows[0].candidates.len(), 2);
         let first_candidate = ambiguous.rows[0]
@@ -2752,7 +2720,7 @@ mod tests {
             Some("Canidae")
         );
 
-        let filtered = preview_taxon_rows(
+        let filtered = preview_rows(
             &database,
             &[TaxonInputRow {
                 family: Some("Canidae".into()),
@@ -2787,7 +2755,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let result = apply_taxon_rows(
+        let result = apply_rows(
             &database,
             &[TaxonInputRow {
                 family: Some("Felidae".into()),
@@ -2818,7 +2786,7 @@ mod tests {
     fn appends_names_only_when_the_permission_is_enabled() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -2835,7 +2803,7 @@ mod tests {
             }),
             ..TaxonInputRow::default()
         };
-        let blocked = apply_taxon_rows(
+        let blocked = apply_rows(
             &database,
             std::slice::from_ref(&row),
             TaxonUpdateOptions::default(),
@@ -2844,7 +2812,7 @@ mod tests {
         assert_eq!(blocked.batch_id, None);
         assert_eq!(blocked.rows[0].status, TaxonRowStatus::Conflict);
 
-        let applied = apply_taxon_rows(
+        let applied = apply_rows(
             &database,
             &[row],
             TaxonUpdateOptions {
@@ -2865,7 +2833,7 @@ mod tests {
     fn supplements_empty_taxon_metadata_without_permissions() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -2879,7 +2847,7 @@ mod tests {
             geological_range: Some("Holocene".into()),
             ..TaxonInputRow::default()
         };
-        let supplemented = apply_taxon_rows(
+        let supplemented = apply_rows(
             &database,
             std::slice::from_ref(&row),
             TaxonUpdateOptions::default(),
@@ -2901,14 +2869,14 @@ mod tests {
             geological_range: Some("Pleistocene".into()),
             ..TaxonInputRow::default()
         };
-        let blocked = apply_taxon_rows(
+        let blocked = apply_rows(
             &database,
             std::slice::from_ref(&overwrite),
             TaxonUpdateOptions::default(),
         )
         .unwrap();
         assert_eq!(blocked.rows[0].status, TaxonRowStatus::Conflict);
-        let applied = apply_taxon_rows(
+        let applied = apply_rows(
             &database,
             &[overwrite],
             TaxonUpdateOptions {
@@ -2933,7 +2901,7 @@ mod tests {
     fn supplements_empty_name_metadata_without_permissions() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -2942,7 +2910,7 @@ mod tests {
             },
         )
         .unwrap();
-        let supplemented = apply_taxon_rows(
+        let supplemented = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -2983,7 +2951,7 @@ mod tests {
         );
         drop(connection);
 
-        let conflict = apply_taxon_rows(
+        let conflict = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3004,7 +2972,7 @@ mod tests {
     fn switches_the_accepted_name_atomically() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -3022,7 +2990,7 @@ mod tests {
             }),
             ..TaxonInputRow::default()
         };
-        let blocked = apply_taxon_rows(
+        let blocked = apply_rows(
             &database,
             std::slice::from_ref(&row),
             TaxonUpdateOptions {
@@ -3033,7 +3001,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(blocked.rows[0].status, TaxonRowStatus::Conflict);
-        let result = apply_taxon_rows(
+        let result = apply_rows(
             &database,
             &[row],
             TaxonUpdateOptions {
@@ -3059,7 +3027,7 @@ mod tests {
     fn switches_to_an_existing_name_but_never_demotes_without_a_replacement() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -3068,7 +3036,7 @@ mod tests {
             },
         )
         .unwrap();
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3085,7 +3053,7 @@ mod tests {
             },
         )
         .unwrap();
-        let switched = apply_taxon_rows(
+        let switched = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3103,7 +3071,7 @@ mod tests {
         )
         .unwrap();
         assert!(switched.batch_id.is_some());
-        let demotion = apply_taxon_rows(
+        let demotion = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3127,7 +3095,7 @@ mod tests {
     fn commits_valid_rows_when_another_row_is_blocked() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        let result = apply_taxon_rows(
+        let result = apply_rows(
             &database,
             &[
                 species_row(),
@@ -3166,7 +3134,7 @@ mod tests {
     fn does_not_create_empty_operation_batches() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        let result = apply_taxon_rows(
+        let result = apply_rows(
             &database,
             &[
                 TaxonInputRow {
@@ -3211,7 +3179,7 @@ mod tests {
             allow_new_taxa: true,
             ..TaxonUpdateOptions::default()
         };
-        let result = apply_taxon_rows(&database, &inputs, options).unwrap();
+        let result = apply_rows(&database, &inputs, options).unwrap();
         let batch_id = result.batch_id.unwrap();
         let connection = database.connect().unwrap();
         let (context_json, input_json): (String, String) = connection
@@ -3233,7 +3201,9 @@ mod tests {
         );
         drop(connection);
 
-        let batches = list_taxonomy_operation_batches(&database, 10).unwrap();
+        let batches = list_taxonomy_operation_batches(&database, None, 10)
+            .unwrap()
+            .items;
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].batch_id, batch_id);
         assert_eq!(
@@ -3245,11 +3215,13 @@ mod tests {
             inputs
         );
 
-        let batch_operations = list_taxonomy_operations_for_batch(&database, batch_id).unwrap();
+        let batch_operations = list_taxonomy_operations_for_batch(&database, batch_id, None, 10)
+            .unwrap()
+            .items;
         assert_eq!(batch_operations.len(), 1);
         assert_eq!(batch_operations[0].batch_id, batch_id);
 
-        let operations = list_taxonomy_operations(&database, 10).unwrap();
+        let operations = list_taxonomy_operations(&database, None, 10).unwrap().items;
         assert_eq!(operations.len(), 1);
         let operation = &operations[0];
         assert_eq!(operation.row_number, 1);
@@ -3277,7 +3249,7 @@ mod tests {
             allow_new_taxa: true,
             ..TaxonUpdateOptions::default()
         };
-        let first_batch = apply_taxon_rows(
+        let first_batch = apply_rows(
             &database,
             &[
                 species_row_named("Canis lupus"),
@@ -3288,53 +3260,45 @@ mod tests {
         .unwrap()
         .batch_id
         .unwrap();
-        let second_batch =
-            apply_taxon_rows(&database, &[species_row_named("Canis rufus")], options)
-                .unwrap()
-                .batch_id
-                .unwrap();
-        let third_batch =
-            apply_taxon_rows(&database, &[species_row_named("Canis simensis")], options)
-                .unwrap()
-                .batch_id
-                .unwrap();
+        let second_batch = apply_rows(&database, &[species_row_named("Canis rufus")], options)
+            .unwrap()
+            .batch_id
+            .unwrap();
+        let third_batch = apply_rows(&database, &[species_row_named("Canis simensis")], options)
+            .unwrap()
+            .batch_id
+            .unwrap();
 
-        let first_batch_page = list_taxonomy_operation_batches_page(&database, None, 2).unwrap();
+        let first_batch_page = list_taxonomy_operation_batches(&database, None, 2).unwrap();
         assert_eq!(first_batch_page.items.len(), 2);
         assert_eq!(first_batch_page.items[0].batch_id, third_batch);
         assert_eq!(first_batch_page.items[1].batch_id, second_batch);
         assert!(first_batch_page.next_cursor.is_some());
-        let second_batch_page = list_taxonomy_operation_batches_page(
-            &database,
-            first_batch_page.next_cursor.as_deref(),
-            2,
-        )
-        .unwrap();
+        let second_batch_page =
+            list_taxonomy_operation_batches(&database, first_batch_page.next_cursor.as_deref(), 2)
+                .unwrap();
         assert_eq!(second_batch_page.items.len(), 1);
         assert_eq!(second_batch_page.items[0].batch_id, first_batch);
         assert!(second_batch_page.next_cursor.is_none());
 
-        let first_operation_page = list_taxonomy_operations_page(&database, None, 2).unwrap();
+        let first_operation_page = list_taxonomy_operations(&database, None, 2).unwrap();
         assert_eq!(first_operation_page.items.len(), 2);
         assert!(
             first_operation_page.items[0].operation_id > first_operation_page.items[1].operation_id
         );
         assert!(first_operation_page.next_cursor.is_some());
-        let second_operation_page = list_taxonomy_operations_page(
-            &database,
-            first_operation_page.next_cursor.as_deref(),
-            2,
-        )
-        .unwrap();
+        let second_operation_page =
+            list_taxonomy_operations(&database, first_operation_page.next_cursor.as_deref(), 2)
+                .unwrap();
         assert_eq!(second_operation_page.items.len(), 2);
         assert!(second_operation_page.next_cursor.is_none());
 
         let first_batch_operations =
-            list_taxonomy_operations_for_batch_page(&database, first_batch, None, 1).unwrap();
+            list_taxonomy_operations_for_batch(&database, first_batch, None, 1).unwrap();
         assert_eq!(first_batch_operations.items.len(), 1);
         assert_eq!(first_batch_operations.items[0].row_number, 1);
         assert!(first_batch_operations.next_cursor.is_some());
-        let second_batch_operations = list_taxonomy_operations_for_batch_page(
+        let second_batch_operations = list_taxonomy_operations_for_batch(
             &database,
             first_batch,
             first_batch_operations.next_cursor.as_deref(),
@@ -3350,7 +3314,7 @@ mod tests {
     fn reverts_operations_one_at_a_time() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        let created = apply_taxon_rows(
+        let created = apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -3360,7 +3324,7 @@ mod tests {
         )
         .unwrap();
         let create_operation = created.rows[0].operation_id.unwrap();
-        let appended = apply_taxon_rows(
+        let appended = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3396,7 +3360,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(species_count, 0);
-        let operations = list_taxonomy_operations(&database, 10).unwrap();
+        let operations = list_taxonomy_operations(&database, None, 10).unwrap().items;
         assert_eq!(operations.len(), 2);
         assert!(
             operations
@@ -3409,7 +3373,7 @@ mod tests {
     fn reverts_an_accepted_name_switch_from_row_level_changes() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -3418,7 +3382,7 @@ mod tests {
             },
         )
         .unwrap();
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3435,7 +3399,7 @@ mod tests {
             },
         )
         .unwrap();
-        let switched = apply_taxon_rows(
+        let switched = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3453,7 +3417,10 @@ mod tests {
         )
         .unwrap();
         let operation_id = switched.rows[0].operation_id.unwrap();
-        let operation = list_taxonomy_operations(&database, 1).unwrap().remove(0);
+        let operation = list_taxonomy_operations(&database, None, 1)
+            .unwrap()
+            .items
+            .remove(0);
         assert_eq!(
             operation
                 .changes
@@ -3479,7 +3446,7 @@ mod tests {
     fn after_hash_blocks_revert_when_an_unrelated_taxon_field_changes() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -3488,7 +3455,7 @@ mod tests {
             },
         )
         .unwrap();
-        let appended = apply_taxon_rows(
+        let appended = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3522,7 +3489,7 @@ mod tests {
     fn refuses_to_revert_over_later_taxon_changes() {
         let (_directory, database) = database();
         seed_lineage(&database);
-        apply_taxon_rows(
+        apply_rows(
             &database,
             &[species_row()],
             TaxonUpdateOptions {
@@ -3531,7 +3498,7 @@ mod tests {
             },
         )
         .unwrap();
-        let first = apply_taxon_rows(
+        let first = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),
@@ -3544,7 +3511,7 @@ mod tests {
             },
         )
         .unwrap();
-        let second = apply_taxon_rows(
+        let second = apply_rows(
             &database,
             &[TaxonInputRow {
                 species: Some("Canis lupus".into()),

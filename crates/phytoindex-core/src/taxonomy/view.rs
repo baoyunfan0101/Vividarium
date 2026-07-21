@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     TaxonRank, TaxonomyNameKind,
     page::{
-        DEFAULT_PAGE_LIMIT, TaxonomyCursor, TaxonomyPage, decode_cursor, encode_cursor,
-        invalid_cursor, page_limit,
+        TaxonomyCursor, TaxonomyPage, decode_cursor, encode_cursor, invalid_cursor, page_limit,
     },
     parse_rank,
 };
@@ -92,13 +91,6 @@ pub fn get_taxon_detail(database: &Database, taxon_id: i64) -> CoreResult<Option
 }
 
 pub fn get_taxon_detail_node(
-    database: &Database,
-    taxon_id: i64,
-) -> CoreResult<Option<TaxonDetailNode>> {
-    get_taxon_detail_node_page(database, taxon_id, None, DEFAULT_PAGE_LIMIT)
-}
-
-pub fn get_taxon_detail_node_page(
     database: &Database,
     taxon_id: i64,
     children_cursor: Option<&str>,
