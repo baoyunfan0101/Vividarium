@@ -365,66 +365,82 @@ fn load_taxon_children(
     };
     let limit = page_limit(limit);
     let fetch_limit = limit + 1;
-    let mut statement = connection.prepare(
-        r#"
-        SELECT
-            taxa.taxon_id,
-            taxa.rank,
-            COALESCE(
-                (SELECT scientific_name FROM scientific
-                 WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                (SELECT scientific_name FROM scientific
-                 WHERE scientific.taxon_id = taxa.taxon_id
-                 ORDER BY scientific_name LIMIT 1)
-            ),
-            COALESCE(
-                (SELECT english_name FROM english
-                 WHERE english.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                (SELECT english_name FROM english
-                 WHERE english.taxon_id = taxa.taxon_id
-                 ORDER BY english_name LIMIT 1)
-            ),
-            COALESCE(
-                (SELECT chinese_name FROM chinese
-                 WHERE chinese.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                (SELECT chinese_name FROM chinese
-                 WHERE chinese.taxon_id = taxa.taxon_id
-                 ORDER BY chinese_name LIMIT 1)
-            )
-        FROM taxa
-        WHERE parent_taxon_id = ?1
-          AND (?2 IS NULL OR rank > ?2 OR (rank = ?2 AND taxon_id > ?3))
-        ORDER BY rank, taxon_id
-        LIMIT ?4
-        "#,
-    )?;
-    let (cursor_rank, cursor_taxon_id) = child_cursor
-        .map(|(rank, taxon_id)| (Some(rank), Some(taxon_id)))
-        .unwrap_or((None, None));
-    let rows = statement.query_map(
-        params![taxon_id, cursor_rank, cursor_taxon_id, fetch_limit as i64],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                TaxonDisplayNames {
-                    scientific: row.get(2)?,
-                    english: row.get(3)?,
-                    chinese: row.get(4)?,
-                },
-            ))
-        },
-    )?;
-    let mut items = rows
-        .map(|row| {
-            let (taxon_id, rank, names) = row?;
-            Ok(TaxonChild {
-                taxon_id,
-                rank: parse_rank(&rank)?,
-                names,
-            })
-        })
-        .collect::<CoreResult<Vec<_>>>()?;
+    let mut items = if let Some((cursor_rank, cursor_taxon_id)) = child_cursor {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT
+                taxa.taxon_id,
+                taxa.rank,
+                COALESCE(
+                    (SELECT scientific_name FROM scientific
+                    WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                    (SELECT scientific_name FROM scientific
+                    WHERE scientific.taxon_id = taxa.taxon_id
+                    ORDER BY scientific_name LIMIT 1)
+                ),
+                COALESCE(
+                    (SELECT english_name FROM english
+                    WHERE english.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                    (SELECT english_name FROM english
+                    WHERE english.taxon_id = taxa.taxon_id
+                    ORDER BY english_name LIMIT 1)
+                ),
+                COALESCE(
+                    (SELECT chinese_name FROM chinese
+                    WHERE chinese.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                    (SELECT chinese_name FROM chinese
+                    WHERE chinese.taxon_id = taxa.taxon_id
+                    ORDER BY chinese_name LIMIT 1)
+                )
+            FROM taxa
+            WHERE parent_taxon_id = ?1 AND (rank, taxon_id) > (?2, ?3)
+            ORDER BY rank, taxon_id
+            LIMIT ?4
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![taxon_id, cursor_rank, cursor_taxon_id, fetch_limit as i64],
+            taxon_child_row,
+        )?;
+        rows.map(taxon_child_from_row)
+            .collect::<CoreResult<Vec<_>>>()?
+    } else {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT
+                taxa.taxon_id,
+                taxa.rank,
+                COALESCE(
+                    (SELECT scientific_name FROM scientific
+                    WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                    (SELECT scientific_name FROM scientific
+                    WHERE scientific.taxon_id = taxa.taxon_id
+                    ORDER BY scientific_name LIMIT 1)
+                ),
+                COALESCE(
+                    (SELECT english_name FROM english
+                    WHERE english.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                    (SELECT english_name FROM english
+                    WHERE english.taxon_id = taxa.taxon_id
+                    ORDER BY english_name LIMIT 1)
+                ),
+                COALESCE(
+                    (SELECT chinese_name FROM chinese
+                    WHERE chinese.taxon_id = taxa.taxon_id AND is_accepted = 1),
+                    (SELECT chinese_name FROM chinese
+                    WHERE chinese.taxon_id = taxa.taxon_id
+                    ORDER BY chinese_name LIMIT 1)
+                )
+            FROM taxa
+            WHERE parent_taxon_id = ?1
+            ORDER BY rank, taxon_id
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = statement.query_map(params![taxon_id, fetch_limit as i64], taxon_child_row)?;
+        rows.map(taxon_child_from_row)
+            .collect::<CoreResult<Vec<_>>>()?
+    };
     let next_cursor = if items.len() > limit {
         items.truncate(limit);
         items.last().map(|child| {
@@ -439,6 +455,29 @@ fn load_taxon_children(
     }
     .transpose()?;
     Ok(TaxonomyPage { items, next_cursor })
+}
+
+fn taxon_child_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, TaxonDisplayNames)> {
+    Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, String>(1)?,
+        TaxonDisplayNames {
+            scientific: row.get(2)?,
+            english: row.get(3)?,
+            chinese: row.get(4)?,
+        },
+    ))
+}
+
+fn taxon_child_from_row(
+    row: rusqlite::Result<(i64, String, TaxonDisplayNames)>,
+) -> CoreResult<TaxonChild> {
+    let (taxon_id, rank, names) = row?;
+    Ok(TaxonChild {
+        taxon_id,
+        rank: parse_rank(&rank)?,
+        names,
+    })
 }
 
 fn load_taxon_bases(connection: &Connection, taxon_ids: &[i64]) -> CoreResult<Vec<TaxonBase>> {

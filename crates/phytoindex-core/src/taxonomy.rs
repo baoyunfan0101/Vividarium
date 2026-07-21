@@ -472,31 +472,37 @@ pub fn list_taxonomy_operations(
     };
     let limit = page_limit(limit);
     let fetch_limit = limit + 1;
-    let mut statement = connection.prepare(
-        r#"
-        SELECT operation_id, batch_id, row_number, status, changes_json,
-               after_hash, applied_at, reverted_at
-        FROM taxonomy_operations
-        WHERE (?1 IS NULL OR operation_id < ?1)
-        ORDER BY operation_id DESC
-        LIMIT ?2
-        "#,
-    )?;
-    let rows = statement.query_map(params![cursor_operation_id, fetch_limit as i64], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, Option<String>>(7)?,
-        ))
-    })?;
-    let mut items = rows
-        .map(taxonomy_operation_from_row)
-        .collect::<CoreResult<Vec<_>>>()?;
+    let mut items = if let Some(cursor_operation_id) = cursor_operation_id {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT operation_id, batch_id, row_number, status, changes_json,
+                   after_hash, applied_at, reverted_at
+            FROM taxonomy_operations
+            WHERE operation_id < ?1
+            ORDER BY operation_id DESC
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![cursor_operation_id, fetch_limit as i64],
+            taxonomy_operation_row,
+        )?;
+        rows.map(taxonomy_operation_from_row)
+            .collect::<CoreResult<Vec<_>>>()?
+    } else {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT operation_id, batch_id, row_number, status, changes_json,
+                   after_hash, applied_at, reverted_at
+            FROM taxonomy_operations
+            ORDER BY operation_id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map([fetch_limit as i64], taxonomy_operation_row)?;
+        rows.map(taxonomy_operation_from_row)
+            .collect::<CoreResult<Vec<_>>>()?
+    };
     let next_cursor = if items.len() > limit {
         items.truncate(limit);
         items.last().map(|operation| {
@@ -527,32 +533,35 @@ pub fn list_taxonomy_operation_batches(
     };
     let limit = page_limit(limit);
     let fetch_limit = limit + 1;
-    let mut statement = connection.prepare(
-        r#"
-        SELECT batch_id, context_json, input_json, created_at
-        FROM taxonomy_operation_batches
-        WHERE (?1 IS NULL OR created_at < ?1 OR (created_at = ?1 AND batch_id < ?2))
-        ORDER BY created_at DESC, batch_id DESC
-        LIMIT ?3
-        "#,
-    )?;
-    let (cursor_created_at, cursor_batch_id) = batch_cursor
-        .map(|(created_at, batch_id)| (Some(created_at), Some(batch_id)))
-        .unwrap_or((None, None));
-    let rows = statement.query_map(
-        params![cursor_created_at, cursor_batch_id, fetch_limit as i64],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        },
-    )?;
-    let mut items = rows
-        .map(taxonomy_operation_batch_from_row)
-        .collect::<CoreResult<Vec<_>>>()?;
+    let mut items = if let Some((cursor_created_at, cursor_batch_id)) = batch_cursor {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT batch_id, context_json, input_json, created_at
+            FROM taxonomy_operation_batches
+            WHERE (created_at, batch_id) < (?1, ?2)
+            ORDER BY created_at DESC, batch_id DESC
+            LIMIT ?3
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![cursor_created_at, cursor_batch_id, fetch_limit as i64],
+            taxonomy_operation_batch_row,
+        )?;
+        rows.map(taxonomy_operation_batch_from_row)
+            .collect::<CoreResult<Vec<_>>>()?
+    } else {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT batch_id, context_json, input_json, created_at
+            FROM taxonomy_operation_batches
+            ORDER BY created_at DESC, batch_id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map([fetch_limit as i64], taxonomy_operation_batch_row)?;
+        rows.map(taxonomy_operation_batch_from_row)
+            .collect::<CoreResult<Vec<_>>>()?
+    };
     let next_cursor = if items.len() > limit {
         items.truncate(limit);
         items.last().map(|batch| {
@@ -590,6 +599,17 @@ fn taxonomy_operation_batch_from_row(
     })
 }
 
+fn taxonomy_operation_batch_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(i64, String, String, String)> {
+    Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?,
+    ))
+}
+
 fn list_taxonomy_operations_for_batch_from_connection(
     connection: &Connection,
     batch_id: i64,
@@ -607,43 +627,46 @@ fn list_taxonomy_operations_for_batch_from_connection(
     };
     let limit = page_limit(limit);
     let fetch_limit = limit + 1;
-    let mut statement = connection.prepare(
-        r#"
-        SELECT operation_id, batch_id, row_number, status, changes_json,
-               after_hash, applied_at, reverted_at
-        FROM taxonomy_operations
-        WHERE batch_id = ?1
-          AND (?2 IS NULL OR row_number > ?2 OR (row_number = ?2 AND operation_id > ?3))
-        ORDER BY row_number, operation_id
-        LIMIT ?4
-        "#,
-    )?;
-    let (cursor_row_number, cursor_operation_id) = operation_cursor
-        .map(|(row_number, operation_id)| (Some(row_number), Some(operation_id)))
-        .unwrap_or((None, None));
-    let rows = statement.query_map(
-        params![
-            batch_id,
-            cursor_row_number,
-            cursor_operation_id,
-            fetch_limit as i64
-        ],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<String>>(7)?,
-            ))
-        },
-    )?;
-    let mut items = rows
-        .map(taxonomy_operation_from_row)
-        .collect::<CoreResult<Vec<_>>>()?;
+    let mut items = if let Some((cursor_row_number, cursor_operation_id)) = operation_cursor {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT operation_id, batch_id, row_number, status, changes_json,
+                   after_hash, applied_at, reverted_at
+            FROM taxonomy_operations
+            WHERE batch_id = ?1 AND (row_number, operation_id) > (?2, ?3)
+            ORDER BY row_number, operation_id
+            LIMIT ?4
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                batch_id,
+                cursor_row_number,
+                cursor_operation_id,
+                fetch_limit as i64
+            ],
+            taxonomy_operation_row,
+        )?;
+        rows.map(taxonomy_operation_from_row)
+            .collect::<CoreResult<Vec<_>>>()?
+    } else {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT operation_id, batch_id, row_number, status, changes_json,
+                   after_hash, applied_at, reverted_at
+            FROM taxonomy_operations
+            WHERE batch_id = ?1
+            ORDER BY row_number, operation_id
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![batch_id, fetch_limit as i64],
+            taxonomy_operation_row,
+        )?;
+        rows.map(taxonomy_operation_from_row)
+            .collect::<CoreResult<Vec<_>>>()?
+    };
     let next_cursor = if items.len() > limit {
         items.truncate(limit);
         items.last().map(|operation| {
@@ -692,6 +715,30 @@ fn taxonomy_operation_from_row(
         applied_at,
         reverted_at,
     })
+}
+
+fn taxonomy_operation_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(
+    i64,
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+)> {
+    Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, i64>(1)?,
+        row.get::<_, i64>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, String>(4)?,
+        row.get::<_, String>(5)?,
+        row.get::<_, String>(6)?,
+        row.get::<_, Option<String>>(7)?,
+    ))
 }
 
 pub fn revert_taxonomy_operation(database: &Database, operation_id: i64) -> CoreResult<()> {

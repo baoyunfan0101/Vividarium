@@ -61,33 +61,58 @@ fn search_taxa_with_connection(
     };
     let limit = page_limit(limit);
     let fetch_limit = limit + 1;
-    let mut statement = connection.prepare(
-        r#"
-        WITH matches(taxon_id) AS (
-            SELECT taxon_id FROM scientific WHERE scientific_name LIKE ?1 ESCAPE '\'
-            UNION
-            SELECT taxon_id FROM english WHERE english_name LIKE ?2 ESCAPE '\'
-            UNION
-            SELECT taxon_id FROM chinese WHERE chinese_name LIKE ?3 ESCAPE '\'
-        )
-        SELECT taxon_id
-        FROM matches
-        WHERE (?4 IS NULL OR taxon_id > ?4)
-        ORDER BY taxon_id
-        LIMIT ?5
-        "#,
-    )?;
-    let rows = statement.query_map(
-        params![
-            pattern,
-            pattern,
-            pattern,
-            cursor_taxon_id,
-            fetch_limit as i64
-        ],
-        |row| row.get::<_, i64>(0),
-    )?;
-    let mut ids = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut ids = if let Some(cursor_taxon_id) = cursor_taxon_id {
+        let mut statement = connection.prepare(
+            r#"
+            WITH matches(taxon_id) AS (
+                SELECT taxon_id FROM scientific
+                WHERE taxon_id > ?4 AND scientific_name LIKE ?1 ESCAPE '\'
+                UNION
+                SELECT taxon_id FROM english
+                WHERE taxon_id > ?4 AND english_name LIKE ?2 ESCAPE '\'
+                UNION
+                SELECT taxon_id FROM chinese
+                WHERE taxon_id > ?4 AND chinese_name LIKE ?3 ESCAPE '\'
+            )
+            SELECT taxon_id
+            FROM matches
+            ORDER BY taxon_id
+            LIMIT ?5
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                pattern,
+                pattern,
+                pattern,
+                cursor_taxon_id,
+                fetch_limit as i64
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    } else {
+        let mut statement = connection.prepare(
+            r#"
+            WITH matches(taxon_id) AS (
+                SELECT taxon_id FROM scientific WHERE scientific_name LIKE ?1 ESCAPE '\'
+                UNION
+                SELECT taxon_id FROM english WHERE english_name LIKE ?2 ESCAPE '\'
+                UNION
+                SELECT taxon_id FROM chinese WHERE chinese_name LIKE ?3 ESCAPE '\'
+            )
+            SELECT taxon_id
+            FROM matches
+            ORDER BY taxon_id
+            LIMIT ?4
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![pattern, pattern, pattern, fetch_limit as i64],
+            |row| row.get::<_, i64>(0),
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
     let next_cursor = if ids.len() > limit {
         ids.truncate(limit);
         ids.last().map(|taxon_id| {
