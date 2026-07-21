@@ -8,8 +8,8 @@ use phytoindex_core::models::{
 };
 use phytoindex_core::taxonomy::{
     DeleteTaxonNameInput, TaxonChild, TaxonDetailNode, TaxonSearchResult, TaxonUpdateInput,
-    TaxonUpdateOptions, TaxonomyActionResult, TaxonomyCustomSqlResult, TaxonomyOperation,
-    TaxonomyOperationBatch, TaxonomyPage, TaxonomyUpdateActionResult,
+    TaxonUpdateOptions, TaxonomyActionResult, TaxonomyCustomSqlResult, TaxonomyCustomSqlTempTable,
+    TaxonomyOperation, TaxonomyOperationBatch, TaxonomyPage, TaxonomyUpdateActionResult,
 };
 use phytoindex_core::{export, mapping, photos, taxa, taxonomy};
 use serde_json::{Value, json};
@@ -166,8 +166,9 @@ pub fn delete_taxon(
 pub fn execute_custom_taxonomy_sql(
     state: State<'_, AppState>,
     sql: String,
+    input: Option<TaxonomyCustomSqlTempTable>,
 ) -> CommandResult<TaxonomyCustomSqlResult> {
-    taxonomy::execute_custom_taxonomy_sql(&state.database, &sql).map_err(error)
+    taxonomy::execute_custom_taxonomy_sql(&state.database, &sql, input).map_err(error)
 }
 
 #[tauri::command]
