@@ -5,7 +5,7 @@ use super::{
     ExistingTaxonUpdate, TaxonIdentifierLogRecord, TaxonLogRecord, TaxonNameInput,
     TaxonNameLogRecord, TaxonRank, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
     TaxonomyLogChange, TaxonomyNameKind, apply_existing_taxon_update_with_log, hash_affected_taxa,
-    insert_operation_batch, insert_operation_log,
+    insert_operation_batch, insert_operation_log, normalize_name,
 };
 use crate::{CoreError, CoreResult, Database};
 
@@ -55,8 +55,14 @@ struct CustomSqlInput<'a> {
 
 pub fn delete_taxon_name(
     database: &Database,
-    input: DeleteTaxonNameInput,
+    mut input: DeleteTaxonNameInput,
 ) -> CoreResult<TaxonomyActionResult> {
+    input.name = normalize_name(Some(&input.name))
+        .ok_or_else(|| CoreError::InvalidArgument("name is required".into()))?;
+    input.replacement_accepted_name = input
+        .replacement_accepted_name
+        .as_deref()
+        .and_then(|value| normalize_name(Some(value)));
     let mut connection = database.connect()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     ensure_taxon_exists(&transaction, input.taxon_id)?;
@@ -74,16 +80,11 @@ pub fn delete_taxon_name(
         count_other_names(&transaction, input.taxon_id, input.name_kind, &input.name)?;
 
     if before.is_accepted && remaining_names > 0 {
-        let replacement = input
-            .replacement_accepted_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                CoreError::InvalidArgument(
-                    "deleting an accepted name requires replacement_accepted_name".into(),
-                )
-            })?;
+        let replacement = input.replacement_accepted_name.as_deref().ok_or_else(|| {
+            CoreError::InvalidArgument(
+                "deleting an accepted name requires replacement_accepted_name".into(),
+            )
+        })?;
         if replacement == input.name {
             return Err(CoreError::InvalidArgument(
                 "replacement_accepted_name must differ from the deleted name".into(),
@@ -107,11 +108,7 @@ pub fn delete_taxon_name(
             before: replacement_before,
             after: replacement_after,
         });
-    } else if input
-        .replacement_accepted_name
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
+    } else if input.replacement_accepted_name.as_deref().is_some() {
         return Err(CoreError::InvalidArgument(
             "replacement_accepted_name is only valid when deleting an accepted name".into(),
         ));

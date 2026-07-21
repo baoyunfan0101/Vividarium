@@ -15,10 +15,6 @@ pub struct TaxonomyPage<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum TaxonomyCursor {
-    TaxonSearch {
-        query: String,
-        taxon_id: i64,
-    },
     TaxonChildren {
         parent_taxon_id: i64,
         rank: TaxonRank,

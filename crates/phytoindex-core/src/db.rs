@@ -113,19 +113,43 @@ CREATE TABLE IF NOT EXISTS taxa (
 );
 
 CREATE TABLE IF NOT EXISTS taxon_names (
+    name_id INTEGER PRIMARY KEY AUTOINCREMENT,
     taxon_id INTEGER NOT NULL,
     name_kind INTEGER NOT NULL,
     name TEXT NOT NULL,
+    name_search TEXT GENERATED ALWAYS AS (lower(name)) STORED,
     is_accepted INTEGER NOT NULL DEFAULT 0,
     authority_year TEXT,
     category TEXT,
     source TEXT,
-    PRIMARY KEY (taxon_id, name_kind, name),
+    UNIQUE (taxon_id, name_kind, name),
     CHECK (name_kind IN (1, 2, 3)),
     CHECK (is_accepted IN (0, 1)),
     CHECK (length(trim(name)) > 0),
     FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS taxon_names_fts USING fts5(
+    name,
+    content = 'taxon_names',
+    content_rowid = 'name_id',
+    tokenize = 'trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS taxon_names_ai AFTER INSERT ON taxon_names BEGIN
+    INSERT INTO taxon_names_fts(rowid, name) VALUES (new.name_id, new.name);
+END;
+
+CREATE TRIGGER IF NOT EXISTS taxon_names_ad AFTER DELETE ON taxon_names BEGIN
+    INSERT INTO taxon_names_fts(taxon_names_fts, rowid, name)
+    VALUES ('delete', old.name_id, old.name);
+END;
+
+CREATE TRIGGER IF NOT EXISTS taxon_names_au AFTER UPDATE OF name ON taxon_names BEGIN
+    INSERT INTO taxon_names_fts(taxon_names_fts, rowid, name)
+    VALUES ('delete', old.name_id, old.name);
+    INSERT INTO taxon_names_fts(rowid, name) VALUES (new.name_id, new.name);
+END;
 
 CREATE TABLE IF NOT EXISTS taxon_identifiers (
     taxon_id INTEGER NOT NULL,
@@ -190,6 +214,7 @@ CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
 CREATE INDEX IF NOT EXISTS idx_taxon_names_kind_name ON taxon_names(name_kind, name);
 CREATE INDEX IF NOT EXISTS idx_taxon_names_kind_taxon ON taxon_names(name_kind, taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxon_names_name ON taxon_names(name);
+CREATE INDEX IF NOT EXISTS idx_taxon_names_name_search ON taxon_names(name_search, taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxon_identifiers_taxon ON taxon_identifiers(taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_batch
     ON taxonomy_operations(batch_id, row_number);
@@ -295,6 +320,7 @@ mod tests {
         for table in [
             "taxa",
             "taxon_names",
+            "taxon_names_fts",
             "taxon_identifiers",
             "taxonomy_operation_batches",
             "taxonomy_operations",
@@ -312,6 +338,7 @@ mod tests {
         assert_eq!(
             name_columns,
             [
+                "name_id",
                 "taxon_id",
                 "name_kind",
                 "name",

@@ -862,11 +862,11 @@ impl NormalizedPath {
     fn from_row(row: &TaxonInputRow) -> Self {
         Self {
             values: [
-                normalize(row.kingdom.as_deref()),
-                normalize(row.order.as_deref()),
-                normalize(row.family.as_deref()),
-                normalize(row.genus.as_deref()),
-                normalize(row.species.as_deref()),
+                normalize_name(row.kingdom.as_deref()),
+                normalize_name(row.order.as_deref()),
+                normalize_name(row.family.as_deref()),
+                normalize_name(row.genus.as_deref()),
+                normalize_name(row.species.as_deref()),
             ],
         }
     }
@@ -1203,7 +1203,9 @@ fn prepare_new_taxon_names(
 ) -> Result<Vec<NamePlan>, RowIssue> {
     let mut names = Vec::new();
     match row.scientific.as_ref() {
-        Some(input) if normalize(Some(&input.name)).as_deref() == Some(locator_name.as_str()) => {
+        Some(input)
+            if normalize_name(Some(&input.name)).as_deref() == Some(locator_name.as_str()) =>
+        {
             if input.is_accepted == Some(false) {
                 return Err(RowIssue::new(
                     TaxonRowStatus::Conflict,
@@ -1268,7 +1270,7 @@ fn insert_name_plan(
     is_accepted: bool,
     changes: &mut Vec<TaxonChange>,
 ) -> Result<NamePlan, RowIssue> {
-    if name.trim().is_empty() {
+    if name.is_empty() {
         return Err(RowIssue::new(
             TaxonRowStatus::Invalid,
             format!("{} name cannot be empty", kind.as_str()),
@@ -2251,11 +2253,18 @@ fn count_names(
 }
 
 fn required_name(input: &TaxonNameInput) -> Result<String, RowIssue> {
-    normalize(Some(&input.name)).ok_or_else(|| {
+    normalize_name(Some(&input.name)).ok_or_else(|| {
         RowIssue::new(
             TaxonRowStatus::Invalid,
             "a supplied name group must include a non-empty name",
         )
+    })
+}
+
+pub(super) fn normalize_name(value: Option<&str>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!value.is_empty()).then_some(value)
     })
 }
 
@@ -2469,7 +2478,7 @@ mod tests {
         .unwrap();
         let species_id = result.rows[0].target.as_ref().unwrap().taxon_id;
 
-        let matches = search_taxa(&database, "wolf", None, 10).unwrap().items;
+        let matches = search_taxa(&database, "wolf", 10).unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].summary.taxon_id, species_id);
         assert_eq!(matches[0].detail.taxon_id, species_id);
@@ -2477,6 +2486,15 @@ mod tests {
             value.name_kind == TaxonomyNameKind::English && value.name == "gray wolf"
         }));
         assert_eq!(matches[0].summary.breadcrumb[3].taxon_id, ids[3]);
+
+        let word_prefix_matches = search_taxa(&database, "lu", 10).unwrap();
+        assert_eq!(word_prefix_matches.len(), 1);
+        assert_eq!(word_prefix_matches[0].summary.taxon_id, species_id);
+
+        assert!(search_taxa(&database, "up", 10).unwrap().is_empty());
+        let contains_matches = search_taxa(&database, "upu", 10).unwrap();
+        assert_eq!(contains_matches.len(), 1);
+        assert_eq!(contains_matches[0].summary.taxon_id, species_id);
 
         let genus = get_taxon_detail_node(&database, ids[3], None, 50)
             .unwrap()
@@ -2492,7 +2510,52 @@ mod tests {
     }
 
     #[test]
-    fn pages_taxon_search_and_children_with_cursors() {
+    fn normalizes_name_input_and_search_whitespace() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        let result = apply_rows(
+            &database,
+            &[TaxonInputRow {
+                species: Some("  Canis   lupus  ".into()),
+                english: Some(TaxonNameInput {
+                    name: " gray\t\n wolf ".into(),
+                    ..TaxonNameInput::default()
+                }),
+                ..TaxonInputRow::default()
+            }],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                allow_new_names: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let taxon_id = result.rows[0].target.as_ref().unwrap().taxon_id;
+        let connection = database.connect().unwrap();
+        let scientific: String = connection
+            .query_row(
+                "SELECT name FROM taxon_names WHERE taxon_id = ? AND name_kind = 1",
+                [taxon_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let english: String = connection
+            .query_row(
+                "SELECT name FROM taxon_names WHERE taxon_id = ? AND name_kind = 2",
+                [taxon_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(scientific, "Canis lupus");
+        assert_eq!(english, "gray wolf");
+
+        let matches = search_taxa(&database, " canis   lu ", 10).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].summary.taxon_id, taxon_id);
+    }
+
+    #[test]
+    fn limits_taxon_search_and_pages_children_with_cursors() {
         let (_directory, database) = database();
         let ids = seed_lineage(&database);
         apply_rows(
@@ -2509,14 +2572,12 @@ mod tests {
         )
         .unwrap();
 
-        let first_matches = search_taxa(&database, "Canis", None, 2).unwrap();
-        assert_eq!(first_matches.items.len(), 2);
-        assert!(first_matches.next_cursor.is_some());
-        let second_matches =
-            search_taxa(&database, "Canis", first_matches.next_cursor.as_deref(), 2).unwrap();
-        assert_eq!(second_matches.items.len(), 2);
-        assert!(second_matches.next_cursor.is_none());
-        assert!(first_matches.items[1].summary.taxon_id < second_matches.items[0].summary.taxon_id);
+        let exact_matches = search_taxa(&database, "Canis", 1).unwrap();
+        assert_eq!(exact_matches.len(), 1);
+        assert_eq!(exact_matches[0].summary.taxon_id, ids[3]);
+
+        let limited_matches = search_taxa(&database, "Canis", 2).unwrap();
+        assert_eq!(limited_matches.len(), 2);
 
         let first_children = list_taxon_children(&database, ids[3], None, 2).unwrap();
         assert_eq!(first_children.items.len(), 2);

@@ -99,16 +99,9 @@ pub fn save_knowledge_base_path(
 pub fn search_taxa(
     state: State<'_, AppState>,
     query: String,
-    cursor: Option<String>,
     limit: Option<usize>,
-) -> CommandResult<TaxonomyPage<TaxonSearchResult>> {
-    taxonomy::search_taxa(
-        &state.database,
-        &query,
-        cursor.as_deref(),
-        limit.unwrap_or(50),
-    )
-    .map_err(error)
+) -> CommandResult<Vec<TaxonSearchResult>> {
+    taxonomy::search_taxa(&state.database, &query, limit.unwrap_or(50)).map_err(error)
 }
 
 #[tauri::command]
