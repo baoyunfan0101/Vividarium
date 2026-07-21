@@ -276,7 +276,12 @@ fn taxon_id_for_photo(transaction: &Transaction<'_>, photo: &Photo) -> CoreResul
     }
     let Some(source_id) = transaction
         .query_row(
-            "SELECT taxon_id FROM scientific WHERE scientific_name = ? ORDER BY is_accepted DESC, taxon_id",
+            r#"
+            SELECT taxon_id
+            FROM taxon_names
+            WHERE name_kind = 'scientific' AND name = ?
+            ORDER BY is_accepted DESC, taxon_id
+            "#,
             [binomial_name],
             |row| row.get::<_, i64>(0),
         )

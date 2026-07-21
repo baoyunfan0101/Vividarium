@@ -65,7 +65,7 @@ pub fn delete_taxon_name(
         .ok_or_else(|| {
             CoreError::NotFound(format!(
                 "{} name '{}' for taxon {}",
-                input.name_kind.table(),
+                input.name_kind.as_str(),
                 input.name,
                 input.taxon_id
             ))
@@ -94,7 +94,7 @@ pub fn delete_taxon_name(
                 .ok_or_else(|| {
                     CoreError::NotFound(format!(
                         "replacement {} name '{}' for taxon {}",
-                        input.name_kind.table(),
+                        input.name_kind.as_str(),
                         replacement,
                         input.taxon_id
                     ))
@@ -287,22 +287,25 @@ fn load_name_record(
     kind: TaxonomyNameKind,
     name: &str,
 ) -> CoreResult<Option<TaxonNameLogRecord>> {
-    let sql = format!(
-        "SELECT is_accepted, authority_year, category, source FROM {} WHERE taxon_id = ? AND {} = ?",
-        kind.table(),
-        kind.column()
-    );
     Ok(transaction
-        .query_row(&sql, params![taxon_id, name], |row| {
-            Ok(TaxonNameLogRecord {
-                taxon_id,
-                name: name.to_string(),
-                is_accepted: row.get::<_, i64>(0)? != 0,
-                authority_year: row.get(1)?,
-                category: row.get(2)?,
-                source: row.get(3)?,
-            })
-        })
+        .query_row(
+            r#"
+            SELECT is_accepted, authority_year, category, source
+            FROM taxon_names
+            WHERE taxon_id = ? AND name_kind = ? AND name = ?
+            "#,
+            params![taxon_id, kind.as_str(), name],
+            |row| {
+                Ok(TaxonNameLogRecord {
+                    taxon_id,
+                    name: name.to_string(),
+                    is_accepted: row.get::<_, i64>(0)? != 0,
+                    authority_year: row.get(1)?,
+                    category: row.get(2)?,
+                    source: row.get(3)?,
+                })
+            },
+        )
         .optional()?)
 }
 
@@ -311,14 +314,15 @@ fn load_name_records(
     taxon_id: i64,
     kind: TaxonomyNameKind,
 ) -> CoreResult<Vec<TaxonNameLogRecord>> {
-    let sql = format!(
-        "SELECT {}, is_accepted, authority_year, category, source FROM {} WHERE taxon_id = ? ORDER BY {}",
-        kind.column(),
-        kind.table(),
-        kind.column()
-    );
-    let mut statement = transaction.prepare(&sql)?;
-    let rows = statement.query_map([taxon_id], |row| {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT name, is_accepted, authority_year, category, source
+        FROM taxon_names
+        WHERE taxon_id = ? AND name_kind = ?
+        ORDER BY name
+        "#,
+    )?;
+    let rows = statement.query_map(params![taxon_id, kind.as_str()], |row| {
         Ok(TaxonNameLogRecord {
             taxon_id,
             name: row.get(0)?,
@@ -359,12 +363,15 @@ fn count_other_names(
     kind: TaxonomyNameKind,
     name: &str,
 ) -> CoreResult<i64> {
-    let sql = format!(
-        "SELECT COUNT(*) FROM {} WHERE taxon_id = ? AND {} != ?",
-        kind.table(),
-        kind.column()
-    );
-    Ok(transaction.query_row(&sql, params![taxon_id, name], |row| row.get(0))?)
+    Ok(transaction.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM taxon_names
+        WHERE taxon_id = ? AND name_kind = ? AND name != ?
+        "#,
+        params![taxon_id, kind.as_str(), name],
+        |row| row.get(0),
+    )?)
 }
 
 fn promote_name(
@@ -373,17 +380,18 @@ fn promote_name(
     kind: TaxonomyNameKind,
     name: &str,
 ) -> CoreResult<()> {
-    let demote_sql = format!(
-        "UPDATE {} SET is_accepted = 0 WHERE taxon_id = ?",
-        kind.table()
-    );
-    transaction.execute(&demote_sql, [taxon_id])?;
-    let promote_sql = format!(
-        "UPDATE {} SET is_accepted = 1 WHERE taxon_id = ? AND {} = ?",
-        kind.table(),
-        kind.column()
-    );
-    transaction.execute(&promote_sql, params![taxon_id, name])?;
+    transaction.execute(
+        "UPDATE taxon_names SET is_accepted = 0 WHERE taxon_id = ? AND name_kind = ?",
+        params![taxon_id, kind.as_str()],
+    )?;
+    transaction.execute(
+        r#"
+        UPDATE taxon_names
+        SET is_accepted = 1
+        WHERE taxon_id = ? AND name_kind = ? AND name = ?
+        "#,
+        params![taxon_id, kind.as_str(), name],
+    )?;
     Ok(())
 }
 
@@ -393,11 +401,9 @@ fn delete_name_record(
     kind: TaxonomyNameKind,
     name: &str,
 ) -> CoreResult<()> {
-    let sql = format!(
-        "DELETE FROM {} WHERE taxon_id = ? AND {} = ?",
-        kind.table(),
-        kind.column()
-    );
-    transaction.execute(&sql, params![taxon_id, name])?;
+    transaction.execute(
+        "DELETE FROM taxon_names WHERE taxon_id = ? AND name_kind = ? AND name = ?",
+        params![taxon_id, kind.as_str(), name],
+    )?;
     Ok(())
 }

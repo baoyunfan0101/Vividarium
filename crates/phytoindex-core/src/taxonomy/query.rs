@@ -65,29 +65,18 @@ fn search_taxa_with_connection(
         let mut statement = connection.prepare(
             r#"
             WITH matches(taxon_id) AS (
-                SELECT taxon_id FROM scientific
-                WHERE taxon_id > ?4 AND scientific_name LIKE ?1 ESCAPE '\'
-                UNION
-                SELECT taxon_id FROM english
-                WHERE taxon_id > ?4 AND english_name LIKE ?2 ESCAPE '\'
-                UNION
-                SELECT taxon_id FROM chinese
-                WHERE taxon_id > ?4 AND chinese_name LIKE ?3 ESCAPE '\'
+                SELECT DISTINCT taxon_id
+                FROM taxon_names
+                WHERE taxon_id > ?2 AND name LIKE ?1 ESCAPE '\'
             )
             SELECT taxon_id
             FROM matches
             ORDER BY taxon_id
-            LIMIT ?5
+            LIMIT ?3
             "#,
         )?;
         let rows = statement.query_map(
-            params![
-                pattern,
-                pattern,
-                pattern,
-                cursor_taxon_id,
-                fetch_limit as i64
-            ],
+            params![pattern, cursor_taxon_id, fetch_limit as i64],
             |row| row.get::<_, i64>(0),
         )?;
         rows.collect::<Result<Vec<_>, _>>()?
@@ -95,22 +84,19 @@ fn search_taxa_with_connection(
         let mut statement = connection.prepare(
             r#"
             WITH matches(taxon_id) AS (
-                SELECT taxon_id FROM scientific WHERE scientific_name LIKE ?1 ESCAPE '\'
-                UNION
-                SELECT taxon_id FROM english WHERE english_name LIKE ?2 ESCAPE '\'
-                UNION
-                SELECT taxon_id FROM chinese WHERE chinese_name LIKE ?3 ESCAPE '\'
+                SELECT DISTINCT taxon_id
+                FROM taxon_names
+                WHERE name LIKE ?1 ESCAPE '\'
             )
             SELECT taxon_id
             FROM matches
             ORDER BY taxon_id
-            LIMIT ?4
+            LIMIT ?2
             "#,
         )?;
-        let rows = statement.query_map(
-            params![pattern, pattern, pattern, fetch_limit as i64],
-            |row| row.get::<_, i64>(0),
-        )?;
+        let rows = statement.query_map(params![pattern, fetch_limit as i64], |row| {
+            row.get::<_, i64>(0)
+        })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
     let next_cursor = if ids.len() > limit {
@@ -162,47 +148,48 @@ fn load_name_matches_for_taxa(
         .collect::<Vec<_>>()
         .join(", ");
     let mut matches_by_id: HashMap<i64, Vec<TaxonNameMatch>> = HashMap::new();
-    for kind in [
-        TaxonomyNameKind::Scientific,
-        TaxonomyNameKind::English,
-        TaxonomyNameKind::Chinese,
-    ] {
-        let mut query_params = Vec::with_capacity(taxon_ids.len() * 2 + 1);
-        for (index, taxon_id) in taxon_ids.iter().enumerate() {
-            query_params.push(SqlValue::Integer(*taxon_id));
-            query_params.push(SqlValue::Integer(index as i64));
-        }
-        query_params.push(SqlValue::Text(pattern.to_string()));
-        let sql = format!(
-            r#"
-            WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
-            SELECT input.taxon_id, {}, is_accepted
-            FROM input
-            JOIN {} ON {}.taxon_id = input.taxon_id
-            WHERE {} LIKE ? ESCAPE '\'
-            ORDER BY input.sort_order, is_accepted DESC, {}
-            "#,
-            kind.column(),
-            kind.table(),
-            kind.table(),
-            kind.column(),
-            kind.column()
-        );
-        let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(query_params), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                TaxonNameMatch {
-                    name_kind: kind,
-                    name: row.get(1)?,
-                    is_accepted: row.get::<_, i64>(2)? != 0,
-                },
-            ))
-        })?;
-        for row in rows {
-            let (taxon_id, name_match) = row?;
-            matches_by_id.entry(taxon_id).or_default().push(name_match);
-        }
+    let mut query_params = Vec::with_capacity(taxon_ids.len() * 2 + 1);
+    for (index, taxon_id) in taxon_ids.iter().enumerate() {
+        query_params.push(SqlValue::Integer(*taxon_id));
+        query_params.push(SqlValue::Integer(index as i64));
+    }
+    query_params.push(SqlValue::Text(pattern.to_string()));
+    let sql = format!(
+        r#"
+        WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
+        SELECT input.taxon_id, taxon_names.name_kind, taxon_names.name, taxon_names.is_accepted
+        FROM input
+        JOIN taxon_names ON taxon_names.taxon_id = input.taxon_id
+        WHERE taxon_names.name LIKE ? ESCAPE '\'
+        ORDER BY input.sort_order, taxon_names.name_kind, taxon_names.is_accepted DESC, taxon_names.name
+        "#
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(query_params), |row| {
+        let name_kind = match row.get::<_, String>(1)?.as_str() {
+            "scientific" => TaxonomyNameKind::Scientific,
+            "english" => TaxonomyNameKind::English,
+            "chinese" => TaxonomyNameKind::Chinese,
+            value => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    format!("invalid taxonomy name kind: {value}").into(),
+                ));
+            }
+        };
+        Ok((
+            row.get::<_, i64>(0)?,
+            TaxonNameMatch {
+                name_kind,
+                name: row.get(2)?,
+                is_accepted: row.get::<_, i64>(3)? != 0,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (taxon_id, name_match) = row?;
+        matches_by_id.entry(taxon_id).or_default().push(name_match);
     }
     Ok(matches_by_id)
 }

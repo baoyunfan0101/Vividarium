@@ -147,25 +147,25 @@ pub(super) fn load_taxon_summaries(
                 taxa.parent_taxon_id,
                 taxa.rank,
                 COALESCE(
-                    (SELECT scientific_name FROM scientific
-                     WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT scientific_name FROM scientific
-                     WHERE scientific.taxon_id = taxa.taxon_id
-                     ORDER BY scientific_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific'
+                     ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
-                    (SELECT english_name FROM english
-                     WHERE english.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT english_name FROM english
-                     WHERE english.taxon_id = taxa.taxon_id
-                     ORDER BY english_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english'
+                     ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
-                    (SELECT chinese_name FROM chinese
-                     WHERE chinese.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT chinese_name FROM chinese
-                     WHERE chinese.taxon_id = taxa.taxon_id
-                     ORDER BY chinese_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese'
+                     ORDER BY name LIMIT 1)
                 ),
                 0,
                 ',' || taxa.taxon_id || ','
@@ -179,25 +179,25 @@ pub(super) fn load_taxon_summaries(
                 parent.parent_taxon_id,
                 parent.rank,
                 COALESCE(
-                    (SELECT scientific_name FROM scientific
-                     WHERE scientific.taxon_id = parent.taxon_id AND is_accepted = 1),
-                    (SELECT scientific_name FROM scientific
-                     WHERE scientific.taxon_id = parent.taxon_id
-                     ORDER BY scientific_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'scientific'
+                     ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
-                    (SELECT english_name FROM english
-                     WHERE english.taxon_id = parent.taxon_id AND is_accepted = 1),
-                    (SELECT english_name FROM english
-                     WHERE english.taxon_id = parent.taxon_id
-                     ORDER BY english_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'english'
+                     ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
-                    (SELECT chinese_name FROM chinese
-                     WHERE chinese.taxon_id = parent.taxon_id AND is_accepted = 1),
-                    (SELECT chinese_name FROM chinese
-                     WHERE chinese.taxon_id = parent.taxon_id
-                     ORDER BY chinese_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = parent.taxon_id AND name_kind = 'chinese'
+                     ORDER BY name LIMIT 1)
                 ),
                 lineage.depth + 1,
                 lineage.path || parent.taxon_id || ','
@@ -372,25 +372,25 @@ fn load_taxon_children(
                 taxa.taxon_id,
                 taxa.rank,
                 COALESCE(
-                    (SELECT scientific_name FROM scientific
-                    WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT scientific_name FROM scientific
-                    WHERE scientific.taxon_id = taxa.taxon_id
-                    ORDER BY scientific_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific'
+                     ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
-                    (SELECT english_name FROM english
-                    WHERE english.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT english_name FROM english
-                    WHERE english.taxon_id = taxa.taxon_id
-                    ORDER BY english_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english'
+                     ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
-                    (SELECT chinese_name FROM chinese
-                    WHERE chinese.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT chinese_name FROM chinese
-                    WHERE chinese.taxon_id = taxa.taxon_id
-                    ORDER BY chinese_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese'
+                     ORDER BY name LIMIT 1)
                 )
             FROM taxa
             WHERE parent_taxon_id = ?1 AND (rank, taxon_id) > (?2, ?3)
@@ -411,25 +411,25 @@ fn load_taxon_children(
                 taxa.taxon_id,
                 taxa.rank,
                 COALESCE(
-                    (SELECT scientific_name FROM scientific
-                    WHERE scientific.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT scientific_name FROM scientific
-                    WHERE scientific.taxon_id = taxa.taxon_id
-                    ORDER BY scientific_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'scientific'
+                     ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
-                    (SELECT english_name FROM english
-                    WHERE english.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT english_name FROM english
-                    WHERE english.taxon_id = taxa.taxon_id
-                    ORDER BY english_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'english'
+                     ORDER BY name LIMIT 1)
                 ),
                 COALESCE(
-                    (SELECT chinese_name FROM chinese
-                    WHERE chinese.taxon_id = taxa.taxon_id AND is_accepted = 1),
-                    (SELECT chinese_name FROM chinese
-                    WHERE chinese.taxon_id = taxa.taxon_id
-                    ORDER BY chinese_name LIMIT 1)
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese' AND is_accepted = 1),
+                    (SELECT name FROM taxon_names
+                     WHERE taxon_names.taxon_id = taxa.taxon_id AND name_kind = 'chinese'
+                     ORDER BY name LIMIT 1)
                 )
             FROM taxa
             WHERE parent_taxon_id = ?1
@@ -523,19 +523,17 @@ fn load_names_for_taxa(
     if taxon_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let (values_clause, params) = input_values(taxon_ids);
+    let (values_clause, mut params) = input_values(taxon_ids);
+    params.push(SqlValue::Text(kind.as_str().to_string()));
     let sql = format!(
         r#"
         WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
-        SELECT input.taxon_id, {}, is_accepted, authority_year, category, source
+        SELECT input.taxon_id, taxon_names.name, is_accepted, authority_year, category, source
         FROM input
-        JOIN {} ON {}.taxon_id = input.taxon_id
-        ORDER BY input.sort_order, is_accepted DESC, {}
-        "#,
-        kind.column(),
-        kind.table(),
-        kind.table(),
-        kind.column()
+        JOIN taxon_names ON taxon_names.taxon_id = input.taxon_id
+        WHERE taxon_names.name_kind = ?
+        ORDER BY input.sort_order, is_accepted DESC, taxon_names.name
+        "#
     );
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(params), |row| {
