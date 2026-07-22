@@ -979,16 +979,25 @@ fn apply_usage_deltas(
     for taxon_id in taxon_ids {
         let direct_delta = direct_deltas.get(&taxon_id).copied().unwrap_or_default();
         let subtree_delta = subtree_deltas.get(&taxon_id).copied().unwrap_or_default();
-        transaction.execute(
+        let updated = transaction.execute(
             r#"
-            INSERT INTO photo_taxon_usage (taxon_id, direct_photo_count, subtree_photo_count)
-            VALUES (?, ?, ?)
-            ON CONFLICT(taxon_id) DO UPDATE SET
-                direct_photo_count = direct_photo_count + excluded.direct_photo_count,
-                subtree_photo_count = subtree_photo_count + excluded.subtree_photo_count
+            UPDATE photo_taxon_usage
+            SET direct_photo_count = direct_photo_count + ?,
+                subtree_photo_count = subtree_photo_count + ?
+            WHERE taxon_id = ?
             "#,
-            params![taxon_id, direct_delta, subtree_delta],
+            params![direct_delta, subtree_delta, taxon_id],
         )?;
+        if updated == 0 {
+            transaction.execute(
+                r#"
+                INSERT INTO photo_taxon_usage (
+                    taxon_id, direct_photo_count, subtree_photo_count
+                ) VALUES (?, ?, ?)
+                "#,
+                params![taxon_id, direct_delta, subtree_delta],
+            )?;
+        }
     }
     transaction.execute(
         "DELETE FROM photo_taxon_usage WHERE direct_photo_count = 0 AND subtree_photo_count = 0",
@@ -1035,7 +1044,9 @@ fn empty_node() -> MappingNode {
 mod tests {
     use super::*;
     use crate::photos::{open_library, refresh_directory};
-    use crate::taxonomy::{TaxonInputRow, TaxonUpdateOptions, apply_rows};
+    use crate::taxonomy::{
+        TaxonInputRow, TaxonUpdateOptions, apply_rows, execute_custom_taxonomy_sql,
+    };
     use std::fs;
 
     #[test]
@@ -1103,5 +1114,54 @@ mod tests {
         let page = list_photos_for_taxon(&database, mapping.taxon_id, true, None, 20).unwrap();
         assert_eq!(page.items, vec![photo]);
         assert_eq!(page.next_photo_id, None);
+        execute_custom_taxonomy_sql(
+            &database,
+            "UPDATE taxon_names SET name = 'Canis lycaon' WHERE name = 'Canis lupus'",
+            None,
+        )
+        .unwrap();
+        let old_taxon_id = mapping.taxon_id;
+        let mapping = get_photo_mapping(&database, mapping.photo_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mapping.status, PhotoTaxonStatus::Matched);
+        assert_ne!(mapping.taxon_id, old_taxon_id);
+        assert!(get_photo_taxon_node(&database, old_taxon_id, false).is_err());
+    }
+
+    #[test]
+    fn accepts_a_user_choice_only_from_ambiguous_candidates() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Shared_name.jpg"), b"photo").unwrap();
+        let database = Database::open(data.path().join("vividarium.db")).unwrap();
+        let connection = database.connect().unwrap();
+        for _ in 0..2 {
+            connection
+                .execute("INSERT INTO taxa (rank) VALUES (5)", [])
+                .unwrap();
+            let taxon_id = connection.last_insert_rowid();
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted)
+                    VALUES (?, 1, 'Shared name', 1)
+                    "#,
+                    [taxon_id],
+                )
+                .unwrap();
+        }
+        let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+        refresh_directory(&database, library.root_directory_id).unwrap();
+        let photo = photos::list_photos(&database).unwrap().remove(0);
+        let matched = get_photo_taxon_match(&database, photo.photo_id).unwrap();
+        assert_eq!(matched.mapping.status, PhotoTaxonStatus::Ambiguous);
+        assert_eq!(matched.candidates.len(), 2);
+        let selected_taxon_id = matched.candidates[0].summary.taxon_id;
+        let selected = select_photo_taxon(&database, photo.photo_id, selected_taxon_id).unwrap();
+        assert_eq!(selected.status, PhotoTaxonStatus::Matched);
+        assert_eq!(selected.taxon_id, Some(selected_taxon_id));
+        let error = select_photo_taxon(&database, photo.photo_id, i64::MAX).unwrap_err();
+        assert!(error.to_string().contains("not a filename candidate"));
     }
 }
