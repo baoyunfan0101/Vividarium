@@ -19,7 +19,7 @@ Packages are available from [GitHub Releases](https://github.com/baoyunfan0101/P
 
 ## Features
 
-- Configure and scan one or more local photo roots.
+- Open and index one local photo root at a time.
 - Import plant taxonomy data from an Excel workbook.
 - Map indexed photos to taxa using the existing filename convention.
 - Browse large photo collections with cursor-based pagination.
@@ -39,6 +39,7 @@ crates/
   phytoindex-core/          Rust domain services, SQLite, scanning, and imports
 docs/
   BUILDING.md               Local and GitHub release instructions
+  PHOTOS.md                 Photos library backend API
   TAXONOMY.md               Taxonomy knowledge base backend API
 scripts/
   build-macos.sh            Apple Silicon DMG build
@@ -51,6 +52,8 @@ Cargo.toml                  Rust workspace and release profile
 The React application calls typed Rust commands through Tauri IPC. Original photos and generated thumbnails are served through a private `phytoindex://` protocol. The core crate does not depend on Tauri, so its services can be tested separately from the desktop shell.
 
 See [docs/TAXONOMY.md](docs/TAXONOMY.md) for the public taxonomy knowledge base backend models, Rust APIs, and Tauri commands.
+
+See [docs/PHOTOS.md](docs/PHOTOS.md) for the public photos library, automatic taxonomy mapping, and sparse taxonomy browsing backend APIs.
 
 ## Development
 
