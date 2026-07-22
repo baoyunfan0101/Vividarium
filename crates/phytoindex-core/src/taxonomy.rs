@@ -2390,8 +2390,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(result.batch_id > 0);
-        assert!(result.operation_id > 0);
+        let batch_id = result.batch_id.unwrap();
+        let operation_id = result.operation_id.unwrap();
+        assert!(batch_id > 0);
+        assert!(operation_id > 0);
         assert!(result.changeset_size > 0);
         let connection = database.connect().unwrap();
         let range: String = connection
@@ -2405,7 +2407,7 @@ mod tests {
         let context_json: String = connection
             .query_row(
                 "SELECT context_json FROM taxonomy_operation_batches WHERE batch_id = ?",
-                [result.batch_id],
+                [batch_id],
                 |row| row.get(0),
             )
             .unwrap();
@@ -2433,7 +2435,9 @@ mod tests {
             }),
         )
         .unwrap();
-        assert!(result.operation_id > 0);
+        let batch_id = result.batch_id.unwrap();
+        let operation_id = result.operation_id.unwrap();
+        assert!(operation_id > 0);
         assert!(result.changeset_size > 0);
         let connection = database.connect().unwrap();
         let range: String = connection
@@ -2447,7 +2451,7 @@ mod tests {
         let context_json: String = connection
             .query_row(
                 "SELECT context_json FROM taxonomy_operation_batches WHERE batch_id = ?",
-                [result.batch_id],
+                [batch_id],
                 |row| row.get(0),
             )
             .unwrap();
@@ -2462,7 +2466,7 @@ mod tests {
         );
         drop(connection);
 
-        revert_taxonomy_operation(&database, result.operation_id).unwrap();
+        revert_taxonomy_operation(&database, operation_id).unwrap();
         let connection = database.connect().unwrap();
         let range: Option<String> = connection
             .query_row(
@@ -2472,6 +2476,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(range, None);
+    }
+
+    #[test]
+    fn custom_sql_without_changes_does_not_record_logs() {
+        let (_directory, database) = database();
+        let ids = seed_lineage(&database);
+        let result = execute_custom_taxonomy_sql(
+            &database,
+            &format!(
+                "UPDATE taxa SET geological_range = geological_range WHERE taxon_id = {}",
+                ids[3]
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.batch_id, None);
+        assert_eq!(result.operation_id, None);
+        assert_eq!(result.changeset_size, 0);
+        let connection = database.connect().unwrap();
+        let batch_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM taxonomy_operation_batches",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let operation_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM taxonomy_operations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(batch_count, 0);
+        assert_eq!(operation_count, 0);
     }
 
     #[test]

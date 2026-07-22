@@ -47,8 +47,8 @@ pub struct TaxonomyActionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonomyCustomSqlResult {
-    pub batch_id: i64,
-    pub operation_id: i64,
+    pub batch_id: Option<i64>,
+    pub operation_id: Option<i64>,
     pub changeset_size: usize,
 }
 
@@ -206,9 +206,18 @@ pub fn execute_custom_taxonomy_sql(
     authorize_custom_sql(&transaction, sql)?;
     let mut session = start_taxonomy_session(&transaction)?;
     transaction.execute_batch(sql)?;
-    let changeset_blob = finish_taxonomy_session(&mut session)?;
+    let mut changeset_blob = Vec::new();
+    session.changeset_strm(&mut changeset_blob)?;
     let changeset_size = changeset_blob.len();
     drop(session);
+    if changeset_blob.is_empty() {
+        transaction.commit()?;
+        return Ok(TaxonomyCustomSqlResult {
+            batch_id: None,
+            operation_id: None,
+            changeset_size,
+        });
+    }
     validate_taxonomy(&transaction)?;
     let batch_id = insert_operation_batch(
         &transaction,
@@ -220,8 +229,8 @@ pub fn execute_custom_taxonomy_sql(
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
     Ok(TaxonomyCustomSqlResult {
-        batch_id,
-        operation_id,
+        batch_id: Some(batch_id),
+        operation_id: Some(operation_id),
         changeset_size,
     })
 }
