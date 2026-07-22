@@ -288,10 +288,13 @@ pub fn rebuild_mapping(database: &Database) -> CoreResult<MappingSyncResult>
 ```
 
 Photo refresh and rename update mapping automatically. Taxonomy writes also
-trigger rematching. The rematcher scans filenames with one in-memory
-Aho-Corasick matcher and writes only mappings whose taxon or status changed.
-Sparse usage is rebuilt from grouped matched taxon counts so taxonomy parent
-changes are reflected without copying taxonomy rows into the photos module.
+trigger rematching. Photo refresh, candidate reads, user selection, and full
+remapping share a process-wide Aho-Corasick matcher cache. A monotonic name
+revision invalidates the cached matcher only when matching-relevant taxon name
+fields change; metadata-only name updates keep using the current matcher. The
+rematcher writes only mappings whose taxon or status changed. Sparse usage is
+rebuilt from grouped matched taxon counts so taxonomy parent changes are
+reflected without copying taxonomy rows into the photos module.
 
 ## Tauri commands
 

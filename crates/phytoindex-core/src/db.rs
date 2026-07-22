@@ -218,6 +218,26 @@ CREATE TRIGGER IF NOT EXISTS taxon_names_au AFTER UPDATE OF name ON taxon_names 
     INSERT INTO taxon_names_fts(rowid, name) VALUES (new.name_id, new.name);
 END;
 
+CREATE TABLE IF NOT EXISTS taxonomy_match_state (
+    state_id INTEGER PRIMARY KEY CHECK (state_id = 1),
+    name_revision INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO taxonomy_match_state (state_id, name_revision) VALUES (1, 0);
+
+CREATE TRIGGER IF NOT EXISTS taxon_names_match_revision_ai AFTER INSERT ON taxon_names BEGIN
+    UPDATE taxonomy_match_state SET name_revision = name_revision + 1 WHERE state_id = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS taxon_names_match_revision_ad AFTER DELETE ON taxon_names BEGIN
+    UPDATE taxonomy_match_state SET name_revision = name_revision + 1 WHERE state_id = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS taxon_names_match_revision_au
+AFTER UPDATE OF taxon_id, name_kind, name, is_accepted ON taxon_names BEGIN
+    UPDATE taxonomy_match_state SET name_revision = name_revision + 1 WHERE state_id = 1;
+END;
+
 CREATE TABLE IF NOT EXISTS taxon_identifiers (
     taxon_id INTEGER NOT NULL,
     source TEXT NOT NULL,
@@ -360,6 +380,7 @@ mod tests {
             "taxa",
             "taxon_names",
             "taxon_names_fts",
+            "taxonomy_match_state",
             "taxon_identifiers",
             "taxonomy_operation_batches",
             "taxonomy_operations",
