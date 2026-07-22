@@ -2164,6 +2164,58 @@ mod tests {
     }
 
     #[test]
+    fn searches_taxa_by_trigram_candidates_and_edit_distance() {
+        let (_directory, database) = database();
+        seed_lineage(&database);
+        let result = apply_rows(
+            &database,
+            &[
+                TaxonInputRow {
+                    species: Some("Canis lupus".into()),
+                    english: Some(TaxonNameInput {
+                        name: "gray wolf".into(),
+                        ..TaxonNameInput::default()
+                    }),
+                    ..TaxonInputRow::default()
+                },
+                species_row_named("Canis lupis"),
+            ],
+            TaxonUpdateOptions {
+                allow_new_taxa: true,
+                allow_new_names: true,
+                ..TaxonUpdateOptions::default()
+            },
+        )
+        .unwrap();
+        let lupus_id = result.rows[0].target.as_ref().unwrap().taxon_id;
+        let lupis_id = result.rows[1].target.as_ref().unwrap().taxon_id;
+
+        let typo_matches = search_taxa(&database, "Canis lupuz", 10).unwrap();
+        assert_eq!(typo_matches[0].summary.taxon_id, lupus_id);
+        assert!(typo_matches[0].matches.iter().any(|value| {
+            value.name_kind == TaxonomyNameKind::Scientific && value.name == "Canis lupus"
+        }));
+
+        let alternate_name_matches = search_taxa(&database, "gray wlf", 10).unwrap();
+        assert_eq!(alternate_name_matches.len(), 1);
+        assert_eq!(alternate_name_matches[0].summary.taxon_id, lupus_id);
+        assert!(alternate_name_matches[0].matches.iter().any(|value| {
+            value.name_kind == TaxonomyNameKind::English && value.name == "gray wolf"
+        }));
+
+        let layered_matches = search_taxa(&database, "Canis lupus", 2).unwrap();
+        assert_eq!(layered_matches.len(), 2);
+        assert_eq!(layered_matches[0].summary.taxon_id, lupus_id);
+        assert_eq!(layered_matches[1].summary.taxon_id, lupis_id);
+
+        assert!(
+            search_taxa(&database, "Canis lxxxxx", 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn normalizes_name_input_and_search_whitespace() {
         let (_directory, database) = database();
         seed_lineage(&database);

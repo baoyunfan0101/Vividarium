@@ -41,10 +41,12 @@ fn search_taxa_with_connection(
 ) -> CoreResult<Vec<TaxonSearchResult>> {
     let limit = page_limit(limit);
     let search = SearchQuery::new(query);
-    let ids = search_taxon_ids(connection, &search, limit)?;
+    let search_matches = search_taxon_ids(connection, &search, limit)?;
+    let ids = search_matches.taxon_ids;
     let summaries = load_taxon_summaries(connection, &ids)?;
     let details = load_taxon_details(connection, &ids)?;
-    let matches_by_id = load_name_matches_for_taxa(connection, &ids, &search)?;
+    let matches_by_id =
+        load_name_matches_for_taxa(connection, &ids, &search, &search_matches.fuzzy_name_ids)?;
     if summaries.len() != ids.len() || details.len() != ids.len() {
         return Err(CoreError::InvalidArgument(
             "matched taxon no longer exists".into(),
@@ -69,6 +71,8 @@ struct SearchQuery {
     prefix_upper: String,
     word_prefix_match: Option<String>,
     contains_match: Option<String>,
+    fuzzy_match: Option<String>,
+    fuzzy_max_distance: usize,
     word_prefix_like_pattern: Option<String>,
     contains_like_pattern: Option<String>,
 }
@@ -81,6 +85,8 @@ impl SearchQuery {
             prefix_upper: format!("{normalized}\u{10ffff}"),
             word_prefix_match: (char_count >= 2).then(|| quoted_fts_match(&format!(" {query}"))),
             contains_match: (char_count >= 3).then(|| quoted_fts_match(query)),
+            fuzzy_match: trigram_match_query(&normalized),
+            fuzzy_max_distance: fuzzy_max_distance(char_count),
             word_prefix_like_pattern: (char_count >= 2)
                 .then(|| format!("% {}%", escape_like(query))),
             contains_like_pattern: (char_count >= 3).then(|| format!("%{}%", escape_like(query))),
@@ -89,31 +95,60 @@ impl SearchQuery {
     }
 }
 
+#[derive(Debug)]
+struct SearchMatches {
+    taxon_ids: Vec<i64>,
+    fuzzy_name_ids: HashSet<i64>,
+}
+
 fn search_taxon_ids(
     connection: &Connection,
     search: &SearchQuery,
     limit: usize,
-) -> CoreResult<Vec<i64>> {
+) -> CoreResult<SearchMatches> {
     let mut ids = Vec::new();
     let mut seen = HashSet::new();
+    let mut fuzzy_name_ids = HashSet::new();
     append_exact_matches(connection, search, limit, &mut ids, &mut seen)?;
     if ids.len() >= limit {
-        return Ok(ids);
+        return Ok(SearchMatches {
+            taxon_ids: ids,
+            fuzzy_name_ids,
+        });
     }
     append_full_prefix_matches(connection, search, limit, &mut ids, &mut seen)?;
     if ids.len() >= limit {
-        return Ok(ids);
+        return Ok(SearchMatches {
+            taxon_ids: ids,
+            fuzzy_name_ids,
+        });
     }
     if let Some(query) = search.word_prefix_match.as_ref() {
         append_fts_matches(connection, query, limit, &mut ids, &mut seen)?;
     }
     if ids.len() >= limit {
-        return Ok(ids);
+        return Ok(SearchMatches {
+            taxon_ids: ids,
+            fuzzy_name_ids,
+        });
     }
     if let Some(query) = search.contains_match.as_ref() {
         append_fts_matches(connection, query, limit, &mut ids, &mut seen)?;
     }
-    Ok(ids)
+    if ids.len() < limit {
+        append_fuzzy_matches(
+            connection,
+            search,
+            limit,
+            &mut ids,
+            &mut seen,
+            &mut fuzzy_name_ids,
+        )?;
+    }
+    Ok(SearchMatches {
+        taxon_ids: ids,
+        fuzzy_name_ids,
+    })
 }
 
 fn append_exact_matches(
@@ -215,6 +250,108 @@ fn append_fts_matches(
     append_query_ids(connection, &sql, params, ids, seen)
 }
 
+#[derive(Debug)]
+struct FuzzyNameCandidate {
+    name_id: i64,
+    taxon_id: i64,
+    name_kind: i64,
+    name_search: String,
+    is_accepted: bool,
+    edit_distance: usize,
+}
+
+fn append_fuzzy_matches(
+    connection: &Connection,
+    search: &SearchQuery,
+    limit: usize,
+    ids: &mut Vec<i64>,
+    seen: &mut HashSet<i64>,
+    fuzzy_name_ids: &mut HashSet<i64>,
+) -> CoreResult<()> {
+    let Some(query) = search.fuzzy_match.as_ref() else {
+        return Ok(());
+    };
+    let remaining = limit.saturating_sub(ids.len());
+    if remaining == 0 {
+        return Ok(());
+    }
+
+    let candidate_limit = remaining.saturating_mul(20).clamp(100, 5_000);
+    let (exclusion_sql, mut values) = exclusion_clause("taxon_names", seen);
+    let sql = format!(
+        r#"
+        SELECT taxon_names.name_id,
+               taxon_names.taxon_id,
+               taxon_names.name_kind,
+               taxon_names.name_search,
+               taxon_names.is_accepted
+        FROM taxon_names_fts
+        JOIN taxon_names ON taxon_names.name_id = taxon_names_fts.rowid
+        WHERE taxon_names_fts MATCH ?
+          {exclusion_sql}
+        ORDER BY bm25(taxon_names_fts),
+                 taxon_names.name_search,
+                 CASE WHEN taxon_names.is_accepted = 1 THEN 0 ELSE 1 END,
+                 taxon_names.name_kind,
+                 taxon_names.taxon_id
+        LIMIT ?
+        "#
+    );
+    let mut params = vec![SqlValue::Text(query.clone())];
+    params.append(&mut values);
+    params.push(SqlValue::Integer(candidate_limit as i64));
+
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(params), |row| {
+        Ok(FuzzyNameCandidate {
+            name_id: row.get(0)?,
+            taxon_id: row.get(1)?,
+            name_kind: row.get(2)?,
+            name_search: row.get(3)?,
+            is_accepted: row.get::<_, i64>(4)? != 0,
+            edit_distance: 0,
+        })
+    })?;
+    let mut candidates = rows.collect::<Result<Vec<_>, _>>()?;
+    candidates.retain_mut(|candidate| {
+        let Some(distance) = edit_distance_with_limit(
+            &search.normalized,
+            &candidate.name_search,
+            search.fuzzy_max_distance,
+        ) else {
+            return false;
+        };
+        candidate.edit_distance = distance;
+        true
+    });
+    candidates.sort_by(|left, right| {
+        left.edit_distance
+            .cmp(&right.edit_distance)
+            .then_with(|| right.is_accepted.cmp(&left.is_accepted))
+            .then_with(|| left.name_kind.cmp(&right.name_kind))
+            .then_with(|| left.name_search.cmp(&right.name_search))
+            .then_with(|| left.taxon_id.cmp(&right.taxon_id))
+            .then_with(|| left.name_id.cmp(&right.name_id))
+    });
+
+    let mut selected_taxa = HashSet::new();
+    for candidate in &candidates {
+        if ids.len() >= limit {
+            break;
+        }
+        if seen.insert(candidate.taxon_id) {
+            ids.push(candidate.taxon_id);
+            selected_taxa.insert(candidate.taxon_id);
+        }
+    }
+    for candidate in candidates {
+        if selected_taxa.contains(&candidate.taxon_id) {
+            fuzzy_name_ids.insert(candidate.name_id);
+        }
+    }
+    Ok(())
+}
+
 fn append_query_ids(
     connection: &Connection,
     sql: &str,
@@ -251,6 +388,7 @@ fn load_name_matches_for_taxa(
     connection: &Connection,
     taxon_ids: &[i64],
     search: &SearchQuery,
+    fuzzy_name_ids: &HashSet<i64>,
 ) -> CoreResult<HashMap<i64, Vec<TaxonNameMatch>>> {
     if taxon_ids.is_empty() {
         return Ok(HashMap::new());
@@ -277,6 +415,13 @@ fn load_name_matches_for_taxa(
     if let Some(pattern) = search.contains_like_pattern.as_ref() {
         conditions.push("taxon_names.name LIKE ? ESCAPE '\\'".to_string());
         query_params.push(SqlValue::Text(pattern.clone()));
+    }
+    if !fuzzy_name_ids.is_empty() {
+        let placeholders = vec!["?"; fuzzy_name_ids.len()].join(", ");
+        conditions.push(format!("taxon_names.name_id IN ({placeholders})"));
+        let mut name_ids = fuzzy_name_ids.iter().copied().collect::<Vec<_>>();
+        name_ids.sort_unstable();
+        query_params.extend(name_ids.into_iter().map(SqlValue::Integer));
     }
     let conditions = conditions.join(" OR ");
     let sql = format!(
@@ -332,4 +477,54 @@ fn normalize_whitespace(value: &str) -> Option<String> {
 
 fn quoted_fts_match(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn trigram_match_query(value: &str) -> Option<String> {
+    let characters = value.chars().collect::<Vec<_>>();
+    if characters.len() < 3 {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let trigrams = characters
+        .windows(3)
+        .map(|window| window.iter().collect::<String>())
+        .filter(|trigram| seen.insert(trigram.clone()))
+        .map(|trigram| quoted_fts_match(&trigram))
+        .collect::<Vec<_>>();
+    Some(trigrams.join(" OR "))
+}
+
+fn fuzzy_max_distance(char_count: usize) -> usize {
+    match char_count {
+        0..=4 => 1,
+        5..=8 => 2,
+        _ => 3,
+    }
+}
+
+fn edit_distance_with_limit(left: &str, right: &str, limit: usize) -> Option<usize> {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    if left.len().abs_diff(right.len()) > limit {
+        return None;
+    }
+
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_char) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        let mut row_minimum = current[0];
+        for (right_index, right_char) in right.iter().enumerate() {
+            let substitution_cost = usize::from(left_char != right_char);
+            current[right_index + 1] = (current[right_index] + 1)
+                .min(previous[right_index + 1] + 1)
+                .min(previous[right_index] + substitution_cost);
+            row_minimum = row_minimum.min(current[right_index + 1]);
+        }
+        if row_minimum > limit {
+            return None;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    (previous[right.len()] <= limit).then_some(previous[right.len()])
 }
