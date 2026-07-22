@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, LazyLock, Mutex};
 
 use aho_corasick::AhoCorasick;
 use rusqlite::types::Value as SqlValue;
@@ -110,14 +109,6 @@ struct TaxonNameMatcher {
     patterns: Vec<Vec<TaxonNameRecord>>,
 }
 
-struct CachedTaxonNameMatcher {
-    name_revision: i64,
-    matcher: Arc<TaxonNameMatcher>,
-}
-
-static TAXON_NAME_MATCHER_CACHE: LazyLock<Mutex<HashMap<String, CachedTaxonNameMatcher>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 #[derive(Debug)]
 struct MatchResult {
     taxon_id: Option<i64>,
@@ -166,7 +157,7 @@ pub fn get_photo_taxon_match(database: &Database, photo_id: i64) -> CoreResult<P
     let photo = photos::get_photo(database, photo_id)?
         .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))?;
     let connection = database.connect()?;
-    let matcher = TaxonNameMatcher::load_cached(&connection)?;
+    let matcher = TaxonNameMatcher::load(&connection)?;
     let result = matcher.match_filename(&photo.filename);
     let mapping = get_photo_mapping(database, photo_id)?.unwrap_or(PhotoTaxonMapping {
         photo_id,
@@ -207,7 +198,7 @@ pub fn select_photo_taxon(
         .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))?;
     let mut connection = database.connect()?;
     let transaction = connection.transaction()?;
-    let matcher = TaxonNameMatcher::load_cached(&transaction)?;
+    let matcher = TaxonNameMatcher::load(&transaction)?;
     let result = matcher.match_filename(&photo.filename);
     if !result.records_by_taxon.contains_key(&taxon_id) {
         return Err(CoreError::InvalidArgument(format!(
@@ -547,7 +538,7 @@ pub(crate) fn remap_photo_ids(transaction: &Transaction<'_>, photo_ids: &[i64]) 
     if photo_ids.is_empty() {
         return Ok(());
     }
-    let matcher = TaxonNameMatcher::load_cached(transaction)?;
+    let matcher = TaxonNameMatcher::load(transaction)?;
     let photos = load_photo_names(transaction, photo_ids)?;
     let old_mappings = load_mappings(transaction, photo_ids)?;
     let mut direct_deltas = BTreeMap::<i64, i64>::new();
@@ -761,33 +752,7 @@ fn photo_query(suffix: &str) -> String {
 }
 
 impl TaxonNameMatcher {
-    fn load_cached(connection: &rusqlite::Connection) -> CoreResult<Arc<Self>> {
-        let database_path = main_database_path(connection)?;
-        let name_revision = connection.query_row(
-            "SELECT name_revision FROM taxonomy_match_state WHERE state_id = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        let mut cache = TAXON_NAME_MATCHER_CACHE.lock().map_err(|_| {
-            CoreError::InvalidArgument("taxon name matcher cache is poisoned".into())
-        })?;
-        if let Some(cached) = cache.get(&database_path)
-            && cached.name_revision == name_revision
-        {
-            return Ok(Arc::clone(&cached.matcher));
-        }
-        let matcher = Arc::new(Self::load_uncached(connection)?);
-        cache.insert(
-            database_path,
-            CachedTaxonNameMatcher {
-                name_revision,
-                matcher: Arc::clone(&matcher),
-            },
-        );
-        Ok(matcher)
-    }
-
-    fn load_uncached(connection: &rusqlite::Connection) -> CoreResult<Self> {
+    fn load(connection: &rusqlite::Connection) -> CoreResult<Self> {
         let mut statement = connection.prepare(
             r#"
             SELECT name_id, taxon_id, name_kind, name, is_accepted
@@ -887,20 +852,6 @@ impl TaxonNameMatcher {
             },
         }
     }
-}
-
-fn main_database_path(connection: &rusqlite::Connection) -> CoreResult<String> {
-    let mut statement = connection.prepare("PRAGMA database_list")?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-    })?;
-    for row in rows {
-        let (name, path) = row?;
-        if name == "main" {
-            return Ok(path);
-        }
-    }
-    Err(CoreError::NotFound("main database".into()))
 }
 
 fn normalize_match_text(value: &str) -> String {
@@ -1212,57 +1163,5 @@ mod tests {
         assert_eq!(selected.taxon_id, Some(selected_taxon_id));
         let error = select_photo_taxon(&database, photo.photo_id, i64::MAX).unwrap_err();
         assert!(error.to_string().contains("not a filename candidate"));
-    }
-
-    #[test]
-    fn caches_matcher_until_matching_taxon_names_change() {
-        let data = tempfile::tempdir().unwrap();
-        let database = Database::open(data.path().join("vividarium.db")).unwrap();
-        let connection = database.connect().unwrap();
-        connection
-            .execute("INSERT INTO taxa (rank) VALUES (5)", [])
-            .unwrap();
-        let taxon_id = connection.last_insert_rowid();
-        connection
-            .execute(
-                r#"
-                INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted)
-                VALUES (?, 1, 'Canis lupus', 1)
-                "#,
-                [taxon_id],
-            )
-            .unwrap();
-
-        let initial = TaxonNameMatcher::load_cached(&connection).unwrap();
-        let reused = TaxonNameMatcher::load_cached(&connection).unwrap();
-        assert!(Arc::ptr_eq(&initial, &reused));
-
-        connection
-            .execute(
-                "UPDATE taxon_names SET authority_year = 'Linnaeus, 1758' WHERE taxon_id = ?",
-                [taxon_id],
-            )
-            .unwrap();
-        let after_metadata_update = TaxonNameMatcher::load_cached(&connection).unwrap();
-        assert!(Arc::ptr_eq(&initial, &after_metadata_update));
-
-        connection
-            .execute(
-                "UPDATE taxon_names SET name = 'Canis lycaon' WHERE taxon_id = ?",
-                [taxon_id],
-            )
-            .unwrap();
-        let after_name_update = TaxonNameMatcher::load_cached(&connection).unwrap();
-        assert!(!Arc::ptr_eq(&initial, &after_name_update));
-        assert_eq!(
-            after_name_update
-                .match_filename("Canis_lycaon.jpg")
-                .taxon_id,
-            Some(taxon_id)
-        );
-        assert_eq!(
-            after_name_update.match_filename("Canis_lupus.jpg").taxon_id,
-            None
-        );
     }
 }

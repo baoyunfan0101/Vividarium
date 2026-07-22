@@ -500,7 +500,7 @@ fn custom_sql_authorizer(context: AuthContext<'_>) -> Authorization {
             }
         }
         AuthAction::Read { table_name, .. } => {
-            if is_allowed_custom_sql_read(context.database_name, context.accessor, table_name) {
+            if is_allowed_custom_sql_read(context.database_name, table_name) {
                 Authorization::Allow
             } else {
                 Authorization::Deny
@@ -519,24 +519,13 @@ fn custom_sql_authorizer(context: AuthContext<'_>) -> Authorization {
     }
 }
 
-fn is_allowed_custom_sql_read(
-    database_name: Option<&str>,
-    accessor: Option<&str>,
-    table_name: &str,
-) -> bool {
+fn is_allowed_custom_sql_read(database_name: Option<&str>, table_name: &str) -> bool {
     is_taxonomy_session_table(table_name)
         || table_name.starts_with("taxon_names_fts")
-        || is_match_revision_trigger(accessor, table_name)
         || (database_name == Some("temp") && table_name == "input")
 }
 
 fn is_allowed_custom_sql_write(accessor: Option<&str>, table_name: &str) -> bool {
     is_taxonomy_session_table(table_name)
         || (accessor.is_some() && table_name.starts_with("taxon_names_fts"))
-        || is_match_revision_trigger(accessor, table_name)
-}
-
-fn is_match_revision_trigger(accessor: Option<&str>, table_name: &str) -> bool {
-    table_name == "taxonomy_match_state"
-        && accessor.is_some_and(|value| value.starts_with("taxon_names_match_revision_"))
 }
