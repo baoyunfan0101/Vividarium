@@ -522,7 +522,16 @@ pub fn rebuild_mapping(database: &Database) -> CoreResult<MappingSyncResult> {
 }
 
 pub(crate) fn refresh_after_taxonomy_change(database: &Database) -> CoreResult<()> {
-    rebuild_mapping(database).map(|_| ())
+    let photo_ids = photos::list_photos(database)?
+        .into_iter()
+        .map(|photo| photo.photo_id)
+        .collect::<Vec<_>>();
+    let mut connection = database.connect()?;
+    let transaction = connection.transaction()?;
+    remap_photo_ids(&transaction, &photo_ids)?;
+    rebuild_usage(&transaction)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 pub(crate) fn remap_photo_ids(transaction: &Transaction<'_>, photo_ids: &[i64]) -> CoreResult<()> {
@@ -531,11 +540,16 @@ pub(crate) fn remap_photo_ids(transaction: &Transaction<'_>, photo_ids: &[i64]) 
     }
     let matcher = TaxonNameMatcher::load(transaction)?;
     let photos = load_photo_names(transaction, photo_ids)?;
-    let old_taxa = load_mapped_taxa(transaction, photo_ids)?;
+    let old_mappings = load_mappings(transaction, photo_ids)?;
     let mut direct_deltas = BTreeMap::<i64, i64>::new();
     for (photo_id, filename) in photos {
         let result = matcher.match_filename(&filename);
-        let old_taxon_id = old_taxa.get(&photo_id).copied();
+        let old_mapping = old_mappings.get(&photo_id).copied();
+        let old_taxon_id = old_mapping.and_then(|(taxon_id, status)| {
+            (status == PhotoTaxonStatus::Matched)
+                .then_some(taxon_id)
+                .flatten()
+        });
         if old_taxon_id != result.taxon_id {
             if let Some(taxon_id) = old_taxon_id {
                 *direct_deltas.entry(taxon_id).or_default() -= 1;
@@ -544,16 +558,18 @@ pub(crate) fn remap_photo_ids(transaction: &Transaction<'_>, photo_ids: &[i64]) 
                 *direct_deltas.entry(taxon_id).or_default() += 1;
             }
         }
-        transaction.execute(
-            r#"
-            INSERT INTO photo_taxon_mapping (photo_id, taxon_id, status)
-            VALUES (?, ?, ?)
-            ON CONFLICT(photo_id) DO UPDATE SET
-                taxon_id = excluded.taxon_id,
-                status = excluded.status
-            "#,
-            params![photo_id, result.taxon_id, result.status.as_str()],
-        )?;
+        if old_mapping != Some((result.taxon_id, result.status)) {
+            transaction.execute(
+                r#"
+                INSERT INTO photo_taxon_mapping (photo_id, taxon_id, status)
+                VALUES (?, ?, ?)
+                ON CONFLICT(photo_id) DO UPDATE SET
+                    taxon_id = excluded.taxon_id,
+                    status = excluded.status
+                "#,
+                params![photo_id, result.taxon_id, result.status.as_str()],
+            )?;
+        }
     }
     apply_usage_deltas(transaction, &direct_deltas)
 }
@@ -883,6 +899,50 @@ fn load_mapped_taxa(
         Ok((row.get(0)?, row.get(1)?))
     })?;
     Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+}
+
+fn load_mappings(
+    transaction: &Transaction<'_>,
+    photo_ids: &[i64],
+) -> CoreResult<HashMap<i64, (Option<i64>, PhotoTaxonStatus)>> {
+    let (placeholders, values) = input_values(photo_ids);
+    let mut statement = transaction.prepare(&format!(
+        r#"
+        SELECT photo_id, taxon_id, status
+        FROM photo_taxon_mapping
+        WHERE photo_id IN ({placeholders})
+        "#
+    ))?;
+    let rows = statement.query_map(params_from_iter(values), |row| {
+        let status = row.get::<_, String>(2)?;
+        let status = PhotoTaxonStatus::from_str(&status).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        Ok((row.get::<_, i64>(0)?, (row.get(1)?, status)))
+    })?;
+    Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+}
+
+fn rebuild_usage(transaction: &Transaction<'_>) -> CoreResult<()> {
+    let direct_counts = {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT taxon_id, COUNT(*)
+            FROM photo_taxon_mapping
+            WHERE status = 'matched'
+            GROUP BY taxon_id
+            "#,
+        )?;
+        let rows =
+            statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+        rows.collect::<Result<BTreeMap<_, _>, _>>()?
+    };
+    transaction.execute("DELETE FROM photo_taxon_usage", [])?;
+    apply_usage_deltas(transaction, &direct_counts)
 }
 
 fn apply_usage_deltas(
