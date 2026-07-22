@@ -5,6 +5,7 @@ use crate::db::{Database, taxon_from_row};
 use crate::error::{CoreError, CoreResult};
 use crate::models::{MappingMetadata, MappingNode, MappingSyncResult, Photo, Taxon};
 use crate::photos::{self, ProgressCallback};
+use crate::taxonomy::TaxonomyNameKind;
 
 const SPECIAL_UNMAPPED_TAXON_ID: i64 = 0;
 
@@ -79,7 +80,7 @@ pub fn get_by_taxon_id(database: &Database, taxon_id: Option<i64>) -> CoreResult
         rows.collect::<Result<Vec<_>, _>>()?
     } else {
         let mut statement = connection.prepare(
-            "SELECT * FROM photos_taxa_mapping_taxa WHERE parent_id IS NULL AND rank = 'ordo' ORDER BY name, taxon_id",
+            "SELECT * FROM photos_taxa_mapping_taxa WHERE parent_id IS NULL AND rank = 'kingdom' ORDER BY name, taxon_id",
         )?;
         let rows = statement.query_map([], taxon_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()?
@@ -276,8 +277,13 @@ fn taxon_id_for_photo(transaction: &Transaction<'_>, photo: &Photo) -> CoreResul
     }
     let Some(source_id) = transaction
         .query_row(
-            "SELECT taxon_id FROM taxa WHERE binomial_name = ? ORDER BY taxon_id",
-            [binomial_name],
+            r#"
+            SELECT taxon_id
+            FROM taxon_names
+            WHERE name_kind = ? AND name = ?
+            ORDER BY is_accepted DESC, taxon_id
+            "#,
+            params![TaxonomyNameKind::Scientific.code(), binomial_name],
             |row| row.get::<_, i64>(0),
         )
         .optional()?
@@ -288,7 +294,7 @@ fn taxon_id_for_photo(transaction: &Transaction<'_>, photo: &Photo) -> CoreResul
     let mut current_id = Some(source_id);
     while let Some(id) = current_id {
         let taxon = transaction.query_row(
-            "SELECT * FROM taxa WHERE taxon_id = ?",
+            "SELECT * FROM taxa_display WHERE taxon_id = ?",
             [id],
             taxon_from_row,
         )?;

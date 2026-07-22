@@ -6,7 +6,12 @@ use phytoindex_core::models::{
     DirectoryListingPage, MappingMetadata, MappingNode, OperationsStatus, Photo, PhotoRootMetadata,
     TaxaMetadata, Taxon,
 };
-use phytoindex_core::{export, mapping, photos, taxa};
+use phytoindex_core::taxonomy::{
+    DeleteTaxonNameInput, TaxonChild, TaxonDetailNode, TaxonSearchResult, TaxonUpdateInput,
+    TaxonUpdateOptions, TaxonomyActionResult, TaxonomyCustomSqlResult, TaxonomyCustomSqlTempTable,
+    TaxonomyOperation, TaxonomyOperationBatch, TaxonomyPage, TaxonomyUpdateActionResult,
+};
+use phytoindex_core::{export, mapping, photos, taxa, taxonomy};
 use serde_json::{Value, json};
 use tauri::{AppHandle, State};
 
@@ -88,6 +93,122 @@ pub fn save_knowledge_base_path(
     knowledge_base_path: Option<String>,
 ) -> CommandResult<TaxaMetadata> {
     taxa::save_knowledge_base_path(&state.database, knowledge_base_path.as_deref()).map_err(error)
+}
+
+#[tauri::command]
+pub fn search_taxa(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> CommandResult<Vec<TaxonSearchResult>> {
+    taxonomy::search_taxa(&state.database, &query, limit.unwrap_or(50)).map_err(error)
+}
+
+#[tauri::command]
+pub fn get_taxon_detail_node(
+    state: State<'_, AppState>,
+    taxon_id: i64,
+    children_cursor: Option<String>,
+    children_limit: Option<usize>,
+) -> CommandResult<TaxonDetailNode> {
+    taxonomy::get_taxon_detail_node(
+        &state.database,
+        taxon_id,
+        children_cursor.as_deref(),
+        children_limit.unwrap_or(50),
+    )
+    .map_err(error)?
+    .ok_or_else(|| format!("taxon {taxon_id} not found"))
+}
+
+#[tauri::command]
+pub fn list_taxon_children(
+    state: State<'_, AppState>,
+    taxon_id: i64,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<TaxonomyPage<TaxonChild>> {
+    taxonomy::list_taxon_children(
+        &state.database,
+        taxon_id,
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
+    .map_err(error)
+}
+
+#[tauri::command]
+pub fn delete_taxon_name(
+    state: State<'_, AppState>,
+    input: DeleteTaxonNameInput,
+) -> CommandResult<TaxonomyActionResult> {
+    taxonomy::delete_taxon_name(&state.database, input).map_err(error)
+}
+
+#[tauri::command]
+pub fn update_taxon(
+    state: State<'_, AppState>,
+    input: TaxonUpdateInput,
+    options: Option<TaxonUpdateOptions>,
+) -> CommandResult<TaxonomyUpdateActionResult> {
+    taxonomy::update_taxon(&state.database, input, options.unwrap_or_default()).map_err(error)
+}
+
+#[tauri::command]
+pub fn delete_taxon(
+    state: State<'_, AppState>,
+    taxon_id: i64,
+) -> CommandResult<TaxonomyActionResult> {
+    taxonomy::delete_taxon(&state.database, taxon_id).map_err(error)
+}
+
+#[tauri::command]
+pub fn execute_custom_taxonomy_sql(
+    state: State<'_, AppState>,
+    sql: String,
+    input: Option<TaxonomyCustomSqlTempTable>,
+) -> CommandResult<TaxonomyCustomSqlResult> {
+    taxonomy::execute_custom_taxonomy_sql(&state.database, &sql, input).map_err(error)
+}
+
+#[tauri::command]
+pub fn list_taxonomy_operation_batches(
+    state: State<'_, AppState>,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<TaxonomyPage<TaxonomyOperationBatch>> {
+    taxonomy::list_taxonomy_operation_batches(
+        &state.database,
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
+    .map_err(error)
+}
+
+#[tauri::command]
+pub fn list_taxonomy_operations(
+    state: State<'_, AppState>,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<TaxonomyPage<TaxonomyOperation>> {
+    taxonomy::list_taxonomy_operations(&state.database, cursor.as_deref(), limit.unwrap_or(50))
+        .map_err(error)
+}
+
+#[tauri::command]
+pub fn list_taxonomy_operations_for_batch(
+    state: State<'_, AppState>,
+    batch_id: i64,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<TaxonomyPage<TaxonomyOperation>> {
+    taxonomy::list_taxonomy_operations_for_batch(
+        &state.database,
+        batch_id,
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
+    .map_err(error)
 }
 
 #[tauri::command]
