@@ -890,8 +890,8 @@ fn filename_candidates(filename: &str) -> Vec<String> {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(filename);
-    let normalized = normalize_match_text(stem);
-    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    let lowercased = stem.to_ascii_lowercase();
+    let words = lowercased.split_whitespace().collect::<Vec<_>>();
     let mut candidates = BTreeSet::new();
     for start in 0..words.len() {
         let mut candidate = String::new();
@@ -906,21 +906,6 @@ fn filename_candidates(filename: &str) -> Vec<String> {
     let mut candidates = candidates.into_iter().collect::<Vec<_>>();
     candidates.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
     candidates
-}
-
-fn normalize_match_text(value: &str) -> String {
-    let mut output = String::new();
-    let mut separator = true;
-    for character in value.chars() {
-        if character.is_alphanumeric() {
-            output.push(character.to_ascii_lowercase());
-            separator = false;
-        } else if !separator {
-            output.push(' ');
-            separator = true;
-        }
-    }
-    output.trim().into()
 }
 
 fn load_photo_names(
@@ -1107,7 +1092,7 @@ mod tests {
     fn maps_the_longest_filename_name_and_builds_sparse_usage() {
         let data = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("Canis_lupus_001.jpg"), b"photo").unwrap();
+        fs::write(root.path().join("Canis lupus 001.jpg"), b"photo").unwrap();
         let database = Database::open(data.path().join("vividarium.db")).unwrap();
         let rows = [
             TaxonInputRow {
@@ -1187,7 +1172,7 @@ mod tests {
     fn accepts_a_user_choice_only_from_ambiguous_candidates() {
         let data = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("Shared_name.jpg"), b"photo").unwrap();
+        fs::write(root.path().join("Shared name.jpg"), b"photo").unwrap();
         let database = Database::open(data.path().join("vividarium.db")).unwrap();
         let connection = database.connect().unwrap();
         for _ in 0..2 {
@@ -1263,5 +1248,20 @@ mod tests {
             .join(" ");
         assert!(plan.contains("USING INDEX idx_taxon_names_name_search"));
         assert!(!plan.contains("SCAN taxon_names"));
+    }
+
+    #[test]
+    fn preserves_legal_name_characters_in_filename_candidates() {
+        let candidates = filename_candidates("prefix O'Connor-\u{00d7}-minor_name 001.jpg");
+        assert!(
+            candidates
+                .iter()
+                .any(|value| value == "o'connor-\u{00d7}-minor_name")
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|value| value == "o connor minor name")
+        );
     }
 }

@@ -291,6 +291,8 @@ Photo refresh and rename update mapping automatically. Taxonomy writes also
 trigger rematching. Matching generates contiguous word candidates from the
 changed filenames, deduplicates them across the batch, and looks them up in
 bounded queries through the `taxon_names(normalized_name, taxon_id)` index.
+Candidate generation preserves every non-whitespace name character, including
+punctuation and symbols; it does not replace non-alphanumeric characters.
 Refresh and remapping therefore do not load the complete taxonomy name set.
 Only the candidate detail endpoint reads full matching name records. The
 remapper writes only mappings whose taxon or status changed. Sparse usage is
