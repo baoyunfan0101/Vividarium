@@ -39,6 +39,7 @@ crates/
   phytoindex-core/          Rust domain services, SQLite, scanning, and imports
 docs/
   BUILDING.md               Local and GitHub release instructions
+  TAXONOMY.md               Taxonomy knowledge base backend API
 scripts/
   build-macos.sh            Apple Silicon DMG build
   build-windows.ps1         Windows x64 NSIS build
@@ -48,6 +49,8 @@ Cargo.toml                  Rust workspace and release profile
 ```
 
 The React application calls typed Rust commands through Tauri IPC. Original photos and generated thumbnails are served through a private `phytoindex://` protocol. The core crate does not depend on Tauri, so its services can be tested separately from the desktop shell.
+
+See [docs/TAXONOMY.md](docs/TAXONOMY.md) for the public taxonomy knowledge base backend models, Rust APIs, and Tauri commands.
 
 ## Development
 
