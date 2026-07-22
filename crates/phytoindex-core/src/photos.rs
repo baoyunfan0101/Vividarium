@@ -381,28 +381,8 @@ pub fn rename_photo(database: &Database, photo_id: i64, new_filename: &str) -> C
     let directory_path = safe_directory_path(&root, &directory.relative_path)?;
     let source = directory_path.join(&old_photo.filename);
     let destination = directory_path.join(&new_filename);
-    let case_only_rename = destination.exists()
-        && source.canonicalize().ok().as_deref() == destination.canonicalize().ok().as_deref();
-    if destination.exists() && !case_only_rename {
-        return Err(CoreError::InvalidArgument(format!(
-            "photo filename already exists: {new_filename}"
-        )));
-    }
-    if case_only_rename {
-        let temporary = directory_path.join(format!(".vividarium-rename-{photo_id}.tmp"));
-        if temporary.exists() {
-            return Err(CoreError::InvalidArgument(
-                "temporary photo rename path already exists".into(),
-            ));
-        }
-        fs::rename(&source, &temporary)?;
-        if let Err(error) = fs::rename(&temporary, &destination) {
-            let _ = fs::rename(&temporary, &source);
-            return Err(error.into());
-        }
-    } else {
-        fs::rename(&source, &destination)?;
-    }
+    let temporary = directory_path.join(format!(".vividarium-rename-{photo_id}.tmp"));
+    rename_file(&source, &destination, &temporary)?;
 
     let result = (|| {
         let mut connection = database.connect()?;
@@ -412,14 +392,67 @@ pub fn rename_photo(database: &Database, photo_id: i64, new_filename: &str) -> C
             params![new_filename, photo_id],
         )?;
         mapping::remap_photo_ids(&transaction, &[photo_id])?;
+        let photo = transaction
+            .query_row(
+                &photo_select("WHERE photos.photo_id = ?"),
+                [photo_id],
+                photo_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))?;
         transaction.commit()?;
-        get_photo(database, photo_id)?
-            .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))
+        Ok(photo)
     })();
-    if result.is_err() {
-        let _ = fs::rename(&destination, &source);
+    match result {
+        Ok(photo) => Ok(photo),
+        Err(error) => match rename_file(&destination, &source, &temporary) {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(CoreError::InvalidArgument(format!(
+                "photo database update failed: {error}; filesystem rollback failed: {rollback_error}"
+            ))),
+        },
     }
-    result
+}
+
+fn rename_file(source: &Path, destination: &Path, temporary: &Path) -> CoreResult<()> {
+    let destination_is_source = destination.exists()
+        && matches!(
+            (source.canonicalize(), destination.canonicalize()),
+            (Ok(source), Ok(destination)) if source == destination
+        );
+    if destination.exists() && !destination_is_source {
+        return Err(CoreError::InvalidArgument(format!(
+            "rename destination already exists: {}",
+            destination.display()
+        )));
+    }
+    let case_only_rename = destination_is_source
+        || source.parent() == destination.parent()
+            && source
+                .file_name()
+                .and_then(|value| value.to_str())
+                .zip(destination.file_name().and_then(|value| value.to_str()))
+                .is_some_and(|(left, right)| left != right && left.eq_ignore_ascii_case(right));
+    if !case_only_rename {
+        fs::rename(source, destination)?;
+        return Ok(());
+    }
+    if temporary.exists() {
+        return Err(CoreError::InvalidArgument(format!(
+            "temporary rename path already exists: {}",
+            temporary.display()
+        )));
+    }
+    fs::rename(source, temporary)?;
+    if let Err(error) = fs::rename(temporary, destination) {
+        return match fs::rename(temporary, source) {
+            Ok(()) => Err(error.into()),
+            Err(restore_error) => Err(CoreError::InvalidArgument(format!(
+                "rename failed: {error}; source restoration failed: {restore_error}"
+            ))),
+        };
+    }
+    Ok(())
 }
 
 pub fn photo_file_path(database: &Database, photo_id: i64) -> CoreResult<PathBuf> {
@@ -909,5 +942,49 @@ mod tests {
         assert_eq!(renamed.filename, "after.jpg");
         assert!(!root.path().join("before.jpg").exists());
         assert!(root.path().join("after.jpg").is_file());
+    }
+
+    #[test]
+    fn restores_case_only_rename_when_the_database_update_fails() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("ABC.jpg"), b"photo").unwrap();
+        let database = Database::open(data.path().join("vividarium.db")).unwrap();
+        let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+        refresh_directory(&database, library.root_directory_id).unwrap();
+        let photo = list_photos(&database).unwrap().remove(0);
+        let connection = database.connect().unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TRIGGER reject_photo_rename
+                BEFORE UPDATE OF filename ON photos BEGIN
+                    SELECT RAISE(ABORT, 'forced photo rename failure');
+                END;
+                "#,
+            )
+            .unwrap();
+
+        let error = rename_photo(&database, photo.photo_id, "abc.jpg").unwrap_err();
+        assert!(error.to_string().contains("forced photo rename failure"));
+        assert_eq!(
+            get_photo(&database, photo.photo_id)
+                .unwrap()
+                .unwrap()
+                .filename,
+            "ABC.jpg"
+        );
+        let filenames = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        assert!(filenames.contains(&"ABC.jpg".to_string()));
+        assert!(!filenames.contains(&"abc.jpg".to_string()));
+        assert!(
+            !root
+                .path()
+                .join(format!(".vividarium-rename-{}.tmp", photo.photo_id))
+                .exists()
+        );
     }
 }

@@ -163,8 +163,9 @@ pub fn rename_photo(
 Renames the real file in its current directory and then updates the database
 filename and taxonomy mapping. `new_filename` must be one supported image
 filename without directory components. Existing destinations are rejected.
-If the database update fails, the backend attempts to restore the old
-filesystem name.
+Case-only renames use a temporary path on both the forward and rollback paths.
+If the database update fails, the backend restores the old filesystem name
+with the same rename procedure.
 
 ### File, metadata, and thumbnail reads
 
