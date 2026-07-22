@@ -7,12 +7,14 @@ use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
+use super::update::{
+    ExistingTaxonUpdate, apply_existing_taxon_update_with_log, finish_taxonomy_session,
+    insert_operation_batch, insert_operation_log, is_taxonomy_session_table, normalize_name,
+    start_taxonomy_session, validate_taxonomy,
+};
 use super::{
-    ExistingTaxonUpdate, TaxonNameInput, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
+    TaxonNameInput, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
     TaxonomyCustomSqlTempTable, TaxonomyCustomSqlTempTableMetadata, TaxonomyNameKind,
-    apply_existing_taxon_update_with_log, finish_taxonomy_session, insert_operation_batch,
-    insert_operation_log, is_taxonomy_session_table, normalize_name, start_taxonomy_session,
-    validate_taxonomy,
 };
 use crate::{CoreError, CoreResult, Database};
 
