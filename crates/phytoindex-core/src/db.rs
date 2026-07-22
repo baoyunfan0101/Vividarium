@@ -48,6 +48,7 @@ impl Database {
             0 => connection.execute_batch(SCHEMA)?,
             SCHEMA_VERSION => {
                 validate_photo_schema(&connection)?;
+                migrate_taxon_name_index(&connection)?;
                 connection.execute_batch(SCHEMA)?;
             }
             1 => {
@@ -63,6 +64,23 @@ impl Database {
         }
         Ok(())
     }
+}
+
+fn migrate_taxon_name_index(connection: &Connection) -> CoreResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_xinfo(taxon_names)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.iter().any(|column| column == "name_search")
+        && !columns.iter().any(|column| column == "normalized_name")
+    {
+        connection.execute_batch(
+            r#"
+            ALTER TABLE taxon_names RENAME COLUMN name_search TO normalized_name;
+            "#,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_photo_schema(connection: &Connection) -> CoreResult<()> {
@@ -184,7 +202,7 @@ CREATE TABLE IF NOT EXISTS taxon_names (
     taxon_id INTEGER NOT NULL,
     name_kind INTEGER NOT NULL,
     name TEXT NOT NULL,
-    name_search TEXT GENERATED ALWAYS AS (lower(name)) STORED,
+    normalized_name TEXT GENERATED ALWAYS AS (lower(name)) STORED,
     is_accepted INTEGER NOT NULL DEFAULT 0,
     authority_year TEXT,
     category TEXT,
@@ -267,7 +285,8 @@ CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
 CREATE INDEX IF NOT EXISTS idx_taxon_names_kind_name ON taxon_names(name_kind, name);
 CREATE INDEX IF NOT EXISTS idx_taxon_names_kind_taxon ON taxon_names(name_kind, taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxon_names_name ON taxon_names(name);
-CREATE INDEX IF NOT EXISTS idx_taxon_names_name_search ON taxon_names(name_search, taxon_id);
+CREATE INDEX IF NOT EXISTS idx_taxon_names_name_search
+    ON taxon_names(normalized_name, taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxon_identifiers_taxon ON taxon_identifiers(taxon_id);
 CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_batch
     ON taxonomy_operations(batch_id, row_number);
@@ -387,6 +406,8 @@ mod tests {
                 "source"
             ]
         );
+        let name_columns = table_xcolumns(&connection, "taxon_names");
+        assert!(name_columns.contains(&"normalized_name".to_string()));
         let photo_columns = table_columns(&connection, "photos");
         assert_eq!(
             photo_columns,
@@ -477,9 +498,54 @@ mod tests {
         assert!(error.to_string().contains("legacy photos schema"));
     }
 
+    #[test]
+    fn renames_the_version_two_taxon_name_index_in_place() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("phytoindex.db");
+        let database = Database::open(&path).unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute_batch(
+                r#"
+                DROP INDEX idx_taxon_names_name_search;
+                ALTER TABLE taxon_names RENAME COLUMN normalized_name TO name_search;
+                CREATE INDEX idx_taxon_names_name_search
+                    ON taxon_names(name_search, taxon_id);
+                "#,
+            )
+            .unwrap();
+        drop(connection);
+        drop(database);
+
+        let database = Database::open(path).unwrap();
+        let connection = database.connect().unwrap();
+        let columns = table_xcolumns(&connection, "taxon_names");
+        assert!(columns.contains(&"normalized_name".to_string()));
+        assert!(!columns.contains(&"name_search".to_string()));
+        let index_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_taxon_names_name_search')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_exists);
+    }
+
     fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
         let mut statement = connection
             .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn table_xcolumns(connection: &Connection, table: &str) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_xinfo({table})"))
             .unwrap();
         statement
             .query_map([], |row| row.get(1))

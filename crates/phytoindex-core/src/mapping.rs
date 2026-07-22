@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use aho_corasick::AhoCorasick;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -98,23 +97,20 @@ pub struct PhotoTaxonPhotoPage {
 #[derive(Debug, Clone)]
 struct TaxonNameRecord {
     name_id: i64,
-    taxon_id: i64,
     name_kind: TaxonomyNameKind,
     name: String,
     is_accepted: bool,
-}
-
-struct TaxonNameMatcher {
-    automaton: Option<AhoCorasick>,
-    patterns: Vec<Vec<TaxonNameRecord>>,
 }
 
 #[derive(Debug)]
 struct MatchResult {
     taxon_id: Option<i64>,
     status: PhotoTaxonStatus,
-    records_by_taxon: BTreeMap<i64, Vec<TaxonNameRecord>>,
+    taxon_ids: BTreeSet<i64>,
+    matched_normalized_names: Vec<String>,
 }
+
+const NAME_CANDIDATE_QUERY_SIZE: usize = 500;
 
 pub fn get_metadata(database: &Database) -> CoreResult<MappingMetadata> {
     let connection = database.connect()?;
@@ -157,15 +153,18 @@ pub fn get_photo_taxon_match(database: &Database, photo_id: i64) -> CoreResult<P
     let photo = photos::get_photo(database, photo_id)?
         .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))?;
     let connection = database.connect()?;
-    let matcher = TaxonNameMatcher::load(&connection)?;
-    let result = matcher.match_filename(&photo.filename);
+    let result = match_photo_filenames(&connection, &[photo.filename.as_str()])?
+        .pop()
+        .expect("one filename produces one match result");
     let mapping = get_photo_mapping(database, photo_id)?.unwrap_or(PhotoTaxonMapping {
         photo_id,
         taxon_id: result.taxon_id,
         status: result.status,
     });
+    let records_by_taxon =
+        load_matched_name_records(&connection, &result.matched_normalized_names)?;
     let mut candidates = Vec::new();
-    for (taxon_id, records) in result.records_by_taxon {
+    for (taxon_id, records) in records_by_taxon {
         let Some(summary) = get_taxon_summary(database, taxon_id)? else {
             continue;
         };
@@ -198,9 +197,10 @@ pub fn select_photo_taxon(
         .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))?;
     let mut connection = database.connect()?;
     let transaction = connection.transaction()?;
-    let matcher = TaxonNameMatcher::load(&transaction)?;
-    let result = matcher.match_filename(&photo.filename);
-    if !result.records_by_taxon.contains_key(&taxon_id) {
+    let result = match_photo_filenames(&transaction, &[photo.filename.as_str()])?
+        .pop()
+        .expect("one filename produces one match result");
+    if !result.taxon_ids.contains(&taxon_id) {
         return Err(CoreError::InvalidArgument(format!(
             "taxon {taxon_id} is not a filename candidate for photo {photo_id}"
         )));
@@ -538,12 +538,15 @@ pub(crate) fn remap_photo_ids(transaction: &Transaction<'_>, photo_ids: &[i64]) 
     if photo_ids.is_empty() {
         return Ok(());
     }
-    let matcher = TaxonNameMatcher::load(transaction)?;
     let photos = load_photo_names(transaction, photo_ids)?;
+    let filenames = photos
+        .iter()
+        .map(|(_, filename)| filename.as_str())
+        .collect::<Vec<_>>();
+    let results = match_photo_filenames(transaction, &filenames)?;
     let old_mappings = load_mappings(transaction, photo_ids)?;
     let mut direct_deltas = BTreeMap::<i64, i64>::new();
-    for (photo_id, filename) in photos {
-        let result = matcher.match_filename(&filename);
+    for ((photo_id, _), result) in photos.into_iter().zip(results) {
         let old_mapping = old_mappings.get(&photo_id).copied();
         let old_taxon_id = old_mapping.and_then(|(taxon_id, status)| {
             (status == PhotoTaxonStatus::Matched)
@@ -751,16 +754,112 @@ fn photo_query(suffix: &str) -> String {
     )
 }
 
-impl TaxonNameMatcher {
-    fn load(connection: &rusqlite::Connection) -> CoreResult<Self> {
-        let mut statement = connection.prepare(
+fn match_photo_filenames(
+    connection: &rusqlite::Connection,
+    filenames: &[&str],
+) -> CoreResult<Vec<MatchResult>> {
+    let candidates_by_filename = filenames
+        .iter()
+        .map(|filename| filename_candidates(filename))
+        .collect::<Vec<_>>();
+    let candidates = candidates_by_filename
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let taxa_by_name = load_candidate_taxa(connection, &candidates)?;
+    Ok(candidates_by_filename
+        .iter()
+        .map(|candidates| match_filename_candidates(candidates, &taxa_by_name))
+        .collect())
+}
+
+fn load_candidate_taxa(
+    connection: &rusqlite::Connection,
+    candidates: &BTreeSet<String>,
+) -> CoreResult<HashMap<String, Vec<i64>>> {
+    let candidates = candidates.iter().collect::<Vec<_>>();
+    let mut taxa_by_name = HashMap::<String, Vec<i64>>::new();
+    for chunk in candidates.chunks(NAME_CANDIDATE_QUERY_SIZE) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
             r#"
-            SELECT name_id, taxon_id, name_kind, name, is_accepted
-            FROM taxon_names
-            ORDER BY name_id
-            "#,
+            SELECT DISTINCT normalized_name, taxon_id
+            FROM taxon_names INDEXED BY idx_taxon_names_name_search
+            WHERE normalized_name IN ({placeholders})
+            ORDER BY normalized_name, taxon_id
+            "#
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params_from_iter(chunk.iter().map(|value| value.as_str())),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )?;
-        let rows = statement.query_map([], |row| {
+        for row in rows {
+            let (normalized_name, taxon_id) = row?;
+            taxa_by_name
+                .entry(normalized_name)
+                .or_default()
+                .push(taxon_id);
+        }
+    }
+    Ok(taxa_by_name)
+}
+
+fn match_filename_candidates(
+    candidates: &[String],
+    taxa_by_name: &HashMap<String, Vec<i64>>,
+) -> MatchResult {
+    let mut matched_length = None;
+    let mut matched_normalized_names = Vec::new();
+    let mut taxon_ids = BTreeSet::new();
+    for candidate in candidates {
+        if matched_length.is_some_and(|length| candidate.len() < length) {
+            break;
+        }
+        let Some(candidate_taxa) = taxa_by_name.get(candidate) else {
+            continue;
+        };
+        matched_length.get_or_insert(candidate.len());
+        matched_normalized_names.push(candidate.clone());
+        taxon_ids.extend(candidate_taxa);
+    }
+    let (taxon_id, status) = match taxon_ids.len() {
+        0 => (None, PhotoTaxonStatus::Unmatched),
+        1 => (taxon_ids.iter().next().copied(), PhotoTaxonStatus::Matched),
+        _ => (None, PhotoTaxonStatus::Ambiguous),
+    };
+    MatchResult {
+        taxon_id,
+        status,
+        taxon_ids,
+        matched_normalized_names,
+    }
+}
+
+fn load_matched_name_records(
+    connection: &rusqlite::Connection,
+    normalized_names: &[String],
+) -> CoreResult<BTreeMap<i64, Vec<TaxonNameRecord>>> {
+    if normalized_names.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let placeholders = std::iter::repeat_n("?", normalized_names.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut statement = connection.prepare(&format!(
+        r#"
+        SELECT name_id, taxon_id, name_kind, name, is_accepted
+        FROM taxon_names INDEXED BY idx_taxon_names_name_search
+        WHERE normalized_name IN ({placeholders})
+        ORDER BY taxon_id, name_id
+        "#
+    ))?;
+    let rows = statement.query_map(
+        params_from_iter(normalized_names.iter().map(String::as_str)),
+        |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -768,98 +867,53 @@ impl TaxonNameMatcher {
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)? != 0,
             ))
-        })?;
-        let mut grouped = BTreeMap::<String, Vec<TaxonNameRecord>>::new();
-        for row in rows {
-            let (name_id, taxon_id, name_kind, name, is_accepted) = row?;
-            let normalized = normalize_match_text(&name);
-            if normalized.is_empty() {
-                continue;
-            }
-            grouped
-                .entry(format!(" {normalized} "))
-                .or_default()
-                .push(TaxonNameRecord {
-                    name_id,
-                    taxon_id,
-                    name_kind: TaxonomyNameKind::from_code(name_kind)?,
-                    name,
-                    is_accepted,
-                });
-        }
-        let keys = grouped.keys().cloned().collect::<Vec<_>>();
-        let patterns = grouped.into_values().collect::<Vec<_>>();
-        let automaton = (!keys.is_empty())
-            .then(|| AhoCorasick::new(&keys))
-            .transpose()
-            .map_err(|error| CoreError::InvalidArgument(error.to_string()))?;
-        Ok(Self {
-            automaton,
-            patterns,
-        })
+        },
+    )?;
+    let mut records_by_taxon = BTreeMap::<i64, Vec<TaxonNameRecord>>::new();
+    for row in rows {
+        let (name_id, taxon_id, name_kind, name, is_accepted) = row?;
+        records_by_taxon
+            .entry(taxon_id)
+            .or_default()
+            .push(TaxonNameRecord {
+                name_id,
+                name_kind: TaxonomyNameKind::from_code(name_kind)?,
+                name,
+                is_accepted,
+            });
     }
+    Ok(records_by_taxon)
+}
 
-    fn match_filename(&self, filename: &str) -> MatchResult {
-        let stem = std::path::Path::new(filename)
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or(filename);
-        let haystack = format!(" {} ", normalize_match_text(stem));
-        let mut matched_patterns = Vec::new();
-        let mut longest = 0;
-        if let Some(automaton) = &self.automaton {
-            for value in automaton.find_overlapping_iter(&haystack) {
-                let length = value.len();
-                match length.cmp(&longest) {
-                    std::cmp::Ordering::Greater => {
-                        longest = length;
-                        matched_patterns.clear();
-                        matched_patterns.push(value.pattern().as_usize());
-                    }
-                    std::cmp::Ordering::Equal => {
-                        matched_patterns.push(value.pattern().as_usize());
-                    }
-                    std::cmp::Ordering::Less => {}
-                }
+fn filename_candidates(filename: &str) -> Vec<String> {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(filename);
+    let normalized = normalize_match_text(stem);
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    let mut candidates = BTreeSet::new();
+    for start in 0..words.len() {
+        let mut candidate = String::new();
+        for word in &words[start..] {
+            if !candidate.is_empty() {
+                candidate.push(' ');
             }
-        }
-        matched_patterns.sort_unstable();
-        matched_patterns.dedup();
-        let mut records_by_taxon = BTreeMap::<i64, Vec<TaxonNameRecord>>::new();
-        for pattern in matched_patterns {
-            for record in &self.patterns[pattern] {
-                records_by_taxon
-                    .entry(record.taxon_id)
-                    .or_default()
-                    .push(record.clone());
-            }
-        }
-        match records_by_taxon.len() {
-            0 => MatchResult {
-                taxon_id: None,
-                status: PhotoTaxonStatus::Unmatched,
-                records_by_taxon,
-            },
-            1 => MatchResult {
-                taxon_id: records_by_taxon.keys().next().copied(),
-                status: PhotoTaxonStatus::Matched,
-                records_by_taxon,
-            },
-            _ => MatchResult {
-                taxon_id: None,
-                status: PhotoTaxonStatus::Ambiguous,
-                records_by_taxon,
-            },
+            candidate.push_str(word);
+            candidates.insert(candidate.clone());
         }
     }
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    candidates
 }
 
 fn normalize_match_text(value: &str) -> String {
     let mut output = String::new();
     let mut separator = true;
-    for character in value.chars().flat_map(char::to_lowercase) {
+    for character in value.chars() {
         if character.is_alphanumeric() {
-            output.push(character);
+            output.push(character.to_ascii_lowercase());
             separator = false;
         } else if !separator {
             output.push(' ');
@@ -1163,5 +1217,51 @@ mod tests {
         assert_eq!(selected.taxon_id, Some(selected_taxon_id));
         let error = select_photo_taxon(&database, photo.photo_id, i64::MAX).unwrap_err();
         assert!(error.to_string().contains("not a filename candidate"));
+    }
+
+    #[test]
+    fn batches_candidate_lookups_through_the_name_index() {
+        let data = tempfile::tempdir().unwrap();
+        let database = Database::open(data.path().join("vividarium.db")).unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute("INSERT INTO taxa (rank) VALUES (5)", [])
+            .unwrap();
+        let taxon_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                r#"
+                INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted)
+                VALUES (?, 1, 'zzzz target', 1)
+                "#,
+                [taxon_id],
+            )
+            .unwrap();
+        let mut candidates = (0..NAME_CANDIDATE_QUERY_SIZE)
+            .map(|index| format!("candidate {index:04}"))
+            .collect::<BTreeSet<_>>();
+        candidates.insert("zzzz target".into());
+
+        let matches = load_candidate_taxa(&connection, &candidates).unwrap();
+        assert_eq!(matches.get("zzzz target"), Some(&vec![taxon_id]));
+        assert_eq!(matches.len(), 1);
+
+        let plan = connection
+            .prepare(
+                r#"
+                EXPLAIN QUERY PLAN
+                SELECT DISTINCT normalized_name, taxon_id
+                FROM taxon_names INDEXED BY idx_taxon_names_name_search
+                WHERE normalized_name IN ('zzzz target')
+                "#,
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" ");
+        assert!(plan.contains("USING INDEX idx_taxon_names_name_search"));
+        assert!(!plan.contains("SCAN taxon_names"));
     }
 }

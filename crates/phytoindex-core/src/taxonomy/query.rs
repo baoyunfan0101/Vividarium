@@ -165,7 +165,7 @@ fn append_exact_matches(
     let sql = r#"
         SELECT taxon_id
         FROM taxon_names
-        WHERE name_search = ?
+        WHERE normalized_name = ?
         GROUP BY taxon_id
         ORDER BY MIN(CASE WHEN is_accepted = 1 THEN 0 ELSE 1 END), MIN(name_kind), taxon_id
         LIMIT ?
@@ -198,12 +198,12 @@ fn append_full_prefix_matches(
         r#"
         SELECT taxon_id
         FROM taxon_names
-        WHERE name_search >= ?
-          AND name_search < ?
-          AND name_search != ?
+        WHERE normalized_name >= ?
+          AND normalized_name < ?
+          AND normalized_name != ?
           {exclusion_sql}
         GROUP BY taxon_id
-        ORDER BY MIN(name_search), MIN(CASE WHEN is_accepted = 1 THEN 0 ELSE 1 END), MIN(name_kind), taxon_id
+        ORDER BY MIN(normalized_name), MIN(CASE WHEN is_accepted = 1 THEN 0 ELSE 1 END), MIN(name_kind), taxon_id
         LIMIT ?
         "#
     );
@@ -237,7 +237,7 @@ fn append_fts_matches(
         WHERE taxon_names_fts MATCH ?
           {exclusion_sql}
         GROUP BY taxon_names.taxon_id
-        ORDER BY MIN(taxon_names.name_search),
+        ORDER BY MIN(taxon_names.normalized_name),
                  MIN(CASE WHEN taxon_names.is_accepted = 1 THEN 0 ELSE 1 END),
                  MIN(taxon_names.name_kind),
                  taxon_names.taxon_id
@@ -255,7 +255,7 @@ struct FuzzyNameCandidate {
     name_id: i64,
     taxon_id: i64,
     name_kind: i64,
-    name_search: String,
+    normalized_name: String,
     is_accepted: bool,
     edit_distance: usize,
 }
@@ -283,14 +283,14 @@ fn append_fuzzy_matches(
         SELECT taxon_names.name_id,
                taxon_names.taxon_id,
                taxon_names.name_kind,
-               taxon_names.name_search,
+               taxon_names.normalized_name,
                taxon_names.is_accepted
         FROM taxon_names_fts
         JOIN taxon_names ON taxon_names.name_id = taxon_names_fts.rowid
         WHERE taxon_names_fts MATCH ?
           {exclusion_sql}
         ORDER BY bm25(taxon_names_fts),
-                 taxon_names.name_search,
+                 taxon_names.normalized_name,
                  CASE WHEN taxon_names.is_accepted = 1 THEN 0 ELSE 1 END,
                  taxon_names.name_kind,
                  taxon_names.taxon_id
@@ -307,7 +307,7 @@ fn append_fuzzy_matches(
             name_id: row.get(0)?,
             taxon_id: row.get(1)?,
             name_kind: row.get(2)?,
-            name_search: row.get(3)?,
+            normalized_name: row.get(3)?,
             is_accepted: row.get::<_, i64>(4)? != 0,
             edit_distance: 0,
         })
@@ -316,7 +316,7 @@ fn append_fuzzy_matches(
     candidates.retain_mut(|candidate| {
         let Some(distance) = edit_distance_with_limit(
             &search.normalized,
-            &candidate.name_search,
+            &candidate.normalized_name,
             search.fuzzy_max_distance,
         ) else {
             return false;
@@ -329,7 +329,7 @@ fn append_fuzzy_matches(
             .cmp(&right.edit_distance)
             .then_with(|| right.is_accepted.cmp(&left.is_accepted))
             .then_with(|| left.name_kind.cmp(&right.name_kind))
-            .then_with(|| left.name_search.cmp(&right.name_search))
+            .then_with(|| left.normalized_name.cmp(&right.normalized_name))
             .then_with(|| left.taxon_id.cmp(&right.taxon_id))
             .then_with(|| left.name_id.cmp(&right.name_id))
     });
@@ -407,7 +407,7 @@ fn load_name_matches_for_taxa(
     query_params.push(SqlValue::Text(search.normalized.clone()));
     query_params.push(SqlValue::Text(search.prefix_upper.clone()));
     let mut conditions =
-        vec!["(taxon_names.name_search >= ? AND taxon_names.name_search < ?)".to_string()];
+        vec!["(taxon_names.normalized_name >= ? AND taxon_names.normalized_name < ?)".to_string()];
     if let Some(pattern) = search.word_prefix_like_pattern.as_ref() {
         conditions.push("taxon_names.name LIKE ? ESCAPE '\\'".to_string());
         query_params.push(SqlValue::Text(pattern.clone()));

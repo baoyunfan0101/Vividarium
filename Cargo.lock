@@ -2401,7 +2401,6 @@ dependencies = [
 name = "phytoindex-core"
 version = "2.1.0"
 dependencies = [
- "aho-corasick",
  "base64 0.22.1",
  "chrono",
  "csv",
