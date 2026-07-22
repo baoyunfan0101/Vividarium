@@ -5,61 +5,54 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Photo {
     pub photo_id: i64,
-    pub root: String,
+    pub directory_id: i64,
     pub relative_path: String,
-    pub parent_dir: String,
-    pub path_depth: i64,
     pub filename: String,
-    pub binomial_name: Option<String>,
+    pub file_size: i64,
+    pub modified_at_ns: i64,
+    pub thumbnail_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PhotoMetadata {
+    pub photo_id: i64,
     pub captured_at: Option<String>,
-    pub location: Option<String>,
     pub camera: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
-    pub file_size: Option<i64>,
-    pub modified_at: Option<f64>,
     pub longitude: Option<f64>,
     pub latitude: Option<f64>,
     pub exif_json: Option<String>,
-    pub thumbnail_path: Option<String>,
-    pub status: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct NewPhoto {
-    pub root: String,
-    pub relative_path: String,
-    pub parent_dir: String,
-    pub path_depth: i64,
+    pub directory_id: i64,
     pub filename: String,
-    pub binomial_name: Option<String>,
-    pub captured_at: Option<String>,
-    pub location: Option<String>,
-    pub camera: Option<String>,
-    pub width: Option<i64>,
-    pub height: Option<i64>,
-    pub file_size: Option<i64>,
-    pub modified_at: Option<f64>,
-    pub longitude: Option<f64>,
-    pub latitude: Option<f64>,
-    pub exif_json: Option<String>,
+    pub file_size: i64,
+    pub modified_at_ns: i64,
     pub thumbnail_path: Option<String>,
-    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PhotoRootMetadata {
-    pub root: String,
-    pub last_synced_at: Option<String>,
-    pub sort_order: i64,
+pub struct PhotoLibrary {
+    pub root_path: String,
+    pub root_directory_id: i64,
     pub photo_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PhotoDirectory {
+    pub directory_id: i64,
+    pub parent_directory_id: Option<i64>,
+    pub name: String,
+    pub relative_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DirectoryListingPage {
-    pub root: String,
-    pub relative_dir: String,
-    pub directories: Vec<String>,
+    pub directory: PhotoDirectory,
+    pub directories: Vec<PhotoDirectory>,
     pub files: Vec<Photo>,
     pub next_cursor: Option<String>,
     pub directory_count: i64,
@@ -86,10 +79,9 @@ pub struct TaxaMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MappingMetadata {
-    pub last_synced_at: Option<String>,
-    pub photos_last_synced_at: Option<String>,
-    pub taxa_last_synced_at: Option<String>,
     pub mapped_photo_count: i64,
+    pub unmatched_photo_count: i64,
+    pub ambiguous_photo_count: i64,
     pub mapping_taxa_count: i64,
 }
 
@@ -98,6 +90,8 @@ pub struct MappingNode {
     pub taxon: Option<Taxon>,
     pub photo_ids: Vec<i64>,
     pub children: Vec<Taxon>,
+    pub direct_photo_count: i64,
+    pub subtree_photo_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -135,14 +129,13 @@ pub struct ProgressUpdate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhotoSyncResult {
-    pub roots: Option<usize>,
+    pub directory_id: i64,
     pub inserted: usize,
     pub unchanged: usize,
     pub updated: usize,
-    pub new: usize,
     pub deleted: usize,
-    pub other_roots_unchanged: usize,
-    pub thumbnails_cleared: usize,
+    pub directories_inserted: usize,
+    pub directories_deleted: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +154,7 @@ pub struct MappingSyncResult {
     pub processed: usize,
     pub mapped: usize,
     pub unmapped: usize,
+    pub ambiguous: usize,
     pub unmapped_photos: Vec<Photo>,
     pub orphan_mappings_deleted: usize,
 }

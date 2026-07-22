@@ -8,9 +8,12 @@ use crate::db::Database;
 use crate::error::{CoreError, CoreResult};
 
 const ALLOWED_TABLES: &[&str] = &[
+    "photo_library",
+    "photo_directories",
     "photos",
-    "photos_dir",
-    "photos_metadata",
+    "photo_metadata",
+    "photo_taxon_mapping",
+    "photo_taxon_usage",
     "taxa",
     "scientific",
     "english",
@@ -19,9 +22,6 @@ const ALLOWED_TABLES: &[&str] = &[
     "taxonomy_operation_batches",
     "taxonomy_operations",
     "taxa_metadata",
-    "photos_taxa_mapping",
-    "photos_taxa_mapping_metadata",
-    "photos_taxa_mapping_taxa",
 ];
 
 pub fn export_table(database: &Database, table_name: &str, output: &Path) -> CoreResult<usize> {

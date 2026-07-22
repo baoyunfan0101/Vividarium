@@ -47,6 +47,7 @@ impl Database {
         match version {
             0 => connection.execute_batch(SCHEMA)?,
             SCHEMA_VERSION => {
+                validate_photo_schema(&connection)?;
                 connection.execute_batch(SCHEMA)?;
             }
             1 => {
@@ -64,43 +65,109 @@ impl Database {
     }
 }
 
+fn validate_photo_schema(connection: &Connection) -> CoreResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(photos)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.is_empty()
+        && columns
+            != [
+                "photo_id",
+                "directory_id",
+                "filename",
+                "file_size",
+                "modified_at_ns",
+                "thumbnail_path",
+            ]
+    {
+        return Err(CoreError::InvalidArgument(
+            "legacy photos schema is not supported; open a new vividarium.db".into(),
+        ));
+    }
+    Ok(())
+}
+
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS photo_library (
+    library_id INTEGER PRIMARY KEY CHECK (library_id = 1),
+    root_path TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS photo_directories (
+    directory_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_directory_id INTEGER,
+    name TEXT NOT NULL,
+    relative_path TEXT NOT NULL UNIQUE,
+    UNIQUE (parent_directory_id, name),
+    FOREIGN KEY (parent_directory_id) REFERENCES photo_directories(directory_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS photos (
     photo_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    root TEXT NOT NULL,
-    relative_path TEXT NOT NULL,
-    parent_dir TEXT NOT NULL,
-    path_depth INTEGER NOT NULL,
+    directory_id INTEGER NOT NULL,
     filename TEXT NOT NULL,
-    binomial_name TEXT,
+    file_size INTEGER NOT NULL,
+    modified_at_ns INTEGER NOT NULL,
+    thumbnail_path TEXT,
+    UNIQUE (directory_id, filename),
+    CHECK (length(filename) > 0),
+    CHECK (file_size >= 0),
+    FOREIGN KEY (directory_id) REFERENCES photo_directories(directory_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS photo_metadata (
+    photo_id INTEGER PRIMARY KEY,
     captured_at TEXT,
-    location TEXT,
     camera TEXT,
     width INTEGER,
     height INTEGER,
-    file_size INTEGER,
-    modified_at REAL,
     longitude REAL,
     latitude REAL,
     exif_json TEXT,
-    thumbnail_path TEXT DEFAULT NULL,
+    FOREIGN KEY (photo_id) REFERENCES photos(photo_id) ON DELETE CASCADE
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS photo_filenames_fts USING fts5(
+    filename,
+    content = 'photos',
+    content_rowid = 'photo_id',
+    tokenize = 'trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS photos_ai AFTER INSERT ON photos BEGIN
+    INSERT INTO photo_filenames_fts(rowid, filename) VALUES (new.photo_id, new.filename);
+END;
+
+CREATE TRIGGER IF NOT EXISTS photos_ad AFTER DELETE ON photos BEGIN
+    INSERT INTO photo_filenames_fts(photo_filenames_fts, rowid, filename)
+    VALUES ('delete', old.photo_id, old.filename);
+END;
+
+CREATE TRIGGER IF NOT EXISTS photos_au AFTER UPDATE OF filename ON photos BEGIN
+    INSERT INTO photo_filenames_fts(photo_filenames_fts, rowid, filename)
+    VALUES ('delete', old.photo_id, old.filename);
+    INSERT INTO photo_filenames_fts(rowid, filename) VALUES (new.photo_id, new.filename);
+END;
+
+CREATE TABLE IF NOT EXISTS photo_taxon_mapping (
+    photo_id INTEGER PRIMARY KEY,
+    taxon_id INTEGER,
     status TEXT NOT NULL,
-    UNIQUE(root, relative_path)
+    CHECK (status IN ('matched', 'unmatched', 'ambiguous', 'stale')),
+    CHECK ((status = 'matched' AND taxon_id IS NOT NULL)
+        OR (status != 'matched' AND taxon_id IS NULL)),
+    FOREIGN KEY (photo_id) REFERENCES photos(photo_id) ON DELETE CASCADE,
+    FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE SET NULL
 );
 
-CREATE TABLE IF NOT EXISTS photos_dir (
-    root TEXT NOT NULL,
-    relative_dir TEXT NOT NULL,
-    parent_dir TEXT NOT NULL,
-    name TEXT NOT NULL,
-    path_depth INTEGER NOT NULL,
-    PRIMARY KEY (root, relative_dir)
-);
-
-CREATE TABLE IF NOT EXISTS photos_metadata (
-    root TEXT PRIMARY KEY,
-    last_synced_at TEXT,
-    sort_order INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS photo_taxon_usage (
+    taxon_id INTEGER PRIMARY KEY,
+    direct_photo_count INTEGER NOT NULL,
+    subtree_photo_count INTEGER NOT NULL,
+    CHECK (direct_photo_count >= 0),
+    CHECK (subtree_photo_count >= direct_photo_count),
+    FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS taxa (
@@ -186,24 +253,11 @@ CREATE TABLE IF NOT EXISTS taxa_metadata (
     last_synced_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS photos_taxa_mapping_metadata (
-    last_synced_at TEXT,
-    photos_last_synced_at TEXT,
-    taxa_last_synced_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS photos_taxa_mapping (
-    photo_id INTEGER PRIMARY KEY,
-    taxon_id INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS photos_taxa_mapping_taxa (
-    taxon_id INTEGER PRIMARY KEY,
-    rank TEXT NOT NULL,
-    name TEXT NOT NULL,
-    parent_id INTEGER,
-    binomial_name TEXT
-);
+CREATE TRIGGER IF NOT EXISTS taxa_photo_mapping_bd BEFORE DELETE ON taxa BEGIN
+    UPDATE photo_taxon_mapping
+    SET taxon_id = NULL, status = 'stale'
+    WHERE taxon_id = old.taxon_id;
+END;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_taxon_names_one_accepted
     ON taxon_names(taxon_id, name_kind) WHERE is_accepted = 1;
@@ -221,25 +275,16 @@ CREATE INDEX IF NOT EXISTS idx_taxonomy_operations_batch_page
     ON taxonomy_operations(batch_id, row_number, operation_id);
 CREATE INDEX IF NOT EXISTS idx_taxonomy_operation_batches_created
     ON taxonomy_operation_batches(created_at DESC, batch_id DESC);
-CREATE INDEX IF NOT EXISTS idx_photos_root_path ON photos(root, relative_path);
-CREATE INDEX IF NOT EXISTS idx_photos_browse
-    ON photos(root, parent_dir, status, filename);
-CREATE INDEX IF NOT EXISTS idx_photos_browse_cursor
-    ON photos(root, parent_dir, status, filename, photo_id);
-CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status);
-CREATE INDEX IF NOT EXISTS idx_photos_binomial_name ON photos(binomial_name);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_photos_dir_unique
-    ON photos_dir(root, relative_dir);
-CREATE INDEX IF NOT EXISTS idx_photos_dir_browse
-    ON photos_dir(root, parent_dir, name);
-CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxon
-    ON photos_taxa_mapping(taxon_id);
-CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_parent
-    ON photos_taxa_mapping_taxa(parent_id);
-CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_binomial
-    ON photos_taxa_mapping_taxa(binomial_name);
-CREATE INDEX IF NOT EXISTS idx_photos_taxa_mapping_taxa_name
-    ON photos_taxa_mapping_taxa(name);
+CREATE INDEX IF NOT EXISTS idx_photo_directories_parent_name
+    ON photo_directories(parent_directory_id, name, directory_id);
+CREATE INDEX IF NOT EXISTS idx_photos_directory_filename
+    ON photos(directory_id, filename, photo_id);
+CREATE INDEX IF NOT EXISTS idx_photo_taxon_mapping_taxon
+    ON photo_taxon_mapping(taxon_id, photo_id);
+CREATE INDEX IF NOT EXISTS idx_photo_taxon_mapping_status
+    ON photo_taxon_mapping(status, photo_id);
+CREATE INDEX IF NOT EXISTS idx_photo_taxon_usage_subtree
+    ON photo_taxon_usage(subtree_photo_count, taxon_id);
 
 DROP VIEW IF EXISTS taxa_display;
 CREATE VIEW IF NOT EXISTS taxa_display AS
@@ -272,24 +317,12 @@ PRAGMA user_version = 2;
 pub(crate) fn photo_from_row(row: &Row<'_>) -> rusqlite::Result<Photo> {
     Ok(Photo {
         photo_id: row.get("photo_id")?,
-        root: row.get("root")?,
+        directory_id: row.get("directory_id")?,
         relative_path: row.get("relative_path")?,
-        parent_dir: row.get("parent_dir")?,
-        path_depth: row.get("path_depth")?,
         filename: row.get("filename")?,
-        binomial_name: row.get("binomial_name")?,
-        captured_at: row.get("captured_at")?,
-        location: row.get("location")?,
-        camera: row.get("camera")?,
-        width: row.get("width")?,
-        height: row.get("height")?,
         file_size: row.get("file_size")?,
-        modified_at: row.get("modified_at")?,
-        longitude: row.get("longitude")?,
-        latitude: row.get("latitude")?,
-        exif_json: row.get("exif_json")?,
+        modified_at_ns: row.get("modified_at_ns")?,
         thumbnail_path: row.get("thumbnail_path")?,
-        status: row.get("status")?,
     })
 }
 
@@ -317,6 +350,13 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         for table in [
+            "photo_library",
+            "photo_directories",
+            "photos",
+            "photo_metadata",
+            "photo_filenames_fts",
+            "photo_taxon_mapping",
+            "photo_taxon_usage",
             "taxa",
             "taxon_names",
             "taxon_names_fts",
@@ -345,6 +385,18 @@ mod tests {
                 "authority_year",
                 "category",
                 "source"
+            ]
+        );
+        let photo_columns = table_columns(&connection, "photos");
+        assert_eq!(
+            photo_columns,
+            [
+                "photo_id",
+                "directory_id",
+                "filename",
+                "file_size",
+                "modified_at_ns",
+                "thumbnail_path",
             ]
         );
         let batch_columns = table_columns(&connection, "taxonomy_operation_batches");
@@ -400,6 +452,29 @@ mod tests {
         drop(connection);
         let error = Database::open(path).unwrap_err();
         assert!(error.to_string().contains("legacy database schema"));
+    }
+
+    #[test]
+    fn refuses_the_legacy_photos_layout_at_version_two() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("phytoindex.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE photos (
+                    photo_id INTEGER PRIMARY KEY,
+                    root TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    filename TEXT NOT NULL
+                );
+                PRAGMA user_version = 2;
+                "#,
+            )
+            .unwrap();
+        drop(connection);
+        let error = Database::open(path).unwrap_err();
+        assert!(error.to_string().contains("legacy photos schema"));
     }
 
     fn table_columns(connection: &Connection, table: &str) -> Vec<String> {

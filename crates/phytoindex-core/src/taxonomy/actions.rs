@@ -16,6 +16,7 @@ use super::{
     TaxonNameInput, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
     TaxonomyCustomSqlTempTable, TaxonomyCustomSqlTempTableMetadata, TaxonomyNameKind,
 };
+use crate::mapping;
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +118,7 @@ pub fn delete_taxon_name(
         insert_operation_batch(&transaction, &input, &TaxonomyBatchContext::QueryDeleteName)?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
+    mapping::refresh_after_taxonomy_change(database)?;
     Ok(TaxonomyActionResult {
         batch_id,
         operation_id,
@@ -146,6 +148,9 @@ pub fn update_taxon(
         &input,
         &TaxonomyBatchContext::QueryUpdate { options },
     )?;
+    if outcome.status == super::TaxonRowStatus::Applied {
+        mapping::refresh_after_taxonomy_change(database)?;
+    }
     Ok(TaxonomyUpdateActionResult { batch_id, outcome })
 }
 
@@ -163,16 +168,6 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyAc
             "taxon {taxon_id} cannot be deleted because it has child taxa"
         )));
     }
-    let mapped_photo_count: i64 = transaction.query_row(
-        "SELECT COUNT(*) FROM photos_taxa_mapping WHERE taxon_id = ?",
-        [taxon_id],
-        |row| row.get(0),
-    )?;
-    if mapped_photo_count > 0 {
-        return Err(CoreError::InvalidArgument(format!(
-            "taxon {taxon_id} cannot be deleted because it is used by photo mappings"
-        )));
-    }
     let mut session = start_taxonomy_session(&transaction)?;
     transaction.execute("DELETE FROM taxa WHERE taxon_id = ?", [taxon_id])?;
     let changeset_blob = finish_taxonomy_session(&mut session)?;
@@ -184,6 +179,7 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyAc
     )?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
+    mapping::refresh_after_taxonomy_change(database)?;
     Ok(TaxonomyActionResult {
         batch_id,
         operation_id,
@@ -230,6 +226,7 @@ pub fn execute_custom_taxonomy_sql(
     )?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
+    mapping::refresh_after_taxonomy_change(database)?;
     Ok(TaxonomyCustomSqlResult {
         batch_id: Some(batch_id),
         operation_id: Some(operation_id),

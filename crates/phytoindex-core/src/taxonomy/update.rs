@@ -10,6 +10,7 @@ use super::page::{
     TaxonomyCursor, TaxonomyPage, decode_cursor, encode_cursor, invalid_cursor, page_limit,
 };
 use super::view::{TaxonSummary, load_taxon_summaries, load_taxon_summary};
+use crate::mapping;
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -315,6 +316,12 @@ pub fn apply_rows(
             &TaxonomyBatchContext::BatchUpdate { options },
         )?;
         outcomes.push(outcome);
+    }
+    if outcomes
+        .iter()
+        .any(|outcome| outcome.status == TaxonRowStatus::Applied)
+    {
+        mapping::refresh_after_taxonomy_change(database)?;
     }
     Ok(TaxonBatchResult {
         batch_id,
@@ -718,6 +725,7 @@ pub fn revert_taxonomy_operation(database: &Database, operation_id: i64) -> Core
         [operation_id],
     )?;
     transaction.commit()?;
+    mapping::refresh_after_taxonomy_change(database)?;
     Ok(())
 }
 
@@ -2554,9 +2562,12 @@ mod tests {
     #[test]
     fn restricts_custom_sql_to_taxonomy_tables() {
         let (_directory, database) = database();
-        let error =
-            execute_custom_taxonomy_sql(&database, "UPDATE photos SET status = 'ready'", None)
-                .unwrap_err();
+        let error = execute_custom_taxonomy_sql(
+            &database,
+            "UPDATE photos SET filename = 'blocked.jpg'",
+            None,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("not authorized"));
 
         let error = execute_custom_taxonomy_sql(&database, "DROP TABLE taxa", None).unwrap_err();

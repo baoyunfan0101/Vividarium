@@ -1,233 +1,197 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use base64::Engine;
-use chrono::{Local, NaiveDateTime};
+use chrono::NaiveDateTime;
 use exif::{In, Reader as ExifReader, Tag, Value};
-use regex::Regex;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 
 use crate::db::{Database, photo_from_row};
 use crate::error::{CoreError, CoreResult};
-use crate::models::{DirectoryListingPage, NewPhoto, Photo, PhotoRootMetadata, PhotoSyncResult};
-
-pub const STATUS_UNCHANGED: &str = "unchanged";
-pub const STATUS_DELETED: &str = "deleted";
-pub const STATUS_UPDATED: &str = "updated";
-pub const STATUS_NEW: &str = "new";
+use crate::mapping;
+use crate::models::{
+    DirectoryListingPage, NewPhoto, Photo, PhotoDirectory, PhotoLibrary, PhotoMetadata,
+    PhotoSyncResult,
+};
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     "arw", "bmp", "cr2", "cr3", "dng", "gif", "heic", "jpeg", "jpg", "nef", "png", "raf", "rw2",
     "tif", "tiff", "webp",
 ];
+const MAX_PAGE_LIMIT: usize = 500;
+static PHOTO_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 pub type ProgressCallback<'a> = dyn FnMut(u64, Option<u64>, &str) + Send + 'a;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DirectoryCursor {
-    section: String,
-    name: Option<String>,
-    filename: Option<String>,
-    photo_id: Option<i64>,
+    section: DirectorySection,
+    name: String,
+    id: i64,
 }
 
-#[derive(Debug, Default)]
-struct FileMetadata {
-    width: Option<i64>,
-    height: Option<i64>,
-    captured_at: Option<String>,
-    camera: Option<String>,
-    longitude: Option<f64>,
-    latitude: Option<f64>,
-    exif_json: Option<String>,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DirectorySection {
+    Directories,
+    Files,
 }
 
-#[derive(Debug, Default, PartialEq)]
-struct FilenameMetadata {
-    binomial_name: Option<String>,
-    shoot_date: Option<String>,
-    location: Option<String>,
-    device: Option<String>,
+#[derive(Debug)]
+struct ScannedDirectory {
+    name: String,
 }
 
-pub fn get_roots_metadata(database: &Database) -> CoreResult<Vec<PhotoRootMetadata>> {
-    let connection = database.connect()?;
-    let mut statement = connection.prepare(
-        r#"
-        SELECT
-            photos_metadata.root,
-            photos_metadata.last_synced_at,
-            photos_metadata.sort_order,
-            COALESCE(photo_counts.photo_count, 0) AS photo_count
-        FROM photos_metadata
-        LEFT JOIN (
-            SELECT root, COUNT(*) AS photo_count FROM photos GROUP BY root
-        ) AS photo_counts ON photo_counts.root = photos_metadata.root
-        ORDER BY photos_metadata.sort_order, photos_metadata.root
-        "#,
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok(PhotoRootMetadata {
-            root: row.get(0)?,
-            last_synced_at: row.get(1)?,
-            sort_order: row.get(2)?,
-            photo_count: row.get(3)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+#[derive(Debug)]
+struct ScannedPhoto {
+    filename: String,
+    file_size: i64,
+    modified_at_ns: i64,
 }
 
-pub fn save_roots(database: &Database, roots: &[String]) -> CoreResult<Vec<PhotoRootMetadata>> {
-    let roots = roots
-        .iter()
-        .map(|root| normalize_root(root))
-        .collect::<CoreResult<Vec<_>>>()?;
+pub fn open_library(database: &Database, root: &str) -> CoreResult<PhotoLibrary> {
+    let _guard = PHOTO_WRITE_LOCK
+        .lock()
+        .map_err(|_| CoreError::InvalidArgument("photo workspace lock is poisoned".into()))?;
+    let root = normalize_root(root)?;
     let mut connection = database.connect()?;
     let transaction = connection.transaction()?;
-    let existing = {
-        let mut statement =
-            transaction.prepare("SELECT root, last_synced_at FROM photos_metadata")?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })?;
-        rows.collect::<Result<BTreeMap<_, _>, _>>()?
-    };
-    transaction.execute("DELETE FROM photos_metadata", [])?;
-    for (index, root) in roots.iter().enumerate() {
+    let current = transaction
+        .query_row(
+            "SELECT root_path FROM photo_library WHERE library_id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if current.as_deref() != Some(root.as_str()) {
+        transaction.execute("DELETE FROM photo_taxon_usage", [])?;
+        transaction.execute("DELETE FROM photo_directories", [])?;
+        transaction.execute("DELETE FROM photo_library", [])?;
         transaction.execute(
-            "INSERT INTO photos_metadata (root, last_synced_at, sort_order) VALUES (?, ?, ?)",
-            params![root, existing.get(root).cloned().flatten(), index as i64],
+            "INSERT INTO photo_library (library_id, root_path) VALUES (1, ?)",
+            [&root],
+        )?;
+        transaction.execute(
+            "INSERT INTO photo_directories (parent_directory_id, name, relative_path) VALUES (NULL, '', '')",
+            [],
         )?;
     }
     transaction.commit()?;
-    get_roots_metadata(database)
+    get_library(database)?.ok_or_else(|| CoreError::NotFound("photo library".into()))
+}
+
+pub fn get_library(database: &Database) -> CoreResult<Option<PhotoLibrary>> {
+    let connection = database.connect()?;
+    connection
+        .query_row(
+            r#"
+            SELECT photo_library.root_path, root.directory_id, COUNT(photos.photo_id)
+            FROM photo_library
+            JOIN photo_directories AS root ON root.relative_path = ''
+            LEFT JOIN photos ON TRUE
+            WHERE photo_library.library_id = 1
+            GROUP BY photo_library.root_path, root.directory_id
+            "#,
+            [],
+            |row| {
+                Ok(PhotoLibrary {
+                    root_path: row.get(0)?,
+                    root_directory_id: row.get(1)?,
+                    photo_count: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 pub fn get_photo(database: &Database, photo_id: i64) -> CoreResult<Option<Photo>> {
     let connection = database.connect()?;
-    Ok(connection
+    connection
         .query_row(
-            "SELECT * FROM photos WHERE photo_id = ?",
+            &photo_select("WHERE photos.photo_id = ?"),
             [photo_id],
             photo_from_row,
         )
-        .optional()?)
+        .optional()
+        .map_err(Into::into)
 }
 
 pub fn list_photos(database: &Database) -> CoreResult<Vec<Photo>> {
     let connection = database.connect()?;
-    let mut statement = connection.prepare("SELECT * FROM photos ORDER BY photo_id")?;
+    let mut statement = connection.prepare(&photo_select("ORDER BY photos.photo_id"))?;
     let rows = statement.query_map([], photo_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn list_changed_photos(database: &Database) -> CoreResult<Vec<Photo>> {
-    let connection = database.connect()?;
-    let mut statement =
-        connection.prepare("SELECT * FROM photos WHERE status IN (?, ?) ORDER BY photo_id")?;
-    let rows = statement.query_map(params![STATUS_UPDATED, STATUS_NEW], photo_from_row)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-pub fn list_map_photos(
+pub fn browse_directory(
     database: &Database,
-    bbox: Option<(f64, f64, f64, f64)>,
-) -> CoreResult<Vec<Photo>> {
-    let connection = database.connect()?;
-    let mut statement = connection.prepare(
-        r#"
-        SELECT * FROM photos
-        WHERE status != ? AND longitude IS NOT NULL AND latitude IS NOT NULL
-        ORDER BY captured_at, photo_id
-        "#,
-    )?;
-    let rows = statement.query_map([STATUS_DELETED], photo_from_row)?;
-    let photos = rows.collect::<Result<Vec<_>, _>>()?;
-    Ok(match bbox {
-        None => photos,
-        Some((min_lng, min_lat, max_lng, max_lat)) => photos
-            .into_iter()
-            .filter(|photo| {
-                matches!((photo.longitude, photo.latitude), (Some(lng), Some(lat)) if
-                    lng >= min_lng && lng <= max_lng && lat >= min_lat && lat <= max_lat)
-            })
-            .collect(),
-    })
-}
-
-pub fn browse_photos_page(
-    database: &Database,
-    root: &str,
-    relative_dir: &str,
+    directory_id: i64,
     cursor: Option<&str>,
     limit: usize,
 ) -> CoreResult<DirectoryListingPage> {
-    let root = normalize_root(root)?;
-    let directory = normalize_relative_path(relative_dir);
-    let limit = limit.clamp(1, 500);
-    let cursor = decode_cursor(cursor)?;
-    let mut section = cursor
-        .as_ref()
-        .map(|value| value.section.as_str())
-        .unwrap_or("directories");
     let connection = database.connect()?;
-
-    let directory_count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM photos_dir WHERE root = ? AND parent_dir = ?",
-        params![root, directory],
+    let directory = load_directory(&connection, directory_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("photo directory {directory_id}")))?;
+    let cursor = decode_cursor(cursor)?;
+    let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+    let directory_count = connection.query_row(
+        "SELECT COUNT(*) FROM photo_directories WHERE parent_directory_id = ?",
+        [directory_id],
         |row| row.get(0),
     )?;
-    let file_count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM photos WHERE root = ? AND status != ? AND parent_dir = ?",
-        params![root, STATUS_DELETED, directory],
+    let file_count = connection.query_row(
+        "SELECT COUNT(*) FROM photos WHERE directory_id = ?",
+        [directory_id],
         |row| row.get(0),
     )?;
-
     let mut directories = Vec::new();
     let mut files = Vec::new();
     let mut remaining = limit;
-    if section == "directories" {
-        let after_name = cursor.as_ref().and_then(|value| value.name.as_deref());
-        let mut statement = if after_name.is_some() {
-            connection.prepare(
-                "SELECT name FROM photos_dir WHERE root = ? AND parent_dir = ? AND name > ? ORDER BY name LIMIT ?",
-            )?
-        } else {
-            connection.prepare(
-                "SELECT name FROM photos_dir WHERE root = ? AND parent_dir = ? ORDER BY name LIMIT ?",
-            )?
-        };
-        directories = match after_name {
-            Some(name) => statement
-                .query_map(params![root, directory, name, remaining as i64], |row| {
-                    row.get(0)
-                })?
-                .collect::<Result<Vec<String>, _>>()?,
-            None => statement
-                .query_map(params![root, directory, remaining as i64], |row| row.get(0))?
-                .collect::<Result<Vec<String>, _>>()?,
-        };
+    let section = cursor
+        .as_ref()
+        .map(|value| value.section)
+        .unwrap_or(DirectorySection::Directories);
+
+    if section == DirectorySection::Directories {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT directory_id, parent_directory_id, name, relative_path
+            FROM photo_directories
+            WHERE parent_directory_id = ?1
+              AND (?2 = '' OR name > ?2 OR (name = ?2 AND directory_id > ?3))
+            ORDER BY name, directory_id
+            LIMIT ?4
+            "#,
+        )?;
+        let (after_name, after_id) = cursor
+            .as_ref()
+            .map(|value| (value.name.as_str(), value.id))
+            .unwrap_or(("", 0));
+        let rows = statement.query_map(
+            params![directory_id, after_name, after_id, remaining as i64],
+            directory_from_row,
+        )?;
+        directories = rows.collect::<Result<Vec<_>, _>>()?;
         remaining -= directories.len();
         if remaining == 0 {
             let next_cursor = directories
                 .last()
-                .map(|name| {
+                .map(|value| {
                     encode_cursor(&DirectoryCursor {
-                        section: "directories".into(),
-                        name: Some(name.clone()),
-                        filename: None,
-                        photo_id: None,
+                        section: DirectorySection::Directories,
+                        name: value.name.clone(),
+                        id: value.directory_id,
                     })
                 })
                 .transpose()?;
             return Ok(DirectoryListingPage {
-                root,
-                relative_dir: directory,
+                directory,
                 directories,
                 files,
                 next_cursor,
@@ -235,83 +199,42 @@ pub fn browse_photos_page(
                 file_count,
             });
         }
-        section = "files";
     }
 
-    if section == "files" && remaining > 0 {
-        let after_filename = cursor.as_ref().and_then(|value| value.filename.as_deref());
-        let after_photo_id = cursor.as_ref().and_then(|value| value.photo_id);
-        let mut statement = if after_filename.is_some() && after_photo_id.is_some() {
-            connection.prepare(
-                r#"
-                SELECT * FROM photos
-                WHERE root = ? AND status != ? AND parent_dir = ?
-                  AND (filename > ? OR (filename = ? AND photo_id > ?))
-                ORDER BY filename, photo_id LIMIT ?
-                "#,
-            )?
-        } else {
-            connection.prepare(
-                "SELECT * FROM photos WHERE root = ? AND status != ? AND parent_dir = ? ORDER BY filename, photo_id LIMIT ?",
-            )?
-        };
-        let rows = match (after_filename, after_photo_id) {
-            (Some(filename), Some(photo_id)) => statement.query_map(
-                params![
-                    root,
-                    STATUS_DELETED,
-                    directory,
-                    filename,
-                    filename,
-                    photo_id,
-                    remaining as i64
-                ],
-                photo_from_row,
-            )?,
-            _ => statement.query_map(
-                params![root, STATUS_DELETED, directory, remaining as i64],
-                photo_from_row,
-            )?,
-        };
+    if remaining > 0 {
+        let (after_name, after_id) = cursor
+            .as_ref()
+            .filter(|value| value.section == DirectorySection::Files)
+            .map(|value| (value.name.as_str(), value.id))
+            .unwrap_or(("", 0));
+        let mut statement = connection.prepare(&photo_select(
+            r#"
+            WHERE photos.directory_id = ?1
+              AND (?2 = '' OR photos.filename > ?2
+                   OR (photos.filename = ?2 AND photos.photo_id > ?3))
+            ORDER BY photos.filename, photos.photo_id
+            LIMIT ?4
+            "#,
+        ))?;
+        let rows = statement.query_map(
+            params![directory_id, after_name, after_id, remaining as i64],
+            photo_from_row,
+        )?;
         files = rows.collect::<Result<Vec<_>, _>>()?;
     }
 
-    let next_cursor = if let Some(last) = files.last() {
-        let exists: i64 = connection.query_row(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM photos
-                WHERE root = ? AND status != ? AND parent_dir = ?
-                  AND (filename > ? OR (filename = ? AND photo_id > ?))
-            )
-            "#,
-            params![
-                root,
-                STATUS_DELETED,
-                directory,
-                last.filename,
-                last.filename,
-                last.photo_id
-            ],
-            |row| row.get(0),
-        )?;
-        if exists != 0 {
-            Some(encode_cursor(&DirectoryCursor {
-                section: "files".into(),
-                name: None,
-                filename: Some(last.filename.clone()),
-                photo_id: Some(last.photo_id),
-            })?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
+    let next_cursor = files
+        .last()
+        .map(|value| {
+            encode_cursor(&DirectoryCursor {
+                section: DirectorySection::Files,
+                name: value.filename.clone(),
+                id: value.photo_id,
+            })
+        })
+        .transpose()?;
     Ok(DirectoryListingPage {
-        root,
-        relative_dir: directory,
+        directory,
         directories,
         files,
         next_cursor,
@@ -320,195 +243,238 @@ pub fn browse_photos_page(
     })
 }
 
-pub fn update_photos(
-    database: &Database,
-    root: &str,
-    progress: &mut ProgressCallback<'_>,
-) -> CoreResult<PhotoSyncResult> {
-    update_photos_inner(database, root, true, progress)
+pub fn refresh_directory(database: &Database, directory_id: i64) -> CoreResult<PhotoSyncResult> {
+    let _guard = PHOTO_WRITE_LOCK
+        .lock()
+        .map_err(|_| CoreError::InvalidArgument("photo workspace lock is poisoned".into()))?;
+    refresh_directory_locked(database, directory_id)
 }
 
-pub fn update_photos_many(
-    database: &Database,
-    roots: &[String],
-    progress: &mut ProgressCallback<'_>,
-) -> CoreResult<BTreeMap<String, PhotoSyncResult>> {
-    if roots.is_empty() {
-        return Err(CoreError::InvalidArgument(
-            "at least one photo root is required".into(),
-        ));
-    }
+fn refresh_directory_locked(database: &Database, directory_id: i64) -> CoreResult<PhotoSyncResult> {
     let connection = database.connect()?;
-    connection.execute(
-        "UPDATE photos SET status = ? WHERE status != ?",
-        params![STATUS_UNCHANGED, STATUS_DELETED],
-    )?;
-    let mut results = BTreeMap::new();
-    for root in roots {
-        results.insert(
-            root.clone(),
-            update_photos_inner(database, root, false, progress)?,
-        );
-    }
-    Ok(results)
-}
+    let directory = load_directory(&connection, directory_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("photo directory {directory_id}")))?;
+    let root = library_root(&connection)?;
+    let path = safe_directory_path(&root, &directory.relative_path)?;
+    let (scanned_directories, scanned_photos) = scan_directory(&path)?;
+    drop(connection);
 
-fn update_photos_inner(
-    database: &Database,
-    root: &str,
-    reset_other_roots: bool,
-    progress: &mut ProgressCallback<'_>,
-) -> CoreResult<PhotoSyncResult> {
-    let root = normalize_root(root)?;
-    let image_files = image_files(&root)?;
-    let total = image_files.len() as u64;
-    progress(0, Some(total), &format!("Updating {root}"));
     let mut connection = database.connect()?;
     let transaction = connection.transaction()?;
-    let other_roots_unchanged = if reset_other_roots {
-        transaction.execute(
-            "UPDATE photos SET status = ? WHERE root != ? AND status != ?",
-            params![STATUS_UNCHANGED, root, STATUS_DELETED],
-        )?
-    } else {
-        0
-    };
-    let mut scanned_paths = HashSet::new();
-    let mut unchanged = 0;
-    let mut updated = 0;
-    let mut inserted = 0;
+    let existing_directories = direct_directories(&transaction, directory_id)?;
+    let existing_photos = direct_photos(&transaction, directory_id)?;
+    let scanned_directory_names = scanned_directories
+        .iter()
+        .map(|value| value.name.as_str())
+        .collect::<HashSet<_>>();
+    let scanned_photo_names = scanned_photos
+        .iter()
+        .map(|value| value.filename.as_str())
+        .collect::<HashSet<_>>();
+    let removed_directory_ids = existing_directories
+        .iter()
+        .filter_map(|(name, value)| {
+            (!scanned_directory_names.contains(name.as_str())).then_some(value.directory_id)
+        })
+        .collect::<Vec<_>>();
+    let removed_photo_ids = existing_photos
+        .iter()
+        .filter_map(|(name, value)| {
+            (!scanned_photo_names.contains(name.as_str())).then_some(value.photo_id)
+        })
+        .collect::<Vec<_>>();
 
-    for (index, path) in image_files.iter().enumerate() {
-        let relative_path = relative_path(&root, path)?;
-        scanned_paths.insert(relative_path.clone());
-        let metadata = fs::metadata(path)?;
-        let file_size = metadata.len() as i64;
-        let modified_at = modified_at(&metadata)?;
-        let existing = transaction
-            .query_row(
-                "SELECT * FROM photos WHERE root = ? AND relative_path = ?",
-                params![root, relative_path],
-                photo_from_row,
-            )
-            .optional()?;
-        match existing {
+    mapping::remove_directory_mappings(&transaction, &removed_directory_ids)?;
+    mapping::remove_photo_mappings(&transaction, &removed_photo_ids)?;
+    for id in &removed_directory_ids {
+        transaction.execute("DELETE FROM photo_directories WHERE directory_id = ?", [id])?;
+    }
+    for id in &removed_photo_ids {
+        transaction.execute("DELETE FROM photos WHERE photo_id = ?", [id])?;
+    }
+
+    let mut directories_inserted = 0;
+    for entry in scanned_directories {
+        if existing_directories.contains_key(&entry.name) {
+            continue;
+        }
+        let relative_path = join_relative_path(&directory.relative_path, &entry.name);
+        transaction.execute(
+            "INSERT INTO photo_directories (parent_directory_id, name, relative_path) VALUES (?, ?, ?)",
+            params![directory_id, entry.name, relative_path],
+        )?;
+        directories_inserted += 1;
+    }
+
+    let mut inserted = 0;
+    let mut updated = 0;
+    let mut unchanged = 0;
+    let mut changed_photo_ids = Vec::new();
+    for entry in scanned_photos {
+        match existing_photos.get(&entry.filename) {
             None => {
-                let record = build_record(&root, path, STATUS_NEW)?;
-                insert_photo(&transaction, &record)?;
+                let photo_id = insert_photo(
+                    &transaction,
+                    &NewPhoto {
+                        directory_id,
+                        filename: entry.filename,
+                        file_size: entry.file_size,
+                        modified_at_ns: entry.modified_at_ns,
+                        thumbnail_path: None,
+                    },
+                )?;
+                changed_photo_ids.push(photo_id);
                 inserted += 1;
             }
             Some(photo)
-                if photo.file_size == Some(file_size) && photo.modified_at == Some(modified_at) =>
+                if photo.file_size == entry.file_size
+                    && photo.modified_at_ns == entry.modified_at_ns =>
             {
-                transaction.execute(
-                    "UPDATE photos SET status = ? WHERE photo_id = ?",
-                    params![STATUS_UNCHANGED, photo.photo_id],
-                )?;
                 unchanged += 1;
             }
             Some(photo) => {
-                let record = build_record(&root, path, STATUS_UPDATED)?;
-                update_photo(&transaction, photo.photo_id, &record)?;
+                transaction.execute(
+                    r#"
+                    UPDATE photos
+                    SET file_size = ?, modified_at_ns = ?, thumbnail_path = NULL
+                    WHERE photo_id = ?
+                    "#,
+                    params![entry.file_size, entry.modified_at_ns, photo.photo_id],
+                )?;
+                transaction.execute(
+                    "DELETE FROM photo_metadata WHERE photo_id = ?",
+                    [photo.photo_id],
+                )?;
+                changed_photo_ids.push(photo.photo_id);
                 updated += 1;
             }
         }
-        progress((index + 1) as u64, Some(total), &format!("Updating {root}"));
     }
-
-    let existing_paths = {
-        let mut statement = transaction.prepare(
-            "SELECT photo_id, relative_path, status FROM photos WHERE root = ? ORDER BY relative_path",
-        )?;
-        let rows = statement.query_map([&root], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-    let mut deleted = 0;
-    for (photo_id, path, status) in existing_paths {
-        if !scanned_paths.contains(&path) && status != STATUS_DELETED {
-            transaction.execute(
-                "UPDATE photos SET status = ? WHERE photo_id = ?",
-                params![STATUS_DELETED, photo_id],
-            )?;
-            deleted += 1;
-        }
-    }
-    refresh_directories(&transaction, &root)?;
-    upsert_root(&transaction, &root)?;
+    mapping::remap_photo_ids(&transaction, &changed_photo_ids)?;
     transaction.commit()?;
     Ok(PhotoSyncResult {
-        roots: None,
+        directory_id,
         inserted,
         unchanged,
         updated,
-        new: inserted,
-        deleted,
-        other_roots_unchanged,
-        thumbnails_cleared: 0,
+        deleted: removed_photo_ids.len(),
+        directories_inserted,
+        directories_deleted: removed_directory_ids.len(),
     })
 }
 
-pub fn rebuild_photos(
-    database: &Database,
-    roots: &[String],
-    thumbnail_root: &Path,
-    progress: &mut ProgressCallback<'_>,
-) -> CoreResult<PhotoSyncResult> {
-    let roots = roots
-        .iter()
-        .map(|root| normalize_root(root))
-        .collect::<CoreResult<Vec<_>>>()?;
-    let mut root_files = Vec::new();
-    for root in &roots {
-        root_files.push((root.clone(), image_files(root)?));
+pub fn rename_photo(database: &Database, photo_id: i64, new_filename: &str) -> CoreResult<Photo> {
+    let _guard = PHOTO_WRITE_LOCK
+        .lock()
+        .map_err(|_| CoreError::InvalidArgument("photo workspace lock is poisoned".into()))?;
+    let new_filename = validate_filename(new_filename)?;
+    let old_photo = get_photo(database, photo_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))?;
+    if old_photo.filename == new_filename {
+        return Ok(old_photo);
     }
-    let total = root_files
-        .iter()
-        .map(|(_, files)| files.len())
-        .sum::<usize>();
-    progress(0, Some(total as u64), "Scanning photos");
-    let thumbnails_cleared = clear_thumbnail_cache(thumbnail_root)?;
-    let mut connection = database.connect()?;
-    let transaction = connection.transaction()?;
-    transaction.execute("DELETE FROM photos", [])?;
-    transaction.execute("DELETE FROM photos_dir", [])?;
-    transaction.execute("DELETE FROM sqlite_sequence WHERE name = 'photos'", [])?;
-    let mut inserted = 0;
-    for (root, files) in root_files {
-        for path in files {
-            insert_photo(&transaction, &build_record(&root, &path, STATUS_NEW)?)?;
-            inserted += 1;
-            progress(
-                inserted as u64,
-                Some(total as u64),
-                &format!("Rebuilding {root}"),
-            );
+    let connection = database.connect()?;
+    let root = library_root(&connection)?;
+    let directory = load_directory(&connection, old_photo.directory_id)?.ok_or_else(|| {
+        CoreError::NotFound(format!("photo directory {}", old_photo.directory_id))
+    })?;
+    let directory_path = safe_directory_path(&root, &directory.relative_path)?;
+    let source = directory_path.join(&old_photo.filename);
+    let destination = directory_path.join(&new_filename);
+    let case_only_rename = destination.exists()
+        && source.canonicalize().ok().as_deref() == destination.canonicalize().ok().as_deref();
+    if destination.exists() && !case_only_rename {
+        return Err(CoreError::InvalidArgument(format!(
+            "photo filename already exists: {new_filename}"
+        )));
+    }
+    if case_only_rename {
+        let temporary = directory_path.join(format!(".vividarium-rename-{photo_id}.tmp"));
+        if temporary.exists() {
+            return Err(CoreError::InvalidArgument(
+                "temporary photo rename path already exists".into(),
+            ));
         }
-        refresh_directories(&transaction, &root)?;
-        upsert_root(&transaction, &root)?;
+        fs::rename(&source, &temporary)?;
+        if let Err(error) = fs::rename(&temporary, &destination) {
+            let _ = fs::rename(&temporary, &source);
+            return Err(error.into());
+        }
+    } else {
+        fs::rename(&source, &destination)?;
     }
-    transaction.commit()?;
-    Ok(PhotoSyncResult {
-        roots: Some(roots.len()),
-        inserted,
-        unchanged: 0,
-        updated: 0,
-        new: inserted,
-        deleted: 0,
-        other_roots_unchanged: 0,
-        thumbnails_cleared,
-    })
+
+    let result = (|| {
+        let mut connection = database.connect()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE photos SET filename = ? WHERE photo_id = ?",
+            params![new_filename, photo_id],
+        )?;
+        mapping::remap_photo_ids(&transaction, &[photo_id])?;
+        transaction.commit()?;
+        get_photo(database, photo_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))
+    })();
+    if result.is_err() {
+        let _ = fs::rename(&destination, &source);
+    }
+    result
 }
 
 pub fn photo_file_path(database: &Database, photo_id: i64) -> CoreResult<PathBuf> {
     let photo = get_photo(database, photo_id)?
         .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))?;
-    safe_photo_path(&photo)
+    let connection = database.connect()?;
+    let root = library_root(&connection)?;
+    let directory = load_directory(&connection, photo.directory_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("photo directory {}", photo.directory_id)))?;
+    let directory = safe_directory_path(&root, &directory.relative_path)?;
+    safe_file_path(&root, &directory.join(photo.filename))
+}
+
+pub fn get_photo_metadata(database: &Database, photo_id: i64) -> CoreResult<PhotoMetadata> {
+    let connection = database.connect()?;
+    if let Some(metadata) = connection
+        .query_row(
+            "SELECT * FROM photo_metadata WHERE photo_id = ?",
+            [photo_id],
+            metadata_from_row,
+        )
+        .optional()?
+    {
+        return Ok(metadata);
+    }
+    drop(connection);
+    let path = photo_file_path(database, photo_id)?;
+    let metadata = read_file_metadata(photo_id, &path);
+    let connection = database.connect()?;
+    connection.execute(
+        r#"
+        INSERT INTO photo_metadata (
+            photo_id, captured_at, camera, width, height, longitude, latitude, exif_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(photo_id) DO UPDATE SET
+            captured_at = excluded.captured_at,
+            camera = excluded.camera,
+            width = excluded.width,
+            height = excluded.height,
+            longitude = excluded.longitude,
+            latitude = excluded.latitude,
+            exif_json = excluded.exif_json
+        "#,
+        params![
+            metadata.photo_id,
+            metadata.captured_at,
+            metadata.camera,
+            metadata.width,
+            metadata.height,
+            metadata.longitude,
+            metadata.latitude,
+            metadata.exif_json,
+        ],
+    )?;
+    Ok(metadata)
 }
 
 pub fn get_or_create_thumbnail(
@@ -524,17 +490,15 @@ pub fn get_or_create_thumbnail(
             return Ok(path);
         }
     }
-    let source = safe_photo_path(&photo)?;
+    let source = photo_file_path(database, photo_id)?;
     fs::create_dir_all(thumbnail_root)?;
-    let modified = photo.modified_at.unwrap_or_default() as i64;
-    let file_size = photo.file_size.unwrap_or_default();
     let output = thumbnail_root.join(format!(
         "photo_{}_{}_{}.webp",
-        photo.photo_id, modified, file_size
+        photo.photo_id, photo.modified_at_ns, photo.file_size
     ));
-    let image = image::open(&source)?;
-    let thumbnail = image.thumbnail(256, 256);
-    thumbnail.save_with_format(&output, image::ImageFormat::WebP)?;
+    image::open(&source)?
+        .thumbnail(256, 256)
+        .save_with_format(&output, image::ImageFormat::WebP)?;
     let connection = database.connect()?;
     connection.execute(
         "UPDATE photos SET thumbnail_path = ? WHERE photo_id = ?",
@@ -573,266 +537,227 @@ pub fn rebase_thumbnail_paths(database: &Database, thumbnail_root: &Path) -> Cor
     Ok(updated)
 }
 
-fn normalize_root(root: &str) -> CoreResult<String> {
-    let expanded = expand_home(root);
-    Ok(expanded.canonicalize()?.to_string_lossy().into_owned())
+fn photo_select(suffix: &str) -> String {
+    format!(
+        r#"
+        SELECT photos.photo_id, photos.directory_id,
+               CASE WHEN photo_directories.relative_path = '' THEN photos.filename
+                    ELSE photo_directories.relative_path || '/' || photos.filename END AS relative_path,
+               photos.filename, photos.file_size, photos.modified_at_ns, photos.thumbnail_path
+        FROM photos
+        JOIN photo_directories ON photo_directories.directory_id = photos.directory_id
+        {suffix}
+        "#
+    )
 }
 
-fn expand_home(value: &str) -> PathBuf {
-    if value == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(value));
-    }
-    if let Some(rest) = value.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(value)
+fn load_directory(
+    connection: &rusqlite::Connection,
+    directory_id: i64,
+) -> CoreResult<Option<PhotoDirectory>> {
+    connection
+        .query_row(
+            r#"
+            SELECT directory_id, parent_directory_id, name, relative_path
+            FROM photo_directories WHERE directory_id = ?
+            "#,
+            [directory_id],
+            directory_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
-fn normalize_relative_path(value: &str) -> String {
-    value.replace('\\', "/").trim_matches('/').to_string()
-}
-
-fn image_files(root: &str) -> CoreResult<Vec<PathBuf>> {
-    let mut paths = WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .filter(|path| {
-            path.extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|extension| {
-                    IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
-                })
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-    Ok(paths)
-}
-
-fn relative_path(root: &str, path: &Path) -> CoreResult<String> {
-    Ok(path
-        .strip_prefix(root)
-        .map_err(|_| CoreError::UnsafePath(path.to_path_buf()))?
-        .to_string_lossy()
-        .replace('\\', "/"))
-}
-
-fn modified_at(metadata: &fs::Metadata) -> CoreResult<f64> {
-    Ok(metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| CoreError::InvalidArgument(error.to_string()))?
-        .as_secs_f64())
-}
-
-fn build_record(root: &str, path: &Path, status: &str) -> CoreResult<NewPhoto> {
-    let filename = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| CoreError::InvalidArgument("photo filename is not valid UTF-8".into()))?
-        .to_string();
-    let relative_path = relative_path(root, path)?;
-    let parent_dir = Path::new(&relative_path)
-        .parent()
-        .map(|value| value.to_string_lossy().replace('\\', "/"))
-        .filter(|value| value != ".")
-        .unwrap_or_default();
-    let parsed = parse_filename(&filename);
-    let metadata = read_file_metadata(path);
-    let stat = fs::metadata(path)?;
-    Ok(NewPhoto {
-        root: root.into(),
-        relative_path,
-        path_depth: if parent_dir.is_empty() {
-            0
-        } else {
-            parent_dir.split('/').count() as i64
-        },
-        parent_dir,
-        filename,
-        binomial_name: parsed.binomial_name,
-        captured_at: metadata.captured_at.or(parsed.shoot_date),
-        location: parsed.location,
-        camera: metadata.camera.or(parsed.device),
-        width: metadata.width,
-        height: metadata.height,
-        file_size: Some(stat.len() as i64),
-        modified_at: Some(modified_at(&stat)?),
-        longitude: metadata.longitude,
-        latitude: metadata.latitude,
-        exif_json: metadata.exif_json,
-        thumbnail_path: None,
-        status: status.into(),
+fn directory_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoDirectory> {
+    Ok(PhotoDirectory {
+        directory_id: row.get(0)?,
+        parent_directory_id: row.get(1)?,
+        name: row.get(2)?,
+        relative_path: row.get(3)?,
     })
 }
 
-fn insert_photo(transaction: &Transaction<'_>, record: &NewPhoto) -> CoreResult<i64> {
+fn metadata_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoMetadata> {
+    Ok(PhotoMetadata {
+        photo_id: row.get("photo_id")?,
+        captured_at: row.get("captured_at")?,
+        camera: row.get("camera")?,
+        width: row.get("width")?,
+        height: row.get("height")?,
+        longitude: row.get("longitude")?,
+        latitude: row.get("latitude")?,
+        exif_json: row.get("exif_json")?,
+    })
+}
+
+fn direct_directories(
+    transaction: &Transaction<'_>,
+    directory_id: i64,
+) -> CoreResult<HashMap<String, PhotoDirectory>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT directory_id, parent_directory_id, name, relative_path
+        FROM photo_directories WHERE parent_directory_id = ?
+        "#,
+    )?;
+    let rows = statement.query_map([directory_id], directory_from_row)?;
+    Ok(rows
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|value| (value.name.clone(), value))
+        .collect())
+}
+
+fn direct_photos(
+    transaction: &Transaction<'_>,
+    directory_id: i64,
+) -> CoreResult<HashMap<String, Photo>> {
+    let mut statement = transaction.prepare(&photo_select("WHERE photos.directory_id = ?"))?;
+    let rows = statement.query_map([directory_id], photo_from_row)?;
+    Ok(rows
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|value| (value.filename.clone(), value))
+        .collect())
+}
+
+fn insert_photo(transaction: &Transaction<'_>, photo: &NewPhoto) -> CoreResult<i64> {
     transaction.execute(
         r#"
-        INSERT INTO photos (
-            root, relative_path, parent_dir, path_depth, filename, binomial_name,
-            captured_at, location, camera, width, height, file_size, modified_at,
-            longitude, latitude, exif_json, thumbnail_path, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO photos (directory_id, filename, file_size, modified_at_ns, thumbnail_path)
+        VALUES (?, ?, ?, ?, ?)
         "#,
         params![
-            record.root,
-            record.relative_path,
-            record.parent_dir,
-            record.path_depth,
-            record.filename,
-            record.binomial_name,
-            record.captured_at,
-            record.location,
-            record.camera,
-            record.width,
-            record.height,
-            record.file_size,
-            record.modified_at,
-            record.longitude,
-            record.latitude,
-            record.exif_json,
-            record.thumbnail_path,
-            record.status
+            photo.directory_id,
+            photo.filename,
+            photo.file_size,
+            photo.modified_at_ns,
+            photo.thumbnail_path,
         ],
     )?;
     Ok(transaction.last_insert_rowid())
 }
 
-fn update_photo(transaction: &Transaction<'_>, photo_id: i64, record: &NewPhoto) -> CoreResult<()> {
-    transaction.execute(
-        r#"
-        UPDATE photos SET
-            root = ?, relative_path = ?, parent_dir = ?, path_depth = ?, filename = ?,
-            binomial_name = ?, captured_at = ?, location = ?, camera = ?, width = ?, height = ?,
-            file_size = ?, modified_at = ?, longitude = ?, latitude = ?, exif_json = ?,
-            thumbnail_path = ?, status = ?
-        WHERE photo_id = ?
-        "#,
-        params![
-            record.root,
-            record.relative_path,
-            record.parent_dir,
-            record.path_depth,
-            record.filename,
-            record.binomial_name,
-            record.captured_at,
-            record.location,
-            record.camera,
-            record.width,
-            record.height,
-            record.file_size,
-            record.modified_at,
-            record.longitude,
-            record.latitude,
-            record.exif_json,
-            record.thumbnail_path,
-            record.status,
-            photo_id
-        ],
-    )?;
-    Ok(())
-}
-
-fn refresh_directories(transaction: &Transaction<'_>, root: &str) -> CoreResult<()> {
-    let relative_paths = {
-        let mut statement = transaction
-            .prepare("SELECT relative_path FROM photos WHERE root = ? AND status != ?")?;
-        let rows =
-            statement.query_map(params![root, STATUS_DELETED], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-    let mut directories = BTreeMap::<String, (String, String, i64)>::new();
-    for path in relative_paths {
-        let parent = Path::new(&path)
-            .parent()
-            .map(|value| value.to_string_lossy().replace('\\', "/"));
-        let Some(parent) = parent.filter(|value| !value.is_empty() && value != ".") else {
+fn scan_directory(path: &Path) -> CoreResult<(Vec<ScannedDirectory>, Vec<ScannedPhoto>)> {
+    let mut directories = Vec::new();
+    let mut photos = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
             continue;
-        };
-        let parts = parent.split('/').collect::<Vec<_>>();
-        for index in 0..parts.len() {
-            let relative_dir = parts[..=index].join("/");
-            directories.insert(
-                relative_dir,
-                (
-                    parts[..index].join("/"),
-                    parts[index].into(),
-                    (index + 1) as i64,
-                ),
-            );
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| CoreError::InvalidArgument("photo path is not valid UTF-8".into()))?;
+        if file_type.is_dir() {
+            directories.push(ScannedDirectory { name });
+        } else if file_type.is_file() && is_image_filename(&name) {
+            let metadata = entry.metadata()?;
+            photos.push(ScannedPhoto {
+                filename: name,
+                file_size: i64::try_from(metadata.len()).map_err(|_| {
+                    CoreError::InvalidArgument("photo file size exceeds i64".into())
+                })?,
+                modified_at_ns: modified_at_ns(&metadata)?,
+            });
         }
     }
-    transaction.execute("DELETE FROM photos_dir WHERE root = ?", [root])?;
-    for (relative_dir, (parent_dir, name, depth)) in directories {
-        transaction.execute(
-            "INSERT INTO photos_dir (root, relative_dir, parent_dir, name, path_depth) VALUES (?, ?, ?, ?, ?)",
-            params![root, relative_dir, parent_dir, name, depth],
-        )?;
-    }
-    Ok(())
+    directories.sort_by(|left, right| left.name.cmp(&right.name));
+    photos.sort_by(|left, right| left.filename.cmp(&right.filename));
+    Ok((directories, photos))
 }
 
-fn upsert_root(transaction: &Transaction<'_>, root: &str) -> CoreResult<()> {
-    let sort_order = transaction
+fn normalize_root(root: &str) -> CoreResult<String> {
+    let path = PathBuf::from(root);
+    let canonical = path.canonicalize()?;
+    if !canonical.is_dir() {
+        return Err(CoreError::InvalidArgument(format!(
+            "photo root is not a directory: {}",
+            canonical.display()
+        )));
+    }
+    canonical
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| CoreError::InvalidArgument("photo root is not valid UTF-8".into()))
+}
+
+fn library_root(connection: &rusqlite::Connection) -> CoreResult<PathBuf> {
+    let value = connection
         .query_row(
-            "SELECT sort_order FROM photos_metadata WHERE root = ?",
-            [root],
-            |row| row.get::<_, i64>(0),
+            "SELECT root_path FROM photo_library WHERE library_id = 1",
+            [],
+            |row| row.get::<_, String>(0),
         )
         .optional()?
-        .unwrap_or(transaction.query_row(
-            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM photos_metadata",
-            [],
-            |row| row.get(0),
-        )?);
-    let now = Local::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string();
-    transaction.execute(
-        r#"
-        INSERT INTO photos_metadata (root, last_synced_at, sort_order) VALUES (?, ?, ?)
-        ON CONFLICT(root) DO UPDATE SET last_synced_at = excluded.last_synced_at,
-            sort_order = excluded.sort_order
-        "#,
-        params![root, now, sort_order],
-    )?;
-    Ok(())
+        .ok_or_else(|| CoreError::NotFound("photo library".into()))?;
+    Ok(PathBuf::from(value).canonicalize()?)
 }
 
-fn safe_photo_path(photo: &Photo) -> CoreResult<PathBuf> {
-    let root = PathBuf::from(&photo.root).canonicalize()?;
-    let relative = Path::new(&photo.relative_path);
+fn safe_directory_path(root: &Path, relative_path: &str) -> CoreResult<PathBuf> {
+    let relative = Path::new(relative_path);
     if relative.components().any(|component| {
         matches!(
             component,
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     }) {
-        return Err(CoreError::UnsafePath(relative.to_path_buf()));
+        return Err(CoreError::UnsafePath(relative.into()));
     }
-    let candidate = root.join(relative).canonicalize()?;
-    if !candidate.starts_with(&root) {
+    safe_file_path(root, &root.join(relative))
+}
+
+fn safe_file_path(root: &Path, candidate: &Path) -> CoreResult<PathBuf> {
+    let candidate = candidate.canonicalize()?;
+    if !candidate.starts_with(root) {
         return Err(CoreError::UnsafePath(candidate));
     }
     Ok(candidate)
 }
 
-fn clear_thumbnail_cache(root: &Path) -> CoreResult<usize> {
-    if !root.exists() {
-        return Ok(0);
+fn validate_filename(value: &str) -> CoreResult<String> {
+    let value = value.trim();
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.components().count() != 1
+        || matches!(value, "." | "..")
+        || value.contains(['/', '\\'])
+        || !is_image_filename(value)
+    {
+        return Err(CoreError::InvalidArgument(
+            "photo filename must be one image filename without a path".into(),
+        ));
     }
-    let count = WalkDir::new(root)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .count();
-    fs::remove_dir_all(root)?;
-    Ok(count)
+    Ok(value.into())
+}
+
+fn is_image_filename(filename: &str) -> bool {
+    Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        })
+}
+
+fn join_relative_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.into()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn modified_at_ns(metadata: &fs::Metadata) -> CoreResult<i64> {
+    let value = metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| CoreError::InvalidArgument(error.to_string()))?
+        .as_nanos();
+    i64::try_from(value)
+        .map_err(|_| CoreError::InvalidArgument("photo modified time exceeds i64".into()))
 }
 
 fn encode_cursor(cursor: &DirectoryCursor) -> CoreResult<String> {
@@ -853,61 +778,7 @@ fn decode_cursor(value: Option<&str>) -> CoreResult<Option<DirectoryCursor>> {
         .map_err(|_| CoreError::InvalidArgument("invalid directory cursor".into()))
 }
 
-fn parse_filename(filename: &str) -> FilenameMetadata {
-    let stem = Path::new(filename)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or(filename);
-    let pattern =
-        Regex::new(r"^(?P<binomial_name>.+?)(?P<date>\d{8})_(?P<time>\d{6})(?P<trailing>.*)$")
-            .expect("valid filename pattern");
-    let Some(captures) = pattern.captures(stem) else {
-        return FilenameMetadata::default();
-    };
-    let trailing = captures
-        .name("trailing")
-        .map(|value| value.as_str().trim())
-        .unwrap_or_default();
-    let device_pattern = Regex::new(
-        r"(?P<device>(?:iPhone|iPad|Pixel|Canon|Nikon|Sony|FUJIFILM|Fujifilm|HUAWEI|Huawei|Xiaomi|OPPO|vivo|Vivo)[A-Za-z0-9 _.-]*)$",
-    )
-    .expect("valid device pattern");
-    let (location, device) = match device_pattern.captures(trailing) {
-        None => (nonempty(trailing), None),
-        Some(device_capture) => {
-            let matched = device_capture.name("device").expect("device capture");
-            (
-                nonempty(trailing[..matched.start()].trim()),
-                nonempty(matched.as_str().trim()),
-            )
-        }
-    };
-    let date = captures
-        .name("date")
-        .map(|value| value.as_str())
-        .unwrap_or_default();
-    let time = captures
-        .name("time")
-        .map(|value| value.as_str())
-        .unwrap_or_default();
-    let shoot_date = NaiveDateTime::parse_from_str(&format!("{date}_{time}"), "%Y%m%d_%H%M%S")
-        .ok()
-        .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string());
-    FilenameMetadata {
-        binomial_name: captures
-            .name("binomial_name")
-            .and_then(|value| nonempty(value.as_str().trim())),
-        shoot_date,
-        location,
-        device,
-    }
-}
-
-fn nonempty(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_string())
-}
-
-fn read_file_metadata(path: &Path) -> FileMetadata {
+fn read_file_metadata(photo_id: i64, path: &Path) -> PhotoMetadata {
     let dimensions = image::ImageReader::open(path)
         .ok()
         .and_then(|reader| reader.with_guessed_format().ok())
@@ -917,10 +788,15 @@ fn read_file_metadata(path: &Path) -> FileMetadata {
             .read_from_container(&mut BufReader::new(file))
             .ok()
     });
-    let mut result = FileMetadata {
+    let mut result = PhotoMetadata {
+        photo_id,
+        captured_at: None,
+        camera: None,
         width: dimensions.map(|value| value.0 as i64),
         height: dimensions.map(|value| value.1 as i64),
-        ..Default::default()
+        longitude: None,
+        latitude: None,
+        exif_json: None,
     };
     let Some(exif) = exif else {
         return result;
@@ -987,9 +863,11 @@ fn gps_coordinate(value: Option<&exif::Field>, reference: Option<&exif::Field>) 
     }
     let mut coordinate =
         values[0].to_f64() + values[1].to_f64() / 60.0 + values[2].to_f64() / 3600.0;
-    let direction = clean_exif_text(&reference?.display_value().to_string()).to_ascii_uppercase();
-    if direction == "S" || direction == "W" {
-        coordinate *= -1.0;
+    let direction = reference
+        .map(|field| clean_exif_text(&field.display_value().to_string()))
+        .unwrap_or_default();
+    if matches!(direction.as_str(), "S" | "W") {
+        coordinate = -coordinate;
     }
     Some(coordinate)
 }
@@ -999,65 +877,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_filename_metadata() {
-        let parsed = parse_filename("Lilium brownii20260504_123525GardenA iPhone12.jpg");
-        assert_eq!(parsed.binomial_name.as_deref(), Some("Lilium brownii"));
-        assert_eq!(parsed.shoot_date.as_deref(), Some("2026-05-04 12:35:25"));
-        assert_eq!(parsed.location.as_deref(), Some("GardenA"));
-        assert_eq!(parsed.device.as_deref(), Some("iPhone12"));
+    fn opens_and_refreshes_only_the_requested_directory() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join("first.jpg"), b"first").unwrap();
+        fs::write(root.path().join("nested").join("second.jpg"), b"second").unwrap();
+        let database = Database::open(data.path().join("vividarium.db")).unwrap();
+        let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+        let result = refresh_directory(&database, library.root_directory_id).unwrap();
+        assert_eq!(result.inserted, 1);
+        assert_eq!(result.directories_inserted, 1);
+        assert_eq!(list_photos(&database).unwrap().len(), 1);
+        let listing = browse_directory(&database, library.root_directory_id, None, 20).unwrap();
+        assert_eq!(listing.directories.len(), 1);
+        assert_eq!(listing.files.len(), 1);
+        refresh_directory(&database, listing.directories[0].directory_id).unwrap();
+        assert_eq!(list_photos(&database).unwrap().len(), 2);
     }
 
     #[test]
-    fn cursor_round_trip() {
-        let cursor = DirectoryCursor {
-            section: "files".into(),
-            name: None,
-            filename: Some("image.jpg".into()),
-            photo_id: Some(10),
-        };
-        let encoded = encode_cursor(&cursor).unwrap();
-        let decoded = decode_cursor(Some(&encoded)).unwrap().unwrap();
-        assert_eq!(decoded.filename, cursor.filename);
-        assert_eq!(decoded.photo_id, cursor.photo_id);
-    }
-
-    #[test]
-    fn multi_root_update_preserves_changes_from_every_root() {
-        let directory = tempfile::tempdir().unwrap();
-        let root_a = directory.path().join("root-a");
-        let root_b = directory.path().join("root-b");
-        fs::create_dir_all(&root_a).unwrap();
-        fs::create_dir_all(&root_b).unwrap();
-        image::RgbImage::new(1, 1)
-            .save(root_a.join("a.png"))
-            .unwrap();
-        image::RgbImage::new(1, 1)
-            .save(root_b.join("b.png"))
-            .unwrap();
-        let database = Database::open(directory.path().join("phytoindex.db")).unwrap();
-        let roots = vec![
-            root_a.to_string_lossy().into_owned(),
-            root_b.to_string_lossy().into_owned(),
-        ];
-        let mut progress = |_: u64, _: Option<u64>, _: &str| {};
-        rebuild_photos(
-            &database,
-            &roots,
-            &directory.path().join("thumbnails"),
-            &mut progress,
-        )
-        .unwrap();
-
-        image::RgbImage::new(2, 2)
-            .save(root_a.join("a.png"))
-            .unwrap();
-        image::RgbImage::new(3, 3)
-            .save(root_b.join("b.png"))
-            .unwrap();
-        update_photos_many(&database, &roots, &mut progress).unwrap();
-
-        let changed = list_changed_photos(&database).unwrap();
-        assert_eq!(changed.len(), 2);
-        assert!(changed.iter().all(|photo| photo.status == STATUS_UPDATED));
+    fn renames_the_real_file_and_updates_the_database() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("before.jpg"), b"photo").unwrap();
+        let database = Database::open(data.path().join("vividarium.db")).unwrap();
+        let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+        refresh_directory(&database, library.root_directory_id).unwrap();
+        let photo = list_photos(&database).unwrap().remove(0);
+        let renamed = rename_photo(&database, photo.photo_id, "after.jpg").unwrap();
+        assert_eq!(renamed.filename, "after.jpg");
+        assert!(!root.path().join("before.jpg").exists());
+        assert!(root.path().join("after.jpg").is_file());
     }
 }
