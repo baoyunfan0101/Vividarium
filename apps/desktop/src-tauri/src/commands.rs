@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
-use phytoindex_core::mapping::{PhotoTaxonMapping, PhotoTaxonMatch};
+use phytoindex_core::mapping::{
+    PhotoTaxonMapping, PhotoTaxonMatch, PhotoTaxonNode, PhotoTaxonPhotoPage,
+};
 use phytoindex_core::models::{
     DirectoryListingPage, MappingMetadata, MappingNode, OperationsStatus, Photo, PhotoLibrary,
     PhotoMetadata, PhotoSyncResult, TaxaMetadata, Taxon,
@@ -250,6 +252,34 @@ pub fn select_photo_taxon(
     taxon_id: i64,
 ) -> CommandResult<PhotoTaxonMapping> {
     mapping::select_photo_taxon(&state.database, photo_id, taxon_id).map_err(error)
+}
+
+#[tauri::command]
+pub fn get_photo_taxon_node(
+    state: State<'_, AppState>,
+    taxon_id: Option<i64>,
+    show_empty: Option<bool>,
+) -> CommandResult<PhotoTaxonNode> {
+    mapping::get_photo_taxon_node(&state.database, taxon_id, show_empty.unwrap_or(false))
+        .map_err(error)
+}
+
+#[tauri::command]
+pub fn list_photos_for_taxon(
+    state: State<'_, AppState>,
+    taxon_id: Option<i64>,
+    include_descendants: Option<bool>,
+    after_photo_id: Option<i64>,
+    limit: Option<usize>,
+) -> CommandResult<PhotoTaxonPhotoPage> {
+    mapping::list_photos_for_taxon(
+        &state.database,
+        taxon_id,
+        include_descendants.unwrap_or(true),
+        after_photo_id,
+        limit.unwrap_or(160),
+    )
+    .map_err(error)
 }
 
 #[tauri::command]

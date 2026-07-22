@@ -10,7 +10,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::models::{MappingMetadata, MappingNode, MappingSyncResult, Photo, Taxon};
 use crate::photos;
 use crate::taxonomy::{
-    TaxonDisplayNames, TaxonSummary, TaxonomyNameKind, get_taxon_summary, search_taxa,
+    TaxonDisplayNames, TaxonRank, TaxonSummary, TaxonomyNameKind, get_taxon_summary, search_taxa,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,6 +71,28 @@ pub struct PhotoTaxonCandidate {
 pub struct PhotoTaxonMatch {
     pub mapping: PhotoTaxonMapping,
     pub candidates: Vec<PhotoTaxonCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhotoTaxonUsage {
+    pub taxon_id: i64,
+    pub rank: TaxonRank,
+    pub names: TaxonDisplayNames,
+    pub direct_photo_count: i64,
+    pub subtree_photo_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhotoTaxonNode {
+    pub taxon: Option<PhotoTaxonUsage>,
+    pub children: Vec<PhotoTaxonUsage>,
+    pub subtree_photo_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PhotoTaxonPhotoPage {
+    pub items: Vec<Photo>,
+    pub next_photo_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +241,108 @@ pub fn select_photo_taxon(
 
 pub fn get_root(database: &Database) -> CoreResult<MappingNode> {
     get_by_taxon_id(database, None)
+}
+
+pub fn get_photo_taxon_node(
+    database: &Database,
+    taxon_id: Option<i64>,
+    show_empty: bool,
+) -> CoreResult<PhotoTaxonNode> {
+    let connection = database.connect()?;
+    let taxon = match taxon_id {
+        Some(taxon_id) => load_usage_taxon(&connection, taxon_id, show_empty)?
+            .ok_or_else(|| CoreError::NotFound(format!("photo taxon node {taxon_id}")))?,
+        None => {
+            let children = load_usage_children(&connection, None, show_empty)?;
+            let subtree_photo_count = connection.query_row(
+                "SELECT COUNT(*) FROM photo_taxon_mapping WHERE status = 'matched'",
+                [],
+                |row| row.get(0),
+            )?;
+            return Ok(PhotoTaxonNode {
+                taxon: None,
+                children,
+                subtree_photo_count,
+            });
+        }
+    };
+    let children = load_usage_children(&connection, Some(taxon.taxon_id), show_empty)?;
+    let subtree_photo_count = taxon.subtree_photo_count;
+    Ok(PhotoTaxonNode {
+        taxon: Some(taxon),
+        children,
+        subtree_photo_count,
+    })
+}
+
+pub fn list_photos_for_taxon(
+    database: &Database,
+    taxon_id: Option<i64>,
+    include_descendants: bool,
+    after_photo_id: Option<i64>,
+    limit: usize,
+) -> CoreResult<PhotoTaxonPhotoPage> {
+    let connection = database.connect()?;
+    let limit = limit.clamp(1, 500);
+    let fetch_limit = limit + 1;
+    let after_photo_id = after_photo_id.unwrap_or_default();
+    let suffix = match (taxon_id, include_descendants) {
+        (Some(_), true) => {
+            r#"
+            JOIN photo_taxon_mapping ON photo_taxon_mapping.photo_id = photos.photo_id
+            JOIN (
+                WITH RECURSIVE descendants(taxon_id) AS (
+                    SELECT taxon_id FROM taxa WHERE taxon_id = ?1
+                    UNION ALL
+                    SELECT child.taxon_id
+                    FROM taxa AS child
+                    JOIN descendants ON child.parent_taxon_id = descendants.taxon_id
+                )
+                SELECT taxon_id FROM descendants
+            ) AS selected_taxa ON selected_taxa.taxon_id = photo_taxon_mapping.taxon_id
+            WHERE photo_taxon_mapping.status = 'matched' AND photos.photo_id > ?2
+            ORDER BY photos.photo_id LIMIT ?3
+        "#
+        }
+        (Some(_), false) => {
+            r#"
+            JOIN photo_taxon_mapping ON photo_taxon_mapping.photo_id = photos.photo_id
+            WHERE photo_taxon_mapping.status = 'matched'
+              AND photo_taxon_mapping.taxon_id = ?1 AND photos.photo_id > ?2
+            ORDER BY photos.photo_id LIMIT ?3
+        "#
+        }
+        (None, _) => {
+            r#"
+            JOIN photo_taxon_mapping ON photo_taxon_mapping.photo_id = photos.photo_id
+            WHERE photo_taxon_mapping.status = 'matched' AND photos.photo_id > ?2
+            ORDER BY photos.photo_id LIMIT ?3
+        "#
+        }
+    };
+    let sql = photo_query(suffix);
+    let mut statement = connection.prepare(&sql)?;
+    let rows = match taxon_id {
+        Some(taxon_id) => statement.query_map(
+            params![taxon_id, after_photo_id, fetch_limit as i64],
+            crate::db::photo_from_row,
+        )?,
+        None => statement.query_map(
+            params![SqlValue::Null, after_photo_id, fetch_limit as i64],
+            crate::db::photo_from_row,
+        )?,
+    };
+    let mut items = rows.collect::<Result<Vec<_>, _>>()?;
+    let next_photo_id = if items.len() > limit {
+        items.truncate(limit);
+        items.last().map(|photo| photo.photo_id)
+    } else {
+        None
+    };
+    Ok(PhotoTaxonPhotoPage {
+        items,
+        next_photo_id,
+    })
 }
 
 pub fn get_by_taxon_id(database: &Database, taxon_id: Option<i64>) -> CoreResult<MappingNode> {
@@ -514,6 +638,101 @@ fn mapping_result(database: &Database, photos: Vec<Photo>) -> CoreResult<Mapping
         unmapped_photos,
         orphan_mappings_deleted: 0,
     })
+}
+
+fn load_usage_taxon(
+    connection: &rusqlite::Connection,
+    taxon_id: i64,
+    show_empty: bool,
+) -> CoreResult<Option<PhotoTaxonUsage>> {
+    connection
+        .query_row(
+            &format!(
+                "{} WHERE taxa.taxon_id = ? AND (? OR COALESCE(photo_taxon_usage.subtree_photo_count, 0) > 0)",
+                usage_taxon_select()
+            ),
+            params![taxon_id, show_empty],
+            usage_taxon_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn load_usage_children(
+    connection: &rusqlite::Connection,
+    parent_taxon_id: Option<i64>,
+    show_empty: bool,
+) -> CoreResult<Vec<PhotoTaxonUsage>> {
+    let parent_filter = if parent_taxon_id.is_some() {
+        "taxa.parent_taxon_id = ?1"
+    } else {
+        "taxa.parent_taxon_id IS NULL AND ?1 IS NULL"
+    };
+    let sql = format!(
+        r#"
+        {} WHERE {parent_filter}
+          AND (?2 OR COALESCE(photo_taxon_usage.subtree_photo_count, 0) > 0)
+        ORDER BY taxa.rank, scientific_name, taxa.taxon_id
+        "#,
+        usage_taxon_select()
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params![parent_taxon_id, show_empty], usage_taxon_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn usage_taxon_select() -> &'static str {
+    r#"
+    SELECT taxa.taxon_id, taxa.rank,
+           (SELECT name FROM taxon_names
+            WHERE taxon_names.taxon_id = taxa.taxon_id
+              AND name_kind = 1 AND is_accepted = 1) AS scientific_name,
+           (SELECT name FROM taxon_names
+            WHERE taxon_names.taxon_id = taxa.taxon_id
+              AND name_kind = 2 AND is_accepted = 1) AS english_name,
+           (SELECT name FROM taxon_names
+            WHERE taxon_names.taxon_id = taxa.taxon_id
+              AND name_kind = 3 AND is_accepted = 1) AS chinese_name,
+           COALESCE(photo_taxon_usage.direct_photo_count, 0) AS direct_photo_count,
+           COALESCE(photo_taxon_usage.subtree_photo_count, 0) AS subtree_photo_count
+    FROM taxa
+    LEFT JOIN photo_taxon_usage USING (taxon_id)
+    "#
+}
+
+fn usage_taxon_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoTaxonUsage> {
+    let rank = row.get::<_, i64>(1)?;
+    Ok(PhotoTaxonUsage {
+        taxon_id: row.get(0)?,
+        rank: TaxonRank::from_code(rank).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?,
+        names: TaxonDisplayNames {
+            scientific: row.get(2)?,
+            english: row.get(3)?,
+            chinese: row.get(4)?,
+        },
+        direct_photo_count: row.get(5)?,
+        subtree_photo_count: row.get(6)?,
+    })
+}
+
+fn photo_query(suffix: &str) -> String {
+    format!(
+        r#"
+        SELECT photos.photo_id, photos.directory_id,
+               CASE WHEN photo_directories.relative_path = '' THEN photos.filename
+                    ELSE photo_directories.relative_path || '/' || photos.filename END AS relative_path,
+               photos.filename, photos.file_size, photos.modified_at_ns, photos.thumbnail_path
+        FROM photos
+        JOIN photo_directories ON photo_directories.directory_id = photos.directory_id
+        {suffix}
+        "#
+    )
 }
 
 impl TaxonNameMatcher {
@@ -818,5 +1037,11 @@ mod tests {
         assert_eq!(node.direct_photo_count, 1);
         assert_eq!(node.subtree_photo_count, 1);
         assert_eq!(get_root(&database).unwrap().children.len(), 1);
+        let sparse_root = get_photo_taxon_node(&database, None, false).unwrap();
+        assert_eq!(sparse_root.children.len(), 1);
+        assert_eq!(sparse_root.subtree_photo_count, 1);
+        let page = list_photos_for_taxon(&database, mapping.taxon_id, true, None, 20).unwrap();
+        assert_eq!(page.items, vec![photo]);
+        assert_eq!(page.next_photo_id, None);
     }
 }

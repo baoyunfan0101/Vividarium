@@ -45,6 +45,8 @@ pub fn run() {
             commands::get_mapping_taxon,
             commands::get_photo_taxon_match,
             commands::select_photo_taxon,
+            commands::get_photo_taxon_node,
+            commands::list_photos_for_taxon,
             commands::search_mapping_by_name,
             commands::search_mapping_by_binomial,
             commands::suggest_mapping_taxa,
