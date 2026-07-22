@@ -1,5 +1,8 @@
 use std::collections::BTreeSet;
+use std::ffi::{CStr, CString};
+use std::ptr;
 
+use rusqlite::ffi;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -45,6 +48,8 @@ pub struct TaxonomyActionResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonomyCustomSqlResult {
     pub batch_id: i64,
+    pub operation_id: i64,
+    pub changeset_size: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,7 +111,6 @@ pub fn delete_taxon_name(
     delete_name_record(&transaction, input.taxon_id, input.name_kind, &input.name)?;
     let changeset_blob = finish_taxonomy_session(&mut session)?;
     drop(session);
-    validate_taxonomy(&transaction)?;
     let batch_id =
         insert_operation_batch(&transaction, &input, &TaxonomyBatchContext::QueryDeleteName)?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
@@ -171,7 +175,6 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyAc
     transaction.execute("DELETE FROM taxa WHERE taxon_id = ?", [taxon_id])?;
     let changeset_blob = finish_taxonomy_session(&mut session)?;
     drop(session);
-    validate_taxonomy(&transaction)?;
     let batch_id = insert_operation_batch(
         &transaction,
         &DeleteTaxonInput { taxon_id },
@@ -204,6 +207,7 @@ pub fn execute_custom_taxonomy_sql(
     let mut session = start_taxonomy_session(&transaction)?;
     transaction.execute_batch(sql)?;
     let changeset_blob = finish_taxonomy_session(&mut session)?;
+    let changeset_size = changeset_blob.len();
     drop(session);
     validate_taxonomy(&transaction)?;
     let batch_id = insert_operation_batch(
@@ -213,9 +217,13 @@ pub fn execute_custom_taxonomy_sql(
             input: input_metadata,
         },
     )?;
-    insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
+    let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
-    Ok(TaxonomyCustomSqlResult { batch_id })
+    Ok(TaxonomyCustomSqlResult {
+        batch_id,
+        operation_id,
+        changeset_size,
+    })
 }
 
 fn ensure_taxon_exists(transaction: &Transaction<'_>, taxon_id: i64) -> CoreResult<()> {
@@ -333,16 +341,59 @@ fn authorize_custom_sql(transaction: &Transaction<'_>, sql: &str) -> CoreResult<
             "custom sql cannot access taxonomy search index tables directly".into(),
         ));
     }
-    transaction.execute_batch("SAVEPOINT custom_sql_authorize_check")?;
     transaction.authorizer(Some(custom_sql_authorizer));
-    let sql_result = transaction.execute_batch(sql);
+    let authorize_result = prepare_custom_sql_batch(transaction, sql);
     transaction.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-    let rollback_result = transaction.execute_batch(
-        "ROLLBACK TO custom_sql_authorize_check; RELEASE custom_sql_authorize_check",
-    );
-    rollback_result?;
-    sql_result?;
+    authorize_result?;
     Ok(())
+}
+
+fn prepare_custom_sql_batch(connection: &rusqlite::Connection, sql: &str) -> CoreResult<()> {
+    let database = unsafe { connection.handle() };
+    let mut offset = 0;
+    while offset < sql.len() {
+        let sql_tail = &sql[offset..];
+        let sql_tail = CString::new(sql_tail)
+            .map_err(|error| CoreError::InvalidArgument(format!("invalid sql: {error}")))?;
+        let mut statement = ptr::null_mut();
+        let mut next_sql = ptr::null();
+        let code = unsafe {
+            ffi::sqlite3_prepare_v2(
+                database,
+                sql_tail.as_ptr(),
+                -1,
+                &mut statement,
+                &mut next_sql,
+            )
+        };
+        if !statement.is_null() {
+            unsafe {
+                ffi::sqlite3_finalize(statement);
+            }
+        }
+        if code != ffi::SQLITE_OK {
+            return Err(sqlite_error(database, code));
+        }
+        if next_sql.is_null() {
+            break;
+        }
+        let tail_offset = unsafe { next_sql.offset_from(sql_tail.as_ptr()) as usize };
+        if tail_offset == 0 || tail_offset >= sql_tail.as_bytes().len() {
+            break;
+        }
+        offset += tail_offset;
+    }
+    Ok(())
+}
+
+fn sqlite_error(database: *mut ffi::sqlite3, code: i32) -> CoreError {
+    let message = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(database)) }
+        .to_string_lossy()
+        .into_owned();
+    CoreError::Database(rusqlite::Error::SqliteFailure(
+        ffi::Error::new(code),
+        Some(message),
+    ))
 }
 
 fn create_temp_input_table(
@@ -469,5 +520,4 @@ fn is_allowed_custom_sql_read(database_name: Option<&str>, table_name: &str) -> 
 fn is_allowed_custom_sql_write(accessor: Option<&str>, table_name: &str) -> bool {
     is_taxonomy_session_table(table_name)
         || (accessor.is_some() && table_name.starts_with("taxon_names_fts"))
-        || table_name.starts_with("taxon_names_fts")
 }

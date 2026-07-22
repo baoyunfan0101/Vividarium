@@ -417,7 +417,6 @@ fn apply_prepared_taxon_plan_with_log<T: Serialize + ?Sized>(
     ensure_taxon_exists_in_connection(&transaction, taxon_id)?;
     let changeset_blob = finish_taxonomy_session(&mut session)?;
     drop(session);
-    validate_taxonomy(&transaction)?;
     let current_batch_id = match *batch_id {
         Some(value) => value,
         None => {
@@ -2392,6 +2391,8 @@ mod tests {
         )
         .unwrap();
         assert!(result.batch_id > 0);
+        assert!(result.operation_id > 0);
+        assert!(result.changeset_size > 0);
         let connection = database.connect().unwrap();
         let range: String = connection
             .query_row(
@@ -2432,10 +2433,8 @@ mod tests {
             }),
         )
         .unwrap();
-        let operation_id = list_taxonomy_operations_for_batch(&database, result.batch_id, None, 1)
-            .unwrap()
-            .items[0]
-            .operation_id;
+        assert!(result.operation_id > 0);
+        assert!(result.changeset_size > 0);
         let connection = database.connect().unwrap();
         let range: String = connection
             .query_row(
@@ -2463,7 +2462,7 @@ mod tests {
         );
         drop(connection);
 
-        revert_taxonomy_operation(&database, operation_id).unwrap();
+        revert_taxonomy_operation(&database, result.operation_id).unwrap();
         let connection = database.connect().unwrap();
         let range: Option<String> = connection
             .query_row(
