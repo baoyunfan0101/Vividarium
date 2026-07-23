@@ -407,7 +407,7 @@ pub fn rename_photo(database: &Database, photo_id: i64, new_filename: &str) -> C
         Ok(photo) => Ok(photo),
         Err(error) => match rename_file(&destination, &source, &temporary) {
             Ok(()) => Err(error),
-            Err(rollback_error) => Err(CoreError::InvalidArgument(format!(
+            Err(rollback_error) => Err(CoreError::Consistency(format!(
                 "photo database update failed: {error}; filesystem rollback failed: {rollback_error}"
             ))),
         },
@@ -447,7 +447,7 @@ fn rename_file(source: &Path, destination: &Path, temporary: &Path) -> CoreResul
     if let Err(error) = fs::rename(temporary, destination) {
         return match fs::rename(temporary, source) {
             Ok(()) => Err(error.into()),
-            Err(restore_error) => Err(CoreError::InvalidArgument(format!(
+            Err(restore_error) => Err(CoreError::Consistency(format!(
                 "rename failed: {error}; source restoration failed: {restore_error}"
             ))),
         };

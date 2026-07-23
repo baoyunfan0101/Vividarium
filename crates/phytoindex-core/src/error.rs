@@ -14,6 +14,8 @@ pub enum CoreError {
     Workbook(String),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    #[error("consistency error: {0}")]
+    Consistency(String),
     #[error("path is outside its configured root: {0}")]
     UnsafePath(PathBuf),
     #[error("resource not found: {0}")]

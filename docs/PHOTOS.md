@@ -165,7 +165,8 @@ filename and taxonomy mapping. `new_filename` must be one supported image
 filename without directory components. Existing destinations are rejected.
 Case-only renames use a temporary path on both the forward and rollback paths.
 If the database update fails, the backend restores the old filesystem name
-with the same rename procedure.
+with the same rename procedure. If that restoration also fails, the function
+returns a consistency error containing both failures.
 
 ### File, metadata, and thumbnail reads
 
