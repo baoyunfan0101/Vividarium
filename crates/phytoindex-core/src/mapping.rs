@@ -124,19 +124,10 @@ pub fn get_metadata(database: &Database) -> CoreResult<MappingMetadata> {
         [],
         |row| row.get(0),
     )?;
-    let processing_photo_count = connection.query_row(
-        r#"
-        SELECT CASE
-            WHEN taxonomy_revision != processed_taxonomy_revision
-            THEN (SELECT COUNT(*) FROM photos)
-            ELSE (SELECT COUNT(*) FROM photo_mapping_queue)
-        END
-        FROM photo_mapping_state
-        WHERE state_id = 1
-        "#,
-        [],
-        |row| row.get(0),
-    )?;
+    let processing_photo_count =
+        connection.query_row("SELECT COUNT(*) FROM photo_mapping_queue", [], |row| {
+            row.get(0)
+        })?;
     Ok(MappingMetadata {
         mapped_photo_count: count("matched")?,
         unmatched_photo_count: count("unmatched")?,
@@ -168,16 +159,7 @@ pub fn get_photo_mapping(
         return Ok(None);
     }
     let processing = connection.query_row(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM photo_mapping_queue WHERE photo_id = ?
-        ) OR EXISTS(
-            SELECT 1
-            FROM photo_mapping_state
-            WHERE state_id = 1
-              AND taxonomy_revision != processed_taxonomy_revision
-        )
-        "#,
+        "SELECT EXISTS(SELECT 1 FROM photo_mapping_queue WHERE photo_id = ?)",
         [photo_id],
         |row| row.get::<_, bool>(0),
     )?;
@@ -541,28 +523,86 @@ pub fn rebuild_mapping(database: &Database) -> CoreResult<MappingSyncResult> {
     transaction.execute("DELETE FROM photo_taxon_mapping", [])?;
     transaction.execute("DELETE FROM photo_mapping_queue", [])?;
     remap_photo_ids(&transaction, &ids)?;
-    transaction.execute(
-        r#"
-        UPDATE photo_mapping_state
-        SET processed_taxonomy_revision = taxonomy_revision
-        WHERE state_id = 1
-        "#,
-        [],
-    )?;
     transaction.commit()?;
     mapping_result(database, photos)
 }
 
-pub(crate) fn refresh_after_taxonomy_change(database: &Database) -> CoreResult<()> {
-    let connection = database.connect()?;
-    connection.execute(
-        r#"
-        UPDATE photo_mapping_state
-        SET taxonomy_revision = taxonomy_revision + 1
-        WHERE state_id = 1
-        "#,
-        [],
-    )?;
+pub(crate) fn refresh_after_taxonomy_changes(
+    database: &Database,
+    taxon_ids: impl IntoIterator<Item = i64>,
+    names: impl IntoIterator<Item = String>,
+) -> CoreResult<()> {
+    let taxon_ids = taxon_ids.into_iter().collect::<BTreeSet<_>>();
+    let names = names
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_lowercase())
+        })
+        .collect::<BTreeSet<_>>();
+    if taxon_ids.is_empty() && names.is_empty() {
+        return Ok(());
+    }
+    let mut connection = database.connect()?;
+    let transaction = connection.transaction()?;
+    let mut photo_ids = BTreeSet::<i64>::new();
+    if !taxon_ids.is_empty() {
+        let taxon_ids = taxon_ids.into_iter().collect::<Vec<_>>();
+        let selection = id_selection(
+            &transaction,
+            &taxon_ids,
+            "taxon_id",
+            "temp_mapping_taxon_ids",
+        )?;
+        let mut statement = transaction.prepare(&format!(
+            r#"
+            SELECT photo_id
+            FROM photo_taxon_mapping
+            WHERE {}
+            "#,
+            selection.predicate
+        ))?;
+        let rows = statement.query_map(params_from_iter(selection.values), |row| {
+            row.get::<_, i64>(0)
+        })?;
+        for photo_id in rows {
+            photo_ids.insert(photo_id?);
+        }
+    }
+    if !names.is_empty() {
+        let mut statement = transaction.prepare("SELECT photo_id, filename FROM photos")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (photo_id, filename) = row?;
+            if names.contains(&photo_match_query(&filename).trim().to_lowercase()) {
+                photo_ids.insert(photo_id);
+            }
+        }
+    }
+    let photo_ids = photo_ids.into_iter().collect::<Vec<_>>();
+    queue_photo_ids(&transaction, &photo_ids, "taxonomy")?;
+    transaction.commit()?;
+    Ok(())
+}
+
+pub(crate) fn refresh_existing_taxonomy_mappings(database: &Database) -> CoreResult<()> {
+    let mut connection = database.connect()?;
+    let transaction = connection.transaction()?;
+    let photo_ids = transaction
+        .prepare(
+            r#"
+            SELECT photo_id
+            FROM photo_taxon_mapping
+            WHERE status IN ('matched', 'ambiguous', 'unmatched', 'stale')
+            ORDER BY photo_id
+            "#,
+        )?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    queue_photo_ids(&transaction, &photo_ids, "taxonomy")?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -592,66 +632,31 @@ pub fn process_pending_photo_matches(
     progress: &mut MappingProgressCallback<'_>,
 ) -> CoreResult<PhotoMappingRunResult> {
     let connection = database.connect()?;
-    let (taxonomy_revision, processed_taxonomy_revision) = connection.query_row(
-        r#"
-        SELECT taxonomy_revision, processed_taxonomy_revision
-        FROM photo_mapping_state
-        WHERE state_id = 1
-        "#,
-        [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
-    let process_all = taxonomy_revision != processed_taxonomy_revision;
-    let total = if process_all {
-        connection.query_row("SELECT COUNT(*) FROM photos", [], |row| {
-            row.get::<_, i64>(0)
-        })?
-    } else {
-        connection.query_row("SELECT COUNT(*) FROM photo_mapping_queue", [], |row| {
-            row.get::<_, i64>(0)
-        })?
-    };
+    let total = connection.query_row("SELECT COUNT(*) FROM photo_mapping_queue", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
     drop(connection);
 
     let mut processed = 0usize;
     let mut changed = 0usize;
-    let mut after_photo_id = 0i64;
     progress(0, Some(total as u64), "Matching photo names");
     loop {
         let mut connection = database.connect()?;
         let transaction = connection.transaction()?;
         let photo_ids = {
-            let sql = if process_all {
-                r#"
-                SELECT photo_id
-                FROM photos
-                WHERE photo_id > ?
-                ORDER BY photo_id
-                LIMIT ?
-                "#
-            } else {
+            let mut statement = transaction.prepare(
                 r#"
                 SELECT photo_id
                 FROM photo_mapping_queue
                 ORDER BY photo_id
                 LIMIT ?
-                "#
-            };
-            let mut statement = transaction.prepare(sql)?;
-            if process_all {
-                statement
-                    .query_map(
-                        params![after_photo_id, PHOTO_MAPPING_BATCH_SIZE as i64],
-                        |row| row.get::<_, i64>(0),
-                    )?
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                statement
-                    .query_map([PHOTO_MAPPING_BATCH_SIZE as i64], |row| {
-                        row.get::<_, i64>(0)
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?
-            }
+                "#,
+            )?;
+            statement
+                .query_map([PHOTO_MAPPING_BATCH_SIZE as i64], |row| {
+                    row.get::<_, i64>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?
         };
         if photo_ids.is_empty() {
             break;
@@ -660,39 +665,16 @@ pub fn process_pending_photo_matches(
         delete_queued_photo_ids(&transaction, &photo_ids)?;
         transaction.commit()?;
         processed += photo_ids.len();
-        after_photo_id = photo_ids.last().copied().unwrap_or(after_photo_id);
         progress(processed as u64, Some(total as u64), "Matching photo names");
-    }
-    if process_all {
-        let mut connection = database.connect()?;
-        let transaction = connection.transaction()?;
-        rebuild_usage(&transaction)?;
-        transaction.execute(
-            r#"
-            UPDATE photo_mapping_state
-            SET processed_taxonomy_revision = MAX(processed_taxonomy_revision, ?)
-            WHERE state_id = 1
-            "#,
-            [taxonomy_revision],
-        )?;
-        transaction.commit()?;
     }
     let connection = database.connect()?;
     let queued = connection.query_row("SELECT COUNT(*) FROM photo_mapping_queue", [], |row| {
         row.get::<_, i64>(0)
     })?;
-    let revisions_pending = connection.query_row(
-        r#"
-        SELECT taxonomy_revision != processed_taxonomy_revision
-        FROM photo_mapping_state WHERE state_id = 1
-        "#,
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
     Ok(PhotoMappingRunResult {
         processed,
         changed,
-        pending: queued + i64::from(revisions_pending),
+        pending: queued,
     })
 }
 
@@ -1042,24 +1024,6 @@ fn load_mappings(
     Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
 }
 
-fn rebuild_usage(transaction: &Transaction<'_>) -> CoreResult<()> {
-    let direct_counts = {
-        let mut statement = transaction.prepare(
-            r#"
-            SELECT taxon_id, COUNT(*)
-            FROM photo_taxon_mapping
-            WHERE status = 'matched'
-            GROUP BY taxon_id
-            "#,
-        )?;
-        let rows =
-            statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
-        rows.collect::<Result<BTreeMap<_, _>, _>>()?
-    };
-    transaction.execute("DELETE FROM photo_taxon_usage", [])?;
-    apply_usage_deltas(transaction, &direct_counts)
-}
-
 fn apply_usage_deltas(
     transaction: &Transaction<'_>,
     direct_deltas: &BTreeMap<i64, i64>,
@@ -1233,7 +1197,8 @@ mod tests {
     use super::*;
     use crate::photos::{open_library, refresh_directory};
     use crate::taxonomy::{
-        TaxonInputRow, TaxonUpdateOptions, apply_rows, execute_custom_taxonomy_sql,
+        TaxonInputRow, TaxonNameInput, TaxonUpdateInput, TaxonUpdateOptions, apply_rows,
+        execute_custom_taxonomy_sql, update_taxon,
     };
     use std::fs;
 
@@ -1376,13 +1341,6 @@ mod tests {
     fn does_not_synthesize_processing_for_a_missing_photo() {
         let data = tempfile::tempdir().unwrap();
         let database = Database::open(data.path().join("vividarium.db")).unwrap();
-        let connection = database.connect().unwrap();
-        connection
-            .execute(
-                "UPDATE photo_mapping_state SET taxonomy_revision = 1 WHERE state_id = 1",
-                [],
-            )
-            .unwrap();
 
         assert_eq!(get_photo_mapping(&database, 404).unwrap(), None);
     }
@@ -1432,6 +1390,94 @@ mod tests {
                 .status,
             PhotoTaxonStatus::Unmatched
         );
+    }
+
+    #[test]
+    fn taxonomy_update_queues_only_affected_photos() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Canis lupus.jpg"), b"photo").unwrap();
+        fs::write(root.path().join("Felis catus.jpg"), b"photo").unwrap();
+        let database = Database::open(data.path().join("vividarium.db")).unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute("INSERT INTO taxa (rank) VALUES (5)", [])
+            .unwrap();
+        let canis_taxon_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                r#"
+                INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted)
+                VALUES (?, 1, 'Canis lupus', 1)
+                "#,
+                [canis_taxon_id],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO taxa (rank) VALUES (5)", [])
+            .unwrap();
+        let felis_taxon_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                r#"
+                INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted)
+                VALUES (?, 1, 'Felis catus', 1)
+                "#,
+                [felis_taxon_id],
+            )
+            .unwrap();
+        drop(connection);
+        let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+        refresh_directory(&database, library.root_directory_id).unwrap();
+        let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+        process_pending_photo_matches(&database, &mut progress).unwrap();
+        let photos = photos::list_photos(&database).unwrap();
+        let canis_photo = photos
+            .iter()
+            .find(|photo| photo.filename == "Canis lupus.jpg")
+            .unwrap();
+        let felis_photo = photos
+            .iter()
+            .find(|photo| photo.filename == "Felis catus.jpg")
+            .unwrap();
+        select_photo_taxon(&database, canis_photo.photo_id, canis_taxon_id).unwrap();
+        select_photo_taxon(&database, felis_photo.photo_id, felis_taxon_id).unwrap();
+
+        update_taxon(
+            &database,
+            TaxonUpdateInput {
+                taxon_id: felis_taxon_id,
+                geological_range: None,
+                scientific: None,
+                english: Some(TaxonNameInput {
+                    name: "domestic cat".into(),
+                    is_accepted: Some(true),
+                    ..Default::default()
+                }),
+                chinese: None,
+            },
+            TaxonUpdateOptions {
+                allow_new_names: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            get_photo_mapping(&database, felis_photo.photo_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PhotoTaxonStatus::Processing
+        );
+        assert_eq!(
+            get_photo_mapping(&database, canis_photo.photo_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PhotoTaxonStatus::Matched
+        );
+        assert_eq!(get_metadata(&database).unwrap().processing_photo_count, 1);
     }
 
     #[test]

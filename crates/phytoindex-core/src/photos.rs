@@ -71,14 +71,6 @@ pub fn open_library(database: &Database, root: &str) -> CoreResult<PhotoLibrary>
     if current.as_deref() != Some(root.as_str()) {
         transaction.execute("DELETE FROM photo_taxon_usage", [])?;
         transaction.execute("DELETE FROM photo_directories", [])?;
-        transaction.execute(
-            r#"
-            UPDATE photo_mapping_state
-            SET processed_taxonomy_revision = taxonomy_revision
-            WHERE state_id = 1
-            "#,
-            [],
-        )?;
         transaction.execute("DELETE FROM photo_library", [])?;
         transaction.execute(
             "INSERT INTO photo_library (library_id, root_path) VALUES (1, ?)",
@@ -474,12 +466,6 @@ pub fn rename_photo_from_taxon(database: &Database, photo_id: i64) -> CoreResult
                   SELECT 1
                   FROM photo_mapping_queue
                   WHERE photo_mapping_queue.photo_id = ?1
-              )
-              AND EXISTS (
-                  SELECT 1
-                  FROM photo_mapping_state
-                  WHERE state_id = 1
-                    AND taxonomy_revision = processed_taxonomy_revision
               )
             "#,
             [photo_id],
@@ -1105,14 +1091,8 @@ mod tests {
         let mut progress = |_: u64, _: Option<u64>, _: &str| {};
         mapping::process_pending_photo_matches(&database, &mut progress).unwrap();
         mapping::select_photo_taxon(&database, photo.photo_id, taxon_id).unwrap();
-        let connection = database.connect().unwrap();
-        connection
-            .execute(
-                "UPDATE photo_mapping_state SET taxonomy_revision = taxonomy_revision + 1",
-                [],
-            )
+        mapping::refresh_after_taxonomy_changes(&database, [taxon_id], Vec::<String>::new())
             .unwrap();
-        drop(connection);
         let error = rename_photo_from_taxon(&database, photo.photo_id).unwrap_err();
         assert!(error.to_string().contains("must have a matched taxon"));
         mapping::process_pending_photo_matches(&database, &mut progress).unwrap();

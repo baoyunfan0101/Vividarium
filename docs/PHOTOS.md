@@ -20,11 +20,10 @@ values use `snake_case`.
 | `photo_taxon_mapping` | Stores the current selected taxon and resolved status. |
 | `photo_taxon_usage` | Stores sparse direct and subtree photo counts for taxon browsing. |
 | `photo_mapping_queue` | Stores photos waiting for knowledge-base matching. |
-| `photo_mapping_state` | Stores taxonomy and processed-taxonomy revisions. |
 
 The queue is durable. A process restart does not lose photos waiting to be
-matched. The `processing` API status is derived from the queue or from a pending
-taxonomy revision; it is not a timestamp or an `entry_revision`.
+matched. The `processing` API status is derived from queued photo IDs; it is not
+a timestamp, taxonomy revision, processed-taxonomy revision, or `entry_revision`.
 
 For ID batches of at most 500 items, the mapping layer uses ordinary SQLite
 placeholders. Larger batches are loaded into temporary tables and joined from
@@ -215,7 +214,7 @@ error does not undo earlier successful renames.
 
 | Value | Meaning |
 | --- | --- |
-| `processing` | The photo is queued, or taxonomy changes have not been processed yet. |
+| `processing` | The photo is queued for knowledge-base matching. |
 | `unmatched` | Taxonomy search returned no candidates. |
 | `ambiguous` | One or more candidates await user selection. |
 | `matched` | A current candidate taxon has been selected. |
@@ -273,7 +272,7 @@ and the current node's `subtree_photo_count`. A root request uses
 | --- | --- | --- |
 | `processed` | `usize` | Photos evaluated in this run. |
 | `changed` | `usize` | Mapping rows whose selected taxon or status changed. |
-| `pending` | `i64` | Remaining queued photos plus a pending taxonomy revision flag. |
+| `pending` | `i64` | Remaining queued photos. |
 
 ## Matching logic and API
 
@@ -318,17 +317,15 @@ pub fn rebuild_mapping(database: &Database) -> CoreResult<MappingSyncResult>
 `select_photo_taxon` accepts only a taxon in those current candidates and
 updates mapping and sparse usage in one transaction.
 
-`process_pending_photo_matches` works in batches of 200. For a photo refresh it
-consumes only queued IDs. A taxonomy mutation increments a durable global
-revision because a change can affect any taxonomy search tier. The next run
-evaluates photos against the new revision, writes only changed mapping rows,
-rebuilds sparse usage, and advances the processed revision. This is the
-correctness-first affected-photo detection path; it performs indexed per-photo
-taxonomy searches instead of loading all taxonomy names.
+`process_pending_photo_matches` works in batches of 200 and consumes only queued
+photo IDs. Photo refresh queues new or changed photos. Taxonomy updates queue the
+affected photos derived from changed taxon IDs and changed old or new names; the
+matcher then reuses the normal taxonomy search for those photos and writes only
+changed mapping rows.
 
 Deleting a selected taxon changes its mapping rows to `stale` before the
-taxonomy row is removed. The pending taxonomy revision then re-evaluates those
-photos without blocking the taxonomy delete.
+taxonomy row is removed. Those photos are queued for rematching without blocking
+the taxonomy delete.
 
 ### Sparse taxonomy browsing
 

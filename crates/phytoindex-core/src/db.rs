@@ -195,15 +195,7 @@ CREATE TABLE IF NOT EXISTS photo_mapping_queue (
     FOREIGN KEY (photo_id) REFERENCES photos(photo_id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS photo_mapping_state (
-    state_id INTEGER PRIMARY KEY CHECK (state_id = 1),
-    taxonomy_revision INTEGER NOT NULL DEFAULT 0,
-    processed_taxonomy_revision INTEGER NOT NULL DEFAULT 0
-);
-
-INSERT OR IGNORE INTO photo_mapping_state (
-    state_id, taxonomy_revision, processed_taxonomy_revision
-) VALUES (1, 0, 0);
+DROP TABLE IF EXISTS photo_mapping_state;
 
 CREATE TABLE IF NOT EXISTS taxa (
     taxon_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -408,7 +400,6 @@ mod tests {
             "photo_taxon_mapping",
             "photo_taxon_usage",
             "photo_mapping_queue",
-            "photo_mapping_state",
             "taxa",
             "taxon_names",
             "taxon_names_fts",
