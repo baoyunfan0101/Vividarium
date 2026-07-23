@@ -118,9 +118,7 @@ pub fn delete_taxon_name(
         insert_operation_batch(&transaction, &input, &TaxonomyBatchContext::QueryDeleteName)?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
-    let mut names = vec![input.name];
-    names.extend(input.replacement_accepted_name);
-    mapping::refresh_after_taxonomy_changes(database, [input.taxon_id], names)?;
+    mapping::refresh_after_taxonomy_changes(database, [input.taxon_id])?;
     Ok(TaxonomyActionResult {
         batch_id,
         operation_id,
@@ -152,12 +150,7 @@ pub fn update_taxon(
     )?;
     if outcome.status == super::TaxonRowStatus::Applied {
         let taxon_ids = outcome.target.as_ref().map(|taxon| taxon.taxon_id);
-        let names = outcome
-            .changes
-            .iter()
-            .flat_map(|change| [change.old_value.clone(), change.new_value.clone()])
-            .flatten();
-        mapping::refresh_after_taxonomy_changes(database, taxon_ids, names)?;
+        mapping::refresh_after_taxonomy_changes(database, taxon_ids)?;
     }
     Ok(TaxonomyUpdateActionResult { batch_id, outcome })
 }
@@ -176,7 +169,8 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyAc
             "taxon {taxon_id} cannot be deleted because it has child taxa"
         )));
     }
-    let names = load_taxon_names(&transaction, taxon_id)?;
+    let photo_ids = mapped_photo_ids_for_taxon(&transaction, taxon_id)?;
+    mapping::queue_photo_ids(&transaction, &photo_ids, "taxonomy")?;
     let mut session = start_taxonomy_session(&transaction)?;
     transaction.execute("DELETE FROM taxa WHERE taxon_id = ?", [taxon_id])?;
     let changeset_blob = finish_taxonomy_session(&mut session)?;
@@ -188,7 +182,7 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyAc
     )?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
-    mapping::refresh_after_taxonomy_changes(database, [taxon_id], names)?;
+    mapping::refresh_after_taxonomy_changes(database, [taxon_id])?;
     Ok(TaxonomyActionResult {
         batch_id,
         operation_id,
@@ -235,7 +229,7 @@ pub fn execute_custom_taxonomy_sql(
     )?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
-    mapping::refresh_existing_taxonomy_mappings(database)?;
+    mapping::refresh_existing_mapped_taxa(database)?;
     Ok(TaxonomyCustomSqlResult {
         batch_id: Some(batch_id),
         operation_id: Some(operation_id),
@@ -255,6 +249,22 @@ fn ensure_taxon_exists(transaction: &Transaction<'_>, taxon_id: i64) -> CoreResu
     Ok(())
 }
 
+fn mapped_photo_ids_for_taxon(
+    transaction: &Transaction<'_>,
+    taxon_id: i64,
+) -> CoreResult<Vec<i64>> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT photo_id
+        FROM photo_taxon_mapping
+        WHERE taxon_id = ?
+        ORDER BY photo_id
+        "#,
+    )?;
+    let rows = statement.query_map([taxon_id], |row| row.get::<_, i64>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 fn load_name_is_accepted(
     transaction: &Transaction<'_>,
     taxon_id: i64,
@@ -272,12 +282,6 @@ fn load_name_is_accepted(
             |row| Ok(row.get::<_, i64>(0)? != 0),
         )
         .optional()?)
-}
-
-fn load_taxon_names(transaction: &Transaction<'_>, taxon_id: i64) -> CoreResult<Vec<String>> {
-    let mut statement = transaction.prepare("SELECT name FROM taxon_names WHERE taxon_id = ?")?;
-    let rows = statement.query_map([taxon_id], |row| row.get::<_, String>(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn ensure_name_exists(

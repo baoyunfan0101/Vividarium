@@ -318,10 +318,12 @@ pub fn rebuild_mapping(database: &Database) -> CoreResult<MappingSyncResult>
 updates mapping and sparse usage in one transaction.
 
 `process_pending_photo_matches` works in batches of 200 and consumes only queued
-photo IDs. Photo refresh queues new or changed photos. Taxonomy updates queue the
-affected photos derived from changed taxon IDs and changed old or new names; the
-matcher then reuses the normal taxonomy search for those photos and writes only
-changed mapping rows.
+photo IDs. Photo refresh queues new or changed photos. Taxonomy updates use only
+affected taxon IDs to queue photos already mapped to those taxa; the matcher then
+reuses the normal taxonomy search for those photos and writes only changed
+mapping rows. Photos that were previously unmapped but become matchable after a
+taxonomy update are intentionally left for manual rematching from the unfinished
+mapping UI.
 
 Deleting a selected taxon changes its mapping rows to `stale` before the
 taxonomy row is removed. Those photos are queued for rematching without blocking

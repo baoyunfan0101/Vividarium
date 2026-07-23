@@ -319,7 +319,6 @@ pub fn apply_rows(
         outcomes.push(outcome);
     }
     let mut affected_taxon_ids = BTreeSet::new();
-    let mut affected_names = BTreeSet::new();
     for outcome in &outcomes {
         if outcome.status != TaxonRowStatus::Applied {
             continue;
@@ -327,16 +326,9 @@ pub fn apply_rows(
         if let Some(target) = &outcome.target {
             affected_taxon_ids.insert(target.taxon_id);
         }
-        for change in &outcome.changes {
-            affected_names.extend(
-                [change.old_value.clone(), change.new_value.clone()]
-                    .into_iter()
-                    .flatten(),
-            );
-        }
     }
-    if !affected_taxon_ids.is_empty() || !affected_names.is_empty() {
-        mapping::refresh_after_taxonomy_changes(database, affected_taxon_ids, affected_names)?;
+    if !affected_taxon_ids.is_empty() {
+        mapping::refresh_after_taxonomy_changes(database, affected_taxon_ids)?;
     }
     Ok(TaxonBatchResult {
         batch_id,
@@ -740,7 +732,7 @@ pub fn revert_taxonomy_operation(database: &Database, operation_id: i64) -> Core
         [operation_id],
     )?;
     transaction.commit()?;
-    mapping::refresh_existing_taxonomy_mappings(database)?;
+    mapping::refresh_existing_mapped_taxa(database)?;
     Ok(())
 }
 

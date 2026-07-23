@@ -1091,8 +1091,7 @@ mod tests {
         let mut progress = |_: u64, _: Option<u64>, _: &str| {};
         mapping::process_pending_photo_matches(&database, &mut progress).unwrap();
         mapping::select_photo_taxon(&database, photo.photo_id, taxon_id).unwrap();
-        mapping::refresh_after_taxonomy_changes(&database, [taxon_id], Vec::<String>::new())
-            .unwrap();
+        mapping::refresh_after_taxonomy_changes(&database, [taxon_id]).unwrap();
         let error = rename_photo_from_taxon(&database, photo.photo_id).unwrap_err();
         assert!(error.to_string().contains("must have a matched taxon"));
         mapping::process_pending_photo_matches(&database, &mut progress).unwrap();
