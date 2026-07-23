@@ -10,6 +10,7 @@ use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonNameMatch {
+    pub name_id: i64,
     pub name_kind: TaxonomyNameKind,
     pub name: String,
     pub is_accepted: bool,
@@ -27,20 +28,20 @@ pub fn search_taxa(
     query: &str,
     limit: usize,
 ) -> CoreResult<Vec<TaxonSearchResult>> {
-    let Some(query) = normalize_search_query(query) else {
-        return Ok(Vec::new());
-    };
     let connection = database.connect()?;
-    search_taxa_with_connection(&connection, &query, limit)
+    search_taxa_with_connection(&connection, query, limit)
 }
 
-fn search_taxa_with_connection(
+pub(crate) fn search_taxa_with_connection(
     connection: &Connection,
     query: &str,
     limit: usize,
 ) -> CoreResult<Vec<TaxonSearchResult>> {
+    let Some(query) = normalize_search_query(query) else {
+        return Ok(Vec::new());
+    };
     let limit = page_limit(limit);
-    let search = SearchQuery::new(query);
+    let search = SearchQuery::new(&query);
     let search_matches = search_taxon_ids(connection, &search, limit)?;
     let ids = search_matches.taxon_ids;
     let summaries = load_taxon_summaries(connection, &ids)?;
@@ -427,7 +428,8 @@ fn load_name_matches_for_taxa(
     let sql = format!(
         r#"
         WITH input(taxon_id, sort_order) AS (VALUES {values_clause})
-        SELECT input.taxon_id, taxon_names.name_kind, taxon_names.name, taxon_names.is_accepted
+        SELECT input.taxon_id, taxon_names.name_id, taxon_names.name_kind,
+               taxon_names.name, taxon_names.is_accepted
         FROM input
         JOIN taxon_names ON taxon_names.taxon_id = input.taxon_id
         WHERE {conditions}
@@ -436,9 +438,9 @@ fn load_name_matches_for_taxa(
     );
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(query_params), |row| {
-        let name_kind = TaxonomyNameKind::from_code(row.get::<_, i64>(1)?).map_err(|error| {
+        let name_kind = TaxonomyNameKind::from_code(row.get::<_, i64>(2)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                1,
+                2,
                 rusqlite::types::Type::Integer,
                 error.to_string().into(),
             )
@@ -446,9 +448,10 @@ fn load_name_matches_for_taxa(
         Ok((
             row.get::<_, i64>(0)?,
             TaxonNameMatch {
+                name_id: row.get(1)?,
                 name_kind,
-                name: row.get(2)?,
-                is_accepted: row.get::<_, i64>(3)? != 0,
+                name: row.get(3)?,
+                is_accepted: row.get::<_, i64>(4)? != 0,
             },
         ))
     })?;

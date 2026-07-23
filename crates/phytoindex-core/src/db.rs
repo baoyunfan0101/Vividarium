@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS photo_taxon_mapping (
     photo_id INTEGER PRIMARY KEY,
     taxon_id INTEGER,
     status TEXT NOT NULL,
-    CHECK (status IN ('matched', 'unmatched', 'ambiguous', 'stale')),
+    CHECK (status IN ('matched', 'unmatched', 'ambiguous', 'processing', 'stale')),
     CHECK ((status = 'matched' AND taxon_id IS NOT NULL)
         OR (status != 'matched' AND taxon_id IS NULL)),
     FOREIGN KEY (photo_id) REFERENCES photos(photo_id) ON DELETE CASCADE,
@@ -188,6 +188,23 @@ CREATE TABLE IF NOT EXISTS photo_taxon_usage (
     FOREIGN KEY (taxon_id) REFERENCES taxa(taxon_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS photo_mapping_queue (
+    photo_id INTEGER PRIMARY KEY,
+    reason TEXT NOT NULL,
+    CHECK (reason IN ('refresh', 'taxonomy')),
+    FOREIGN KEY (photo_id) REFERENCES photos(photo_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS photo_mapping_state (
+    state_id INTEGER PRIMARY KEY CHECK (state_id = 1),
+    taxonomy_revision INTEGER NOT NULL DEFAULT 0,
+    processed_taxonomy_revision INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT OR IGNORE INTO photo_mapping_state (
+    state_id, taxonomy_revision, processed_taxonomy_revision
+) VALUES (1, 0, 0);
+
 CREATE TABLE IF NOT EXISTS taxa (
     taxon_id INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_taxon_id INTEGER,
@@ -196,6 +213,18 @@ CREATE TABLE IF NOT EXISTS taxa (
     CHECK (rank IN (1, 2, 3, 4, 5)),
     FOREIGN KEY (parent_taxon_id) REFERENCES taxa(taxon_id) ON DELETE RESTRICT
 );
+
+CREATE TRIGGER IF NOT EXISTS taxa_bd_photo_mapping
+BEFORE DELETE ON taxa BEGIN
+    INSERT INTO photo_mapping_queue (photo_id, reason)
+    SELECT photo_id, 'taxonomy'
+    FROM photo_taxon_mapping
+    WHERE taxon_id = old.taxon_id
+    ON CONFLICT(photo_id) DO UPDATE SET reason = excluded.reason;
+    UPDATE photo_taxon_mapping
+    SET taxon_id = NULL, status = 'stale'
+    WHERE taxon_id = old.taxon_id;
+END;
 
 CREATE TABLE IF NOT EXISTS taxon_names (
     name_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -304,6 +333,8 @@ CREATE INDEX IF NOT EXISTS idx_photo_taxon_mapping_status
     ON photo_taxon_mapping(status, photo_id);
 CREATE INDEX IF NOT EXISTS idx_photo_taxon_usage_subtree
     ON photo_taxon_usage(subtree_photo_count, taxon_id);
+CREATE INDEX IF NOT EXISTS idx_photo_mapping_queue_reason
+    ON photo_mapping_queue(reason, photo_id);
 
 DROP VIEW IF EXISTS taxa_display;
 CREATE VIEW IF NOT EXISTS taxa_display AS
@@ -376,6 +407,8 @@ mod tests {
             "photo_filenames_fts",
             "photo_taxon_mapping",
             "photo_taxon_usage",
+            "photo_mapping_queue",
+            "photo_mapping_state",
             "taxa",
             "taxon_names",
             "taxon_names_fts",

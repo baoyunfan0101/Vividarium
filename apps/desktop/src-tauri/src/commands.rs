@@ -6,8 +6,8 @@ use phytoindex_core::mapping::{
     PhotoTaxonMapping, PhotoTaxonMatch, PhotoTaxonNode, PhotoTaxonPhotoPage,
 };
 use phytoindex_core::models::{
-    DirectoryListingPage, MappingMetadata, MappingNode, OperationsStatus, Photo, PhotoLibrary,
-    PhotoMetadata, PhotoSyncResult, TaxaMetadata, Taxon,
+    DirectoryEntryCounts, DirectoryListingPage, MappingMetadata, MappingNode, OperationsStatus,
+    Photo, PhotoLibrary, PhotoMetadata, TaxaMetadata, Taxon,
 };
 use phytoindex_core::taxonomy::{
     DeleteTaxonNameInput, TaxonChild, TaxonDetailNode, TaxonSearchResult, TaxonUpdateInput,
@@ -25,6 +25,11 @@ type CommandResult<T> = Result<T, String>;
 #[tauri::command]
 pub fn get_photo_library(state: State<'_, AppState>) -> CommandResult<Option<PhotoLibrary>> {
     photos::get_library(&state.database).map_err(error)
+}
+
+#[tauri::command]
+pub fn get_photo_library_count(state: State<'_, AppState>) -> CommandResult<i64> {
+    photos::get_photo_count(&state.database).map_err(error)
 }
 
 #[tauri::command]
@@ -49,11 +54,43 @@ pub fn browse_photo_directory(
 }
 
 #[tauri::command]
-pub fn refresh_photo_directory(
+pub fn get_photo_directory_counts(
     state: State<'_, AppState>,
     directory_id: i64,
-) -> CommandResult<PhotoSyncResult> {
-    photos::refresh_directory(&state.database, directory_id).map_err(error)
+) -> CommandResult<DirectoryEntryCounts> {
+    photos::get_directory_counts(&state.database, directory_id).map_err(error)
+}
+
+#[tauri::command]
+pub fn refresh_photo_directory(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    directory_id: i64,
+) -> CommandResult<Value> {
+    let database = state.database.clone();
+    let operation = state
+        .operations
+        .start(app, "photos", "refresh", move |progress| {
+            progress(0, None, "Refreshing directory");
+            let refresh = photos::refresh_directory(&database, directory_id).map_err(error)?;
+            let mapping =
+                mapping::process_pending_photo_matches(&database, progress).map_err(error)?;
+            Ok(json!({ "refresh": refresh, "mapping": mapping }))
+        })?;
+    Ok(json!({ "operation": operation }))
+}
+
+#[tauri::command]
+pub fn start_photo_mapping(app: AppHandle, state: State<'_, AppState>) -> CommandResult<Value> {
+    let database = state.database.clone();
+    let operation = state
+        .operations
+        .start(app, "mapping", "match", move |progress| {
+            let result =
+                mapping::process_pending_photo_matches(&database, progress).map_err(error)?;
+            serde_json::to_value(result).map_err(error)
+        })?;
+    Ok(json!({ "operation": operation }))
 }
 
 #[tauri::command]
@@ -63,6 +100,19 @@ pub fn rename_photo(
     new_filename: String,
 ) -> CommandResult<Photo> {
     photos::rename_photo(&state.database, photo_id, &new_filename).map_err(error)
+}
+
+#[tauri::command]
+pub fn rename_photo_from_taxon(state: State<'_, AppState>, photo_id: i64) -> CommandResult<Photo> {
+    photos::rename_photo_from_taxon(&state.database, photo_id).map_err(error)
+}
+
+#[tauri::command]
+pub fn rename_photos_from_taxa(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+) -> CommandResult<Vec<Photo>> {
+    photos::rename_photos_from_taxa(&state.database, &photo_ids).map_err(error)
 }
 
 #[tauri::command]
@@ -367,7 +417,9 @@ fn start_taxa_operation(
                 taxa::update_taxa(&database, knowledge_base_path.as_deref(), progress)
             }
             .map_err(error)?;
-            serde_json::to_value(result).map_err(error)
+            let mapping =
+                mapping::process_pending_photo_matches(&database, progress).map_err(error)?;
+            Ok(json!({ "taxonomy": result, "mapping": mapping }))
         })?;
     Ok(json!({ "operation": operation }))
 }

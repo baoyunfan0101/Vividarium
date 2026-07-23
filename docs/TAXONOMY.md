@@ -201,8 +201,8 @@ distance. The maximum accepted distance is 1 for queries up to 4 characters,
 | `detail` | `TaxonDetail` | Full current-taxon detail. |
 | `matches` | `Vec<TaxonNameMatch>` | Names on this taxon that satisfied the selected search tiers. |
 
-`TaxonNameMatch` contains `name_kind`, `name`, and `is_accepted`. Search
-results do not load children; use `list_taxon_children` or
+`TaxonNameMatch` contains `name_id`, `name_kind`, `name`, and `is_accepted`.
+Search results do not load children; use `list_taxon_children` or
 `get_taxon_detail_node` when children are needed.
 
 ### `get_taxon_summary`

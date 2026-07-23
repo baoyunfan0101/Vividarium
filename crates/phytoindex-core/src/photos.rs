@@ -15,8 +15,8 @@ use crate::db::{Database, photo_from_row};
 use crate::error::{CoreError, CoreResult};
 use crate::mapping;
 use crate::models::{
-    DirectoryListingPage, NewPhoto, Photo, PhotoDirectory, PhotoLibrary, PhotoMetadata,
-    PhotoSyncResult,
+    DirectoryEntryCounts, DirectoryListingPage, NewPhoto, Photo, PhotoDirectory, PhotoLibrary,
+    PhotoMetadata, PhotoSyncResult,
 };
 
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -71,6 +71,14 @@ pub fn open_library(database: &Database, root: &str) -> CoreResult<PhotoLibrary>
     if current.as_deref() != Some(root.as_str()) {
         transaction.execute("DELETE FROM photo_taxon_usage", [])?;
         transaction.execute("DELETE FROM photo_directories", [])?;
+        transaction.execute(
+            r#"
+            UPDATE photo_mapping_state
+            SET processed_taxonomy_revision = taxonomy_revision
+            WHERE state_id = 1
+            "#,
+            [],
+        )?;
         transaction.execute("DELETE FROM photo_library", [])?;
         transaction.execute(
             "INSERT INTO photo_library (library_id, root_path) VALUES (1, ?)",
@@ -90,24 +98,50 @@ pub fn get_library(database: &Database) -> CoreResult<Option<PhotoLibrary>> {
     connection
         .query_row(
             r#"
-            SELECT photo_library.root_path, root.directory_id, COUNT(photos.photo_id)
+            SELECT photo_library.root_path, root.directory_id
             FROM photo_library
             JOIN photo_directories AS root ON root.relative_path = ''
-            LEFT JOIN photos ON TRUE
             WHERE photo_library.library_id = 1
-            GROUP BY photo_library.root_path, root.directory_id
             "#,
             [],
             |row| {
                 Ok(PhotoLibrary {
                     root_path: row.get(0)?,
                     root_directory_id: row.get(1)?,
-                    photo_count: row.get(2)?,
                 })
             },
         )
         .optional()
         .map_err(Into::into)
+}
+
+pub fn get_photo_count(database: &Database) -> CoreResult<i64> {
+    let connection = database.connect()?;
+    Ok(connection.query_row("SELECT COUNT(*) FROM photos", [], |row| row.get(0))?)
+}
+
+pub fn get_directory_counts(
+    database: &Database,
+    directory_id: i64,
+) -> CoreResult<DirectoryEntryCounts> {
+    let connection = database.connect()?;
+    if load_directory(&connection, directory_id)?.is_none() {
+        return Err(CoreError::NotFound(format!(
+            "photo directory {directory_id}"
+        )));
+    }
+    Ok(DirectoryEntryCounts {
+        directory_count: connection.query_row(
+            "SELECT COUNT(*) FROM photo_directories WHERE parent_directory_id = ?",
+            [directory_id],
+            |row| row.get(0),
+        )?,
+        file_count: connection.query_row(
+            "SELECT COUNT(*) FROM photos WHERE directory_id = ?",
+            [directory_id],
+            |row| row.get(0),
+        )?,
+    })
 }
 
 pub fn get_photo(database: &Database, photo_id: i64) -> CoreResult<Option<Photo>> {
@@ -140,19 +174,10 @@ pub fn browse_directory(
         .ok_or_else(|| CoreError::NotFound(format!("photo directory {directory_id}")))?;
     let cursor = decode_cursor(cursor)?;
     let limit = limit.clamp(1, MAX_PAGE_LIMIT);
-    let directory_count = connection.query_row(
-        "SELECT COUNT(*) FROM photo_directories WHERE parent_directory_id = ?",
-        [directory_id],
-        |row| row.get(0),
-    )?;
-    let file_count = connection.query_row(
-        "SELECT COUNT(*) FROM photos WHERE directory_id = ?",
-        [directory_id],
-        |row| row.get(0),
-    )?;
     let mut directories = Vec::new();
     let mut files = Vec::new();
     let mut remaining = limit;
+    let mut has_more = false;
     let section = cursor
         .as_ref()
         .map(|value| value.section)
@@ -174,12 +199,12 @@ pub fn browse_directory(
             .map(|value| (value.name.as_str(), value.id))
             .unwrap_or(("", 0));
         let rows = statement.query_map(
-            params![directory_id, after_name, after_id, remaining as i64],
+            params![directory_id, after_name, after_id, remaining as i64 + 1],
             directory_from_row,
         )?;
         directories = rows.collect::<Result<Vec<_>, _>>()?;
-        remaining -= directories.len();
-        if remaining == 0 {
+        if directories.len() > remaining {
+            directories.pop();
             let next_cursor = directories
                 .last()
                 .map(|value| {
@@ -195,13 +220,12 @@ pub fn browse_directory(
                 directories,
                 files,
                 next_cursor,
-                directory_count,
-                file_count,
             });
         }
+        remaining -= directories.len();
     }
 
-    if remaining > 0 {
+    if !has_more {
         let (after_name, after_id) = cursor
             .as_ref()
             .filter(|value| value.section == DirectorySection::Files)
@@ -217,29 +241,43 @@ pub fn browse_directory(
             "#,
         ))?;
         let rows = statement.query_map(
-            params![directory_id, after_name, after_id, remaining as i64],
+            params![directory_id, after_name, after_id, remaining as i64 + 1],
             photo_from_row,
         )?;
         files = rows.collect::<Result<Vec<_>, _>>()?;
+        if files.len() > remaining {
+            files.pop();
+            has_more = true;
+        }
     }
 
-    let next_cursor = files
-        .last()
-        .map(|value| {
-            encode_cursor(&DirectoryCursor {
+    let next_cursor = if has_more {
+        if let Some(value) = files.last() {
+            Some(encode_cursor(&DirectoryCursor {
                 section: DirectorySection::Files,
                 name: value.filename.clone(),
                 id: value.photo_id,
-            })
-        })
-        .transpose()?;
+            })?)
+        } else {
+            directories
+                .last()
+                .map(|value| {
+                    encode_cursor(&DirectoryCursor {
+                        section: DirectorySection::Directories,
+                        name: value.name.clone(),
+                        id: value.directory_id,
+                    })
+                })
+                .transpose()?
+        }
+    } else {
+        None
+    };
     Ok(DirectoryListingPage {
         directory,
         directories,
         files,
         next_cursor,
-        directory_count,
-        file_count,
     })
 }
 
@@ -350,7 +388,7 @@ fn refresh_directory_locked(database: &Database, directory_id: i64) -> CoreResul
             }
         }
     }
-    mapping::remap_photo_ids(&transaction, &changed_photo_ids)?;
+    mapping::queue_photo_ids(&transaction, &changed_photo_ids, "refresh")?;
     transaction.commit()?;
     Ok(PhotoSyncResult {
         directory_id,
@@ -392,6 +430,10 @@ pub fn rename_photo(database: &Database, photo_id: i64, new_filename: &str) -> C
             params![new_filename, photo_id],
         )?;
         mapping::remap_photo_ids(&transaction, &[photo_id])?;
+        transaction.execute(
+            "DELETE FROM photo_mapping_queue WHERE photo_id = ?",
+            [photo_id],
+        )?;
         let photo = transaction
             .query_row(
                 &photo_select("WHERE photos.photo_id = ?"),
@@ -412,6 +454,59 @@ pub fn rename_photo(database: &Database, photo_id: i64, new_filename: &str) -> C
             ))),
         },
     }
+}
+
+pub fn rename_photo_from_taxon(database: &Database, photo_id: i64) -> CoreResult<Photo> {
+    let photo = get_photo(database, photo_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("photo {photo_id}")))?;
+    let connection = database.connect()?;
+    let scientific_name = connection
+        .query_row(
+            r#"
+            SELECT taxon_names.name
+            FROM photo_taxon_mapping
+            JOIN taxon_names USING (taxon_id)
+            WHERE photo_taxon_mapping.photo_id = ?1
+              AND photo_taxon_mapping.status = 'matched'
+              AND taxon_names.name_kind = 1
+              AND taxon_names.is_accepted = 1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM photo_mapping_queue
+                  WHERE photo_mapping_queue.photo_id = ?1
+              )
+              AND EXISTS (
+                  SELECT 1
+                  FROM photo_mapping_state
+                  WHERE state_id = 1
+                    AND taxonomy_revision = processed_taxonomy_revision
+              )
+            "#,
+            [photo_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            CoreError::InvalidArgument(format!(
+                "photo {photo_id} must have a matched taxon with an accepted scientific name"
+            ))
+        })?;
+    let extension = Path::new(&photo.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| CoreError::InvalidArgument("photo filename has no extension".into()))?;
+    rename_photo(
+        database,
+        photo_id,
+        &format!("{scientific_name}.{extension}"),
+    )
+}
+
+pub fn rename_photos_from_taxa(database: &Database, photo_ids: &[i64]) -> CoreResult<Vec<Photo>> {
+    photo_ids
+        .iter()
+        .map(|photo_id| rename_photo_from_taxon(database, *photo_id))
+        .collect()
 }
 
 fn rename_file(source: &Path, destination: &Path, temporary: &Path) -> CoreResult<()> {
@@ -697,8 +792,6 @@ fn scan_directory(path: &Path) -> CoreResult<(Vec<ScannedDirectory>, Vec<Scanned
             });
         }
     }
-    directories.sort_by(|left, right| left.name.cmp(&right.name));
-    photos.sort_by(|left, right| left.filename.cmp(&right.filename));
     Ok((directories, photos))
 }
 
@@ -925,8 +1018,42 @@ mod tests {
         let listing = browse_directory(&database, library.root_directory_id, None, 20).unwrap();
         assert_eq!(listing.directories.len(), 1);
         assert_eq!(listing.files.len(), 1);
+        assert_eq!(
+            get_directory_counts(&database, library.root_directory_id).unwrap(),
+            DirectoryEntryCounts {
+                directory_count: 1,
+                file_count: 1,
+            }
+        );
         refresh_directory(&database, listing.directories[0].directory_id).unwrap();
         assert_eq!(list_photos(&database).unwrap().len(), 2);
+        assert_eq!(get_photo_count(&database).unwrap(), 2);
+    }
+
+    #[test]
+    fn directory_cursor_is_absent_on_the_last_page() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("a")).unwrap();
+        fs::create_dir(root.path().join("b")).unwrap();
+        fs::write(root.path().join("photo.jpg"), b"photo").unwrap();
+        let database = Database::open(data.path().join("vividarium.db")).unwrap();
+        let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+        refresh_directory(&database, library.root_directory_id).unwrap();
+
+        let first = browse_directory(&database, library.root_directory_id, None, 2).unwrap();
+        assert_eq!(first.directories.len(), 2);
+        assert!(first.files.is_empty());
+        let second = browse_directory(
+            &database,
+            library.root_directory_id,
+            first.next_cursor.as_deref(),
+            2,
+        )
+        .unwrap();
+        assert!(second.directories.is_empty());
+        assert_eq!(second.files.len(), 1);
+        assert_eq!(second.next_cursor, None);
     }
 
     #[test]
@@ -940,8 +1067,64 @@ mod tests {
         let photo = list_photos(&database).unwrap().remove(0);
         let renamed = rename_photo(&database, photo.photo_id, "after.jpg").unwrap();
         assert_eq!(renamed.filename, "after.jpg");
+        assert_eq!(
+            mapping::get_photo_mapping(&database, photo.photo_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            mapping::PhotoTaxonStatus::Unmatched
+        );
         assert!(!root.path().join("before.jpg").exists());
         assert!(root.path().join("after.jpg").is_file());
+    }
+
+    #[test]
+    fn renames_a_matched_photo_with_its_accepted_scientific_name() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("canis lupus.JPG"), b"photo").unwrap();
+        let database = Database::open(data.path().join("vividarium.db")).unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute("INSERT INTO taxa (rank) VALUES (5)", [])
+            .unwrap();
+        let taxon_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                r#"
+                INSERT INTO taxon_names (taxon_id, name_kind, name, is_accepted)
+                VALUES (?, 1, 'Canis lupus', 1)
+                "#,
+                [taxon_id],
+            )
+            .unwrap();
+        drop(connection);
+        let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+        refresh_directory(&database, library.root_directory_id).unwrap();
+        let photo = list_photos(&database).unwrap().remove(0);
+        let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+        mapping::process_pending_photo_matches(&database, &mut progress).unwrap();
+        mapping::select_photo_taxon(&database, photo.photo_id, taxon_id).unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute(
+                "UPDATE photo_mapping_state SET taxonomy_revision = taxonomy_revision + 1",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let error = rename_photo_from_taxon(&database, photo.photo_id).unwrap_err();
+        assert!(error.to_string().contains("must have a matched taxon"));
+        mapping::process_pending_photo_matches(&database, &mut progress).unwrap();
+
+        let renamed = rename_photo_from_taxon(&database, photo.photo_id).unwrap();
+
+        assert_eq!(renamed.filename, "Canis lupus.JPG");
+        let filenames = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(filenames, ["Canis lupus.JPG"]);
     }
 
     #[test]

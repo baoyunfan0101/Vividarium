@@ -10,6 +10,7 @@ pub use actions::{
     update_taxon,
 };
 pub use page::TaxonomyPage;
+pub(crate) use query::search_taxa_with_connection;
 pub use query::{TaxonNameMatch, TaxonSearchResult, search_taxa};
 pub use update::{
     TaxonBatchResult, TaxonChange, TaxonChangeKind, TaxonInputRow, TaxonNameInput, TaxonRank,

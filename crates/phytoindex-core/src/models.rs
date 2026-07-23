@@ -38,7 +38,6 @@ pub struct NewPhoto {
 pub struct PhotoLibrary {
     pub root_path: String,
     pub root_directory_id: i64,
-    pub photo_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -55,6 +54,10 @@ pub struct DirectoryListingPage {
     pub directories: Vec<PhotoDirectory>,
     pub files: Vec<Photo>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DirectoryEntryCounts {
     pub directory_count: i64,
     pub file_count: i64,
 }
@@ -82,6 +85,7 @@ pub struct MappingMetadata {
     pub mapped_photo_count: i64,
     pub unmatched_photo_count: i64,
     pub ambiguous_photo_count: i64,
+    pub processing_photo_count: i64,
     pub mapping_taxa_count: i64,
 }
 

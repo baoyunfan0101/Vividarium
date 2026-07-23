@@ -20,10 +20,15 @@ pub fn run() {
         .register_uri_scheme_protocol("phytoindex", |_context, request| media::handle(request))
         .invoke_handler(tauri::generate_handler![
             commands::get_photo_library,
+            commands::get_photo_library_count,
             commands::open_photo_library,
             commands::browse_photo_directory,
+            commands::get_photo_directory_counts,
             commands::refresh_photo_directory,
+            commands::start_photo_mapping,
             commands::rename_photo,
+            commands::rename_photo_from_taxon,
+            commands::rename_photos_from_taxa,
             commands::get_all_photos,
             commands::get_photo,
             commands::get_photo_metadata,
