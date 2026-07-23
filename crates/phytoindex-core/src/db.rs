@@ -196,6 +196,7 @@ CREATE TABLE IF NOT EXISTS photo_mapping_queue (
 );
 
 DROP TABLE IF EXISTS photo_mapping_state;
+DROP TRIGGER IF EXISTS taxa_photo_mapping_bd;
 
 CREATE TABLE IF NOT EXISTS taxa (
     taxon_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -291,12 +292,6 @@ CREATE TABLE IF NOT EXISTS taxa_metadata (
     knowledge_base_modified_at TEXT,
     last_synced_at TEXT
 );
-
-CREATE TRIGGER IF NOT EXISTS taxa_photo_mapping_bd BEFORE DELETE ON taxa BEGIN
-    UPDATE photo_taxon_mapping
-    SET taxon_id = NULL, status = 'stale'
-    WHERE taxon_id = old.taxon_id;
-END;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_taxon_names_one_accepted
     ON taxon_names(taxon_id, name_kind) WHERE is_accepted = 1;
@@ -416,6 +411,21 @@ mod tests {
                 .unwrap();
             assert!(exists, "missing table {table}");
         }
+        let triggers = connection
+            .prepare(
+                r#"
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'trigger' AND name LIKE 'taxa%photo_mapping%'
+                ORDER BY name
+                "#,
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(triggers, ["taxa_bd_photo_mapping"]);
         let name_columns = table_columns(&connection, "taxon_names");
         assert_eq!(
             name_columns,
