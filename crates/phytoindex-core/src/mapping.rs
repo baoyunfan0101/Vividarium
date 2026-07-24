@@ -4,9 +4,9 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Database, taxon_from_row};
+use crate::db::Database;
 use crate::error::{CoreError, CoreResult};
-use crate::models::{MappingMetadata, MappingNode, MappingSyncResult, Photo, PhotoPage, Taxon};
+use crate::models::{MappingMetadata, MappingSyncResult, Photo, PhotoPage, Taxon};
 use crate::photos::{
     self, PhotoCursor, PhotoPageSection, decode_photo_cursor, encode_photo_cursor,
     invalid_photo_cursor, photo_page_limit,
@@ -275,10 +275,6 @@ pub fn select_photo_taxon(
         taxon_id: Some(taxon_id),
         status: PhotoTaxonStatus::Matched,
     })
-}
-
-pub fn get_root(database: &Database) -> CoreResult<MappingNode> {
-    get_by_taxon_id(database, None)
 }
 
 pub fn get_photo_taxon_node(
@@ -595,134 +591,6 @@ fn load_photos_for_taxon(
         )?,
     };
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-pub fn get_by_taxon_id(database: &Database, taxon_id: Option<i64>) -> CoreResult<MappingNode> {
-    let connection = database.connect()?;
-    let taxon = match taxon_id {
-        Some(id) => connection
-            .query_row(
-                "SELECT * FROM taxa_display WHERE taxon_id = ?",
-                [id],
-                taxon_from_row,
-            )
-            .optional()?,
-        None => None,
-    };
-    let photo_ids = match taxon_id {
-        Some(id) => {
-            let mut statement = connection.prepare(
-                r#"
-                SELECT photo_id FROM photo_taxon_mapping
-                WHERE taxon_id = ? AND status = 'matched'
-                ORDER BY photo_id
-                "#,
-            )?;
-            let rows = statement.query_map([id], |row| row.get::<_, i64>(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        }
-        None => Vec::new(),
-    };
-    let mut statement = match taxon_id {
-        Some(_) => connection.prepare(
-            r#"
-            SELECT taxa_display.*
-            FROM taxa_display
-            JOIN photo_taxon_usage USING (taxon_id)
-            WHERE taxa_display.parent_id = ?
-              AND photo_taxon_usage.subtree_photo_count > 0
-            ORDER BY taxa_display.rank, taxa_display.name, taxa_display.taxon_id
-            "#,
-        )?,
-        None => connection.prepare(
-            r#"
-            SELECT taxa_display.*
-            FROM taxa_display
-            JOIN photo_taxon_usage USING (taxon_id)
-            WHERE taxa_display.parent_id IS NULL
-              AND photo_taxon_usage.subtree_photo_count > 0
-            ORDER BY taxa_display.name, taxa_display.taxon_id
-            "#,
-        )?,
-    };
-    let rows = match taxon_id {
-        Some(id) => statement.query_map([id], taxon_from_row)?,
-        None => statement.query_map([], taxon_from_row)?,
-    };
-    let children = rows.collect::<Result<Vec<_>, _>>()?;
-    let (direct_photo_count, subtree_photo_count) = match taxon_id {
-        Some(id) => connection
-            .query_row(
-                r#"
-                SELECT direct_photo_count, subtree_photo_count
-                FROM photo_taxon_usage WHERE taxon_id = ?
-                "#,
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?
-            .unwrap_or((0, 0)),
-        None => {
-            let total = connection.query_row(
-                "SELECT COUNT(*) FROM photo_taxon_mapping WHERE status = 'matched'",
-                [],
-                |row| row.get(0),
-            )?;
-            (0, total)
-        }
-    };
-    Ok(MappingNode {
-        taxon,
-        photo_ids,
-        children,
-        direct_photo_count,
-        subtree_photo_count,
-    })
-}
-
-pub fn get_by_binomial(database: &Database, name: &str) -> CoreResult<MappingNode> {
-    get_by_taxonomy_name(database, name, Some(TaxonomyNameKind::Scientific))
-}
-
-pub fn get_by_name(database: &Database, name: &str) -> CoreResult<MappingNode> {
-    get_by_taxonomy_name(database, name, None)
-}
-
-fn get_by_taxonomy_name(
-    database: &Database,
-    name: &str,
-    kind: Option<TaxonomyNameKind>,
-) -> CoreResult<MappingNode> {
-    let connection = database.connect()?;
-    let taxon_id = match kind {
-        Some(kind) => connection
-            .query_row(
-                r#"
-                SELECT taxon_id FROM taxon_names
-                WHERE name_kind = ? AND name = ?
-                ORDER BY is_accepted DESC, taxon_id LIMIT 1
-                "#,
-                params![kind.code(), name],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?,
-        None => connection
-            .query_row(
-                r#"
-                SELECT taxon_id FROM taxon_names
-                WHERE name = ?
-                ORDER BY is_accepted DESC, name_kind, taxon_id LIMIT 1
-                "#,
-                [name],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?,
-    };
-    drop(connection);
-    match taxon_id {
-        Some(id) => get_by_taxon_id(database, Some(id)),
-        None => Ok(empty_node()),
-    }
 }
 
 pub fn suggest(
@@ -1422,16 +1290,6 @@ fn delete_queued_photo_ids(transaction: &Transaction<'_>, photo_ids: &[i64]) -> 
     Ok(())
 }
 
-fn empty_node() -> MappingNode {
-    MappingNode {
-        taxon: None,
-        photo_ids: Vec::new(),
-        children: Vec::new(),
-        direct_photo_count: 0,
-        subtree_photo_count: 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1524,10 +1382,9 @@ mod tests {
             .taxon_id;
         let mapping = select_photo_taxon(&database, photo.photo_id, species_id).unwrap();
         assert_eq!(mapping.status, PhotoTaxonStatus::Matched);
-        let node = get_by_taxon_id(&database, mapping.taxon_id).unwrap();
-        assert_eq!(node.direct_photo_count, 1);
+        let node = get_photo_taxon_node(&database, mapping.taxon_id, false).unwrap();
+        assert_eq!(node.taxon.as_ref().unwrap().direct_photo_count, 1);
         assert_eq!(node.subtree_photo_count, 1);
-        assert_eq!(get_root(&database).unwrap().children.len(), 1);
         let sparse_root = get_photo_taxon_node(&database, None, false).unwrap();
         assert_eq!(sparse_root.subtree_photo_count, 1);
         let root_page = browse_photo_taxon(&database, None, false, true, None, 20).unwrap();

@@ -7,8 +7,8 @@ use phytoindex_core::mapping::{
     PhotoTaxonMatch, PhotoTaxonNode,
 };
 use phytoindex_core::models::{
-    DirectoryEntryCounts, MappingMetadata, MappingNode, OperationsStatus, Photo,
-    PhotoDirectoryItem, PhotoLibrary, PhotoMetadata, PhotoPage, TaxaMetadata, Taxon,
+    DirectoryEntryCounts, MappingMetadata, OperationsStatus, Photo, PhotoDirectoryItem,
+    PhotoLibrary, PhotoMetadata, PhotoPage, TaxaMetadata, Taxon,
 };
 use phytoindex_core::taxonomy::{
     DeleteTaxonNameInput, TaxonChild, TaxonDetailNode, TaxonSearchResult, TaxonUpdateInput,
@@ -279,16 +279,6 @@ pub fn get_mapping_metadata(state: State<'_, AppState>) -> CommandResult<Mapping
 }
 
 #[tauri::command]
-pub fn get_mapping_root(state: State<'_, AppState>) -> CommandResult<MappingNode> {
-    mapping::get_root(&state.database).map_err(error)
-}
-
-#[tauri::command]
-pub fn get_mapping_taxon(state: State<'_, AppState>, taxon_id: i64) -> CommandResult<MappingNode> {
-    mapping::get_by_taxon_id(&state.database, Some(taxon_id)).map_err(error)
-}
-
-#[tauri::command]
 pub fn get_photo_taxon_match(
     state: State<'_, AppState>,
     photo_id: i64,
@@ -349,22 +339,6 @@ pub fn list_photos_by_mapping_status(
         limit.unwrap_or(50),
     )
     .map_err(error)
-}
-
-#[tauri::command]
-pub fn search_mapping_by_name(
-    state: State<'_, AppState>,
-    name: String,
-) -> CommandResult<MappingNode> {
-    mapping::get_by_name(&state.database, &name).map_err(error)
-}
-
-#[tauri::command]
-pub fn search_mapping_by_binomial(
-    state: State<'_, AppState>,
-    binomial_name: String,
-) -> CommandResult<MappingNode> {
-    mapping::get_by_binomial(&state.database, &binomial_name).map_err(error)
 }
 
 #[tauri::command]

@@ -95,15 +95,6 @@ pub struct MappingMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MappingNode {
-    pub taxon: Option<Taxon>,
-    pub photo_ids: Vec<i64>,
-    pub children: Vec<Taxon>,
-    pub direct_photo_count: i64,
-    pub subtree_photo_count: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OperationState {
     pub module: String,
     pub task_id: Option<String>,
