@@ -8,9 +8,9 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params, para
 use serde::{Deserialize, Serialize};
 
 use super::update::{
-    ExistingTaxonUpdate, apply_existing_taxon_update_with_log, finish_taxonomy_session,
-    insert_operation_batch, insert_operation_log, is_taxonomy_session_table, normalize_name,
-    start_taxonomy_session, validate_taxonomy,
+    ExistingTaxonUpdate, affected_taxon_ids_from_changeset, apply_existing_taxon_update_with_log,
+    finish_taxonomy_session, insert_operation_batch, insert_operation_log,
+    is_taxonomy_session_table, normalize_name, start_taxonomy_session, validate_taxonomy,
 };
 use super::{
     TaxonNameInput, TaxonRowOutcome, TaxonUpdateOptions, TaxonomyBatchContext,
@@ -227,8 +227,9 @@ pub fn execute_custom_taxonomy_sql(
         },
     )?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
+    let affected_taxon_ids = affected_taxon_ids_from_changeset(&transaction, &changeset_blob)?;
     transaction.commit()?;
-    mapping::refresh_existing_mapped_taxa(database)?;
+    mapping::refresh_after_taxonomy_changes(database, affected_taxon_ids)?;
     Ok(TaxonomyCustomSqlResult {
         batch_id: Some(batch_id),
         operation_id: Some(operation_id),

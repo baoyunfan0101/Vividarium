@@ -491,6 +491,10 @@ normalized column names and row count, not the uploaded row values.
 A no-change SQL call succeeds with both IDs set to `null` and
 `changeset_size = 0`; it creates no history records.
 
+After a changing call commits, the backend extracts affected `taxon_id` values
+from the stored changeset. Only photos currently mapped to those taxa are
+queued for rematching.
+
 ## Operation history and rollback
 
 Every applied structured row and every changing direct action is recorded as
@@ -581,6 +585,9 @@ Reverts one `applied` operation from its stored changeset and marks it
 `reverted`. It does not revert the rest of the batch and returns no refreshed
 view. A missing, already reverted, or conflicting operation returns an error.
 Later changes to the same records may prevent rollback.
+
+Rollback uses the same changeset-derived `taxon_id` scope as Custom SQL. It
+does not queue photos mapped to unrelated taxa.
 
 ## Tauri command surface
 

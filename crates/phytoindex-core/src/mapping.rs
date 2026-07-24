@@ -567,23 +567,6 @@ pub(crate) fn refresh_after_taxonomy_changes(
     Ok(())
 }
 
-pub(crate) fn refresh_existing_mapped_taxa(database: &Database) -> CoreResult<()> {
-    let connection = database.connect()?;
-    let taxon_ids = connection
-        .prepare(
-            r#"
-            SELECT DISTINCT taxon_id
-            FROM photo_taxon_mapping
-            WHERE taxon_id IS NOT NULL
-            ORDER BY taxon_id
-            "#,
-        )?
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(connection);
-    refresh_after_taxonomy_changes(database, taxon_ids)
-}
-
 pub(crate) fn queue_photo_ids(
     transaction: &Transaction<'_>,
     photo_ids: &[i64],

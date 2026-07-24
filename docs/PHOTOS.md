@@ -325,6 +325,10 @@ mapping rows. Photos that were previously unmapped but become matchable after a
 taxonomy update are intentionally left for manual rematching from the unfinished
 mapping UI.
 
+Custom SQL and taxonomy rollback parse their SQLite changesets to obtain the
+affected taxon IDs. They queue only photos currently mapped to those taxa,
+rather than refreshing every mapped taxon.
+
 Deleting a selected taxon changes its mapping rows to `stale` before the
 taxonomy row is removed. Those photos are queued for rematching without blocking
 the taxonomy delete.
