@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
 use phytoindex_core::mapping::{
-    PhotoTaxonMapping, PhotoTaxonMatch, PhotoTaxonNode, PhotoTaxonPhotoPage,
+    PhotoMappingListItem, PhotoMappingListStatus, PhotoTaxonItem, PhotoTaxonMapping,
+    PhotoTaxonMatch, PhotoTaxonNode,
 };
 use phytoindex_core::models::{
-    DirectoryEntryCounts, DirectoryListingPage, MappingMetadata, MappingNode, OperationsStatus,
-    Photo, PhotoLibrary, PhotoMetadata, TaxaMetadata, Taxon,
+    DirectoryEntryCounts, MappingMetadata, MappingNode, OperationsStatus, Photo,
+    PhotoDirectoryItem, PhotoLibrary, PhotoMetadata, PhotoPage, TaxaMetadata, Taxon,
 };
 use phytoindex_core::taxonomy::{
     DeleteTaxonNameInput, TaxonChild, TaxonDetailNode, TaxonSearchResult, TaxonUpdateInput,
@@ -43,12 +44,12 @@ pub fn browse_photo_directory(
     directory_id: i64,
     cursor: Option<String>,
     limit: Option<usize>,
-) -> CommandResult<DirectoryListingPage> {
+) -> CommandResult<PhotoPage<PhotoDirectoryItem>> {
     photos::browse_directory(
         &state.database,
         directory_id,
         cursor.as_deref(),
-        limit.unwrap_or(160),
+        limit.unwrap_or(50),
     )
     .map_err(error)
 }
@@ -315,19 +316,37 @@ pub fn get_photo_taxon_node(
 }
 
 #[tauri::command]
-pub fn list_photos_for_taxon(
+pub fn browse_photo_taxon(
     state: State<'_, AppState>,
     taxon_id: Option<i64>,
+    show_empty: Option<bool>,
     include_descendants: Option<bool>,
-    after_photo_id: Option<i64>,
+    cursor: Option<String>,
     limit: Option<usize>,
-) -> CommandResult<PhotoTaxonPhotoPage> {
-    mapping::list_photos_for_taxon(
+) -> CommandResult<PhotoPage<PhotoTaxonItem>> {
+    mapping::browse_photo_taxon(
         &state.database,
         taxon_id,
+        show_empty.unwrap_or(false),
         include_descendants.unwrap_or(true),
-        after_photo_id,
-        limit.unwrap_or(160),
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+    )
+    .map_err(error)
+}
+
+#[tauri::command]
+pub fn list_photos_by_mapping_status(
+    state: State<'_, AppState>,
+    status: PhotoMappingListStatus,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> CommandResult<PhotoPage<PhotoMappingListItem>> {
+    mapping::list_photos_by_mapping_status(
+        &state.database,
+        status,
+        cursor.as_deref(),
+        limit.unwrap_or(50),
     )
     .map_err(error)
 }

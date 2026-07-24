@@ -49,11 +49,16 @@ pub struct PhotoDirectory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DirectoryListingPage {
-    pub directory: PhotoDirectory,
-    pub directories: Vec<PhotoDirectory>,
-    pub files: Vec<Photo>,
+pub struct PhotoPage<T> {
+    pub items: Vec<T>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PhotoDirectoryItem {
+    Directory { directory: PhotoDirectory },
+    Photo { photo: Photo },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

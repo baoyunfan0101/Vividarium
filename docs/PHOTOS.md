@@ -73,18 +73,33 @@ Contains `photo_id`, `captured_at`, `camera`, `width`, `height`, `longitude`,
 and extracted from the real file on the first request otherwise. Directory
 refresh does not read EXIF.
 
-### `DirectoryListingPage`
+### `PhotoPage<T>`
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `directory` | `PhotoDirectory` | Directory being listed. |
-| `directories` | `Vec<PhotoDirectory>` | Child directories in this page. |
-| `files` | `Vec<Photo>` | Photos in this page. |
+| `items` | `Vec<T>` | Items in the current page. |
 | `next_cursor` | `Option<String>` | Opaque next-page cursor, or `null` on the actual last page. |
 
-Directories are returned before files. Limits are clamped to `1..=500`. The
-query reads `limit + 1` entries internally, so it does not produce a redundant
-cursor on the final page.
+This is the photos equivalent of `TaxonomyPage<T>` and has the same serialized
+shape and pagination rules. Limits are clamped to `1..=500`; desktop list
+commands default to 50. Cursors are URL-safe opaque tokens bound to one
+endpoint and scope. Reusing a cursor with another directory, taxon, option set,
+or mapping status returns an invalid-cursor error.
+
+All page queries read at most `limit + 1` items to determine whether another
+page exists.
+
+### `PhotoDirectoryItem`
+
+This tagged enum is serialized with `kind`:
+
+| `kind` | Field | Meaning |
+| --- | --- | --- |
+| `directory` | `directory: PhotoDirectory` | Immediate child directory. |
+| `photo` | `photo: Photo` | Photo directly in the requested directory. |
+
+The virtual list returns all child directories before photos. Each section has
+stable keyset order by display name and database ID.
 
 ### `DirectoryEntryCounts`
 
@@ -114,15 +129,14 @@ pub fn browse_directory(
     directory_id: i64,
     cursor: Option<&str>,
     limit: usize,
-) -> CoreResult<DirectoryListingPage>
+) -> CoreResult<PhotoPage<PhotoDirectoryItem>>
 ```
 
 `open_library` canonicalizes `root`. Opening a different root clears the old
 photo index, mappings, and usage counts, but preserves taxonomy data.
 
 `browse_directory` reads only SQLite. It does not scan the filesystem, count
-entries, or extract metadata. A cursor is valid only for the same directory
-listing.
+entries, or extract metadata.
 
 ### Directory refresh
 
@@ -256,12 +270,21 @@ the mapping table.
 `PhotoTaxonUsage` contains `taxon_id`, `rank`, accepted `names`,
 `direct_photo_count`, and `subtree_photo_count`.
 
-`PhotoTaxonNode` contains an optional current `taxon`, immediate `children`,
-and the current node's `subtree_photo_count`. A root request uses
-`taxon_id = null`.
+`PhotoTaxonNode` contains an optional current `taxon` and the current node's
+`subtree_photo_count`. A root request uses `taxon_id = null`. Child taxa are
+not embedded; use `browse_photo_taxon`.
 
-`PhotoTaxonPhotoPage` contains `items: Vec<Photo>` and
-`next_photo_id: Option<i64>`.
+`PhotoTaxonItem` is tagged with `kind`. `taxon` contains
+`taxon: PhotoTaxonUsage`; `photo` contains `photo: Photo`. Child taxa precede
+photos in the same virtual page.
+
+`PhotoMappingListStatus` accepts `matched`, `unmatched`, `ambiguous`,
+`processing`, `stale`, and `unmapped`. `unmapped` means no mapping row and no
+pending queue entry. A queued photo belongs to `processing`, even when it has
+an older stored mapping status.
+
+`PhotoMappingListItem` contains `photo` and
+`mapping: Option<PhotoTaxonMapping>`. `mapping` is `null` only for `unmapped`.
 
 `MappingMetadata` contains `mapped_photo_count`, `unmatched_photo_count`,
 `ambiguous_photo_count`, `processing_photo_count`, and `mapping_taxa_count`.
@@ -341,26 +364,37 @@ pub fn get_photo_taxon_node(
     taxon_id: Option<i64>,
     show_empty: bool,
 ) -> CoreResult<PhotoTaxonNode>
-pub fn list_photos_for_taxon(
+pub fn browse_photo_taxon(
     database: &Database,
     taxon_id: Option<i64>,
+    show_empty: bool,
     include_descendants: bool,
-    after_photo_id: Option<i64>,
+    cursor: Option<&str>,
     limit: usize,
-) -> CoreResult<PhotoTaxonPhotoPage>
+) -> CoreResult<PhotoPage<PhotoTaxonItem>>
+pub fn list_photos_by_mapping_status(
+    database: &Database,
+    status: PhotoMappingListStatus,
+    cursor: Option<&str>,
+    limit: usize,
+) -> CoreResult<PhotoPage<PhotoMappingListItem>>
 ```
 
-With `show_empty = false`, only nodes with
-`photo_taxon_usage.subtree_photo_count > 0` are returned. Taxonomy branches
-without matched photos are therefore absent. Set `show_empty = true` to include
-zero-count children.
+For taxon browsing, `show_empty = false` returns only child nodes with
+`photo_taxon_usage.subtree_photo_count > 0`. Taxonomy branches without matched
+photos are therefore absent. Set `show_empty = true` to include zero-count
+children.
 
 When mappings change, all changed taxon IDs are loaded as recursive CTE seeds.
 Their overlapping ancestor deltas are aggregated before batched usage updates,
 avoiding one lineage query per taxon.
 
 `include_descendants = true` includes direct mappings on the selected taxon and
-all descendants. Page limits are clamped to `1..=500`.
+all descendants in the photo section. Child taxa still contain only immediate
+children.
+
+The mapping-status endpoint uses `photo_id` keyset order. Its logical status
+rules match `get_photo_mapping`, including the synthesized `processing` state.
 
 ## Desktop commands
 
@@ -369,7 +403,7 @@ all descendants. Page limits are clamped to `1..=500`.
 | `get_photo_library` | none | `PhotoLibrary \| null` |
 | `get_photo_library_count` | none | `i64` |
 | `open_photo_library` | `root` | `PhotoLibrary` |
-| `browse_photo_directory` | `directory_id`, optional `cursor`, optional `limit` | `DirectoryListingPage` |
+| `browse_photo_directory` | `directory_id`, optional `cursor`, optional `limit` | `PhotoPage<PhotoDirectoryItem>` |
 | `get_photo_directory_counts` | `directory_id` | `DirectoryEntryCounts` |
 | `refresh_photo_directory` | `directory_id` | Background operation descriptor |
 | `start_photo_mapping` | none | Background operation descriptor |
@@ -382,13 +416,13 @@ all descendants. Page limits are clamped to `1..=500`.
 | `get_photo_taxon_match` | `photo_id` | `PhotoTaxonMatch` |
 | `select_photo_taxon` | `photo_id`, `taxon_id` | `PhotoTaxonMapping` |
 | `get_photo_taxon_node` | optional `taxon_id`, optional `show_empty` | `PhotoTaxonNode` |
-| `list_photos_for_taxon` | optional `taxon_id`, optional `include_descendants`, optional `after_photo_id`, optional `limit` | `PhotoTaxonPhotoPage` |
+| `browse_photo_taxon` | optional `taxon_id`, optional `show_empty`, optional `include_descendants`, optional `cursor`, optional `limit` | `PhotoPage<PhotoTaxonItem>` |
+| `list_photos_by_mapping_status` | `status`, optional `cursor`, optional `limit` | `PhotoPage<PhotoMappingListItem>` |
 
 `refresh_photo_directory`, `start_photo_mapping`, `start_taxa_update`, and
 `start_taxa_rebuild` return after scheduling work. Progress and final results
 are available through `get_operations_status`. Taxonomy update and rebuild
 operations run pending photo matching after the taxonomy transaction finishes.
 
-The adapter uses 160 as the default directory and taxon photo-page limit. It
-defaults to hiding empty taxonomy branches and including descendants in a taxon
-photo page.
+The adapter uses 50 as the default for all cursor pages. Taxon browsing defaults
+to hiding empty branches and including descendant photos.

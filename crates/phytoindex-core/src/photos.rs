@@ -15,9 +15,11 @@ use crate::db::{Database, photo_from_row};
 use crate::error::{CoreError, CoreResult};
 use crate::mapping;
 use crate::models::{
-    DirectoryEntryCounts, DirectoryListingPage, NewPhoto, Photo, PhotoDirectory, PhotoLibrary,
-    PhotoMetadata, PhotoSyncResult,
+    DirectoryEntryCounts, NewPhoto, Photo, PhotoDirectory, PhotoLibrary, PhotoMetadata,
+    PhotoSyncResult,
 };
+
+pub use crate::models::{PhotoDirectoryItem, PhotoPage};
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     "arw", "bmp", "cr2", "cr3", "dng", "gif", "heic", "jpeg", "jpg", "nef", "png", "raf", "rw2",
@@ -28,18 +30,34 @@ static PHOTO_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 pub type ProgressCallback<'a> = dyn FnMut(u64, Option<u64>, &str) + Send + 'a;
 
-#[derive(Debug, Serialize, Deserialize)]
-struct DirectoryCursor {
-    section: DirectorySection,
-    name: String,
-    id: i64,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum DirectorySection {
-    Directories,
-    Files,
+pub(crate) enum PhotoPageSection {
+    Containers,
+    Photos,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum PhotoCursor {
+    DirectoryEntries {
+        directory_id: i64,
+        section: PhotoPageSection,
+        name: String,
+        item_id: i64,
+    },
+    TaxonEntries {
+        taxon_id: Option<i64>,
+        show_empty: bool,
+        include_descendants: bool,
+        section: PhotoPageSection,
+        rank: i64,
+        item_id: i64,
+    },
+    MappingStatus {
+        status: String,
+        photo_id: i64,
+    },
 }
 
 #[derive(Debug)]
@@ -160,22 +178,26 @@ pub fn browse_directory(
     directory_id: i64,
     cursor: Option<&str>,
     limit: usize,
-) -> CoreResult<DirectoryListingPage> {
+) -> CoreResult<PhotoPage<PhotoDirectoryItem>> {
     let connection = database.connect()?;
-    let directory = load_directory(&connection, directory_id)?
+    load_directory(&connection, directory_id)?
         .ok_or_else(|| CoreError::NotFound(format!("photo directory {directory_id}")))?;
-    let cursor = decode_cursor(cursor)?;
-    let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+    let (section, after_name, after_id) = match decode_photo_cursor(cursor)? {
+        None => (PhotoPageSection::Containers, String::new(), 0),
+        Some(PhotoCursor::DirectoryEntries {
+            directory_id: cursor_directory_id,
+            section,
+            name,
+            item_id,
+        }) if cursor_directory_id == directory_id => (section, name, item_id),
+        Some(_) => return Err(invalid_photo_cursor()),
+    };
+    let limit = photo_page_limit(limit);
     let mut directories = Vec::new();
-    let mut files = Vec::new();
     let mut remaining = limit;
     let mut has_more = false;
-    let section = cursor
-        .as_ref()
-        .map(|value| value.section)
-        .unwrap_or(DirectorySection::Directories);
 
-    if section == DirectorySection::Directories {
+    if section == PhotoPageSection::Containers {
         let mut statement = connection.prepare(
             r#"
             SELECT directory_id, parent_directory_id, name, relative_path
@@ -186,12 +208,13 @@ pub fn browse_directory(
             LIMIT ?4
             "#,
         )?;
-        let (after_name, after_id) = cursor
-            .as_ref()
-            .map(|value| (value.name.as_str(), value.id))
-            .unwrap_or(("", 0));
         let rows = statement.query_map(
-            params![directory_id, after_name, after_id, remaining as i64 + 1],
+            params![
+                directory_id,
+                after_name.as_str(),
+                after_id,
+                remaining as i64 + 1
+            ],
             directory_from_row,
         )?;
         directories = rows.collect::<Result<Vec<_>, _>>()?;
@@ -200,64 +223,66 @@ pub fn browse_directory(
             let next_cursor = directories
                 .last()
                 .map(|value| {
-                    encode_cursor(&DirectoryCursor {
-                        section: DirectorySection::Directories,
+                    encode_photo_cursor(&PhotoCursor::DirectoryEntries {
+                        directory_id,
+                        section: PhotoPageSection::Containers,
                         name: value.name.clone(),
-                        id: value.directory_id,
+                        item_id: value.directory_id,
                     })
                 })
                 .transpose()?;
-            return Ok(DirectoryListingPage {
-                directory,
-                directories,
-                files,
+            return Ok(PhotoPage {
+                items: directories
+                    .into_iter()
+                    .map(|directory| PhotoDirectoryItem::Directory { directory })
+                    .collect(),
                 next_cursor,
             });
         }
         remaining -= directories.len();
     }
 
-    if !has_more {
-        let (after_name, after_id) = cursor
-            .as_ref()
-            .filter(|value| value.section == DirectorySection::Files)
-            .map(|value| (value.name.as_str(), value.id))
-            .unwrap_or(("", 0));
-        let mut statement = connection.prepare(&photo_select(
-            r#"
-            WHERE photos.directory_id = ?1
-              AND (?2 = '' OR photos.filename > ?2
-                   OR (photos.filename = ?2 AND photos.photo_id > ?3))
-            ORDER BY photos.filename, photos.photo_id
-            LIMIT ?4
-            "#,
-        ))?;
-        let rows = statement.query_map(
-            params![directory_id, after_name, after_id, remaining as i64 + 1],
-            photo_from_row,
-        )?;
-        files = rows.collect::<Result<Vec<_>, _>>()?;
-        if files.len() > remaining {
-            files.pop();
-            has_more = true;
-        }
+    let (after_name, after_id) = if section == PhotoPageSection::Photos {
+        (after_name.as_str(), after_id)
+    } else {
+        ("", 0)
+    };
+    let mut statement = connection.prepare(&photo_select(
+        r#"
+        WHERE photos.directory_id = ?1
+          AND (?2 = '' OR photos.filename > ?2
+               OR (photos.filename = ?2 AND photos.photo_id > ?3))
+        ORDER BY photos.filename, photos.photo_id
+        LIMIT ?4
+        "#,
+    ))?;
+    let rows = statement.query_map(
+        params![directory_id, after_name, after_id, remaining as i64 + 1],
+        photo_from_row,
+    )?;
+    let mut files = rows.collect::<Result<Vec<_>, _>>()?;
+    if files.len() > remaining {
+        files.pop();
+        has_more = true;
     }
 
     let next_cursor = if has_more {
         if let Some(value) = files.last() {
-            Some(encode_cursor(&DirectoryCursor {
-                section: DirectorySection::Files,
+            Some(encode_photo_cursor(&PhotoCursor::DirectoryEntries {
+                directory_id,
+                section: PhotoPageSection::Photos,
                 name: value.filename.clone(),
-                id: value.photo_id,
+                item_id: value.photo_id,
             })?)
         } else {
             directories
                 .last()
                 .map(|value| {
-                    encode_cursor(&DirectoryCursor {
-                        section: DirectorySection::Directories,
+                    encode_photo_cursor(&PhotoCursor::DirectoryEntries {
+                        directory_id,
+                        section: PhotoPageSection::Containers,
                         name: value.name.clone(),
-                        id: value.directory_id,
+                        item_id: value.directory_id,
                     })
                 })
                 .transpose()?
@@ -265,12 +290,16 @@ pub fn browse_directory(
     } else {
         None
     };
-    Ok(DirectoryListingPage {
-        directory,
-        directories,
-        files,
-        next_cursor,
-    })
+    let mut items = directories
+        .into_iter()
+        .map(|directory| PhotoDirectoryItem::Directory { directory })
+        .collect::<Vec<_>>();
+    items.extend(
+        files
+            .into_iter()
+            .map(|photo| PhotoDirectoryItem::Photo { photo }),
+    );
+    Ok(PhotoPage { items, next_cursor })
 }
 
 pub fn refresh_directory(database: &Database, directory_id: i64) -> CoreResult<PhotoSyncResult> {
@@ -872,22 +901,30 @@ fn modified_at_ns(metadata: &fs::Metadata) -> CoreResult<i64> {
         .map_err(|_| CoreError::InvalidArgument("photo modified time exceeds i64".into()))
 }
 
-fn encode_cursor(cursor: &DirectoryCursor) -> CoreResult<String> {
+pub(crate) fn photo_page_limit(limit: usize) -> usize {
+    limit.clamp(1, MAX_PAGE_LIMIT)
+}
+
+pub(crate) fn encode_photo_cursor(cursor: &PhotoCursor) -> CoreResult<String> {
     let value = serde_json::to_vec(cursor)
         .map_err(|error| CoreError::InvalidArgument(error.to_string()))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value))
 }
 
-fn decode_cursor(value: Option<&str>) -> CoreResult<Option<DirectoryCursor>> {
+pub(crate) fn decode_photo_cursor(value: Option<&str>) -> CoreResult<Option<PhotoCursor>> {
     let Some(value) = value.filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value)
-        .map_err(|_| CoreError::InvalidArgument("invalid directory cursor".into()))?;
+        .map_err(|_| invalid_photo_cursor())?;
     serde_json::from_slice(&bytes)
         .map(Some)
-        .map_err(|_| CoreError::InvalidArgument("invalid directory cursor".into()))
+        .map_err(|_| invalid_photo_cursor())
+}
+
+pub(crate) fn invalid_photo_cursor() -> CoreError {
+    CoreError::InvalidArgument("invalid photo cursor".into())
 }
 
 fn read_file_metadata(photo_id: i64, path: &Path) -> PhotoMetadata {
@@ -1002,8 +1039,12 @@ mod tests {
         assert_eq!(result.directories_inserted, 1);
         assert_eq!(list_photos(&database).unwrap().len(), 1);
         let listing = browse_directory(&database, library.root_directory_id, None, 20).unwrap();
-        assert_eq!(listing.directories.len(), 1);
-        assert_eq!(listing.files.len(), 1);
+        assert_eq!(listing.items.len(), 2);
+        let nested_directory_id = match &listing.items[0] {
+            PhotoDirectoryItem::Directory { directory } => directory.directory_id,
+            PhotoDirectoryItem::Photo { .. } => panic!("expected a directory first"),
+        };
+        assert!(matches!(listing.items[1], PhotoDirectoryItem::Photo { .. }));
         assert_eq!(
             get_directory_counts(&database, library.root_directory_id).unwrap(),
             DirectoryEntryCounts {
@@ -1011,7 +1052,7 @@ mod tests {
                 file_count: 1,
             }
         );
-        refresh_directory(&database, listing.directories[0].directory_id).unwrap();
+        refresh_directory(&database, nested_directory_id).unwrap();
         assert_eq!(list_photos(&database).unwrap().len(), 2);
         assert_eq!(get_photo_count(&database).unwrap(), 2);
     }
@@ -1028,8 +1069,25 @@ mod tests {
         refresh_directory(&database, library.root_directory_id).unwrap();
 
         let first = browse_directory(&database, library.root_directory_id, None, 2).unwrap();
-        assert_eq!(first.directories.len(), 2);
-        assert!(first.files.is_empty());
+        assert_eq!(first.items.len(), 2);
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|item| matches!(item, PhotoDirectoryItem::Directory { .. }))
+        );
+        let first_directory_id = match first.items[0] {
+            PhotoDirectoryItem::Directory { ref directory } => directory.directory_id,
+            PhotoDirectoryItem::Photo { .. } => unreachable!(),
+        };
+        let error = browse_directory(
+            &database,
+            first_directory_id,
+            first.next_cursor.as_deref(),
+            2,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid photo cursor"));
         let second = browse_directory(
             &database,
             library.root_directory_id,
@@ -1037,8 +1095,8 @@ mod tests {
             2,
         )
         .unwrap();
-        assert!(second.directories.is_empty());
-        assert_eq!(second.files.len(), 1);
+        assert_eq!(second.items.len(), 1);
+        assert!(matches!(second.items[0], PhotoDirectoryItem::Photo { .. }));
         assert_eq!(second.next_cursor, None);
     }
 
