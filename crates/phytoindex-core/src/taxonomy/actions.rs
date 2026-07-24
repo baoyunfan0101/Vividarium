@@ -182,7 +182,6 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<TaxonomyAc
     )?;
     let operation_id = insert_operation_log(&transaction, batch_id, 1, &changeset_blob)?;
     transaction.commit()?;
-    mapping::refresh_after_taxonomy_changes(database, [taxon_id])?;
     Ok(TaxonomyActionResult {
         batch_id,
         operation_id,
