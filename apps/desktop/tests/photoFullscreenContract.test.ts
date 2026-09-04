@@ -56,12 +56,13 @@ test("fullscreen exit waits for a non-fullscreen resize before unmounting and re
 
 test("photo-item double click opens fullscreen while full-image double click keeps zoom", () => {
   const display = source("../src/features/photos/PhotoDisplay.tsx");
+  const activation = source("../src/features/photos/photoActivation.ts");
   const media = source("../src/features/photos/PhotoMedia.tsx");
   const browser = source("../src/features/photos/PhotoBrowser.tsx");
   const views = source("../src/features/photos/PhotosView.tsx");
 
   assert.match(display, /onOpenFullscreen: \(photo: Photo\) => void;/);
-  assert.match(display, /onOpenFullscreen\(photo\);/);
+  assert.match(activation, /callbacks\.onOpenFullscreen\(photo\);/);
   assert.doesNotMatch(display, /onOpenDetails/);
   assert.match(browser, /onOpenFullscreen: openFullscreen/);
   assert.equal((views.match(/onOpenFullscreen: openFullscreen/g) ?? []).length, 2);

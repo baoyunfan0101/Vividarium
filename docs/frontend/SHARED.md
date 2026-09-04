@@ -27,6 +27,14 @@ an optional `stateKey`. A keyed divider stores both horizontal and vertical
 sizes in the owning tab's view-state store, so a non-keep-alive page restores
 its layout after remounting.
 
+### Selectable content activation
+
+Selectable content surfaces keep native text selection while supporting record
+activation. Activation is suppressed only when the current selection intersects
+that surface; a selection elsewhere does not block navigation. Standalone
+surfaces provide keyboard activation, while virtualized rows use the
+`VirtualList` keyboard model.
+
 ## Cursor interfaces
 
 `useCursorPage<T, P>(options)` accepts initial parameters and a loader returning

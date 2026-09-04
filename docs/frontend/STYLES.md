@@ -42,3 +42,10 @@ surfaces.
 
 Semantic success and danger foreground colors use shared theme tokens in every
 theme mode.
+
+### Text selection
+
+Command controls (`button` and `.button`) are non-selectable. Content surfaces
+that display persistent application data remain text-selectable even when click
+or keyboard activation opens that record. Temporary interactions such as panel
+resizing may disable selection only for the duration of the drag.

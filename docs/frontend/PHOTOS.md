@@ -6,6 +6,16 @@ The Photos domain owns photo browsing and interactions. Folder, photographed
 taxonomy, map, search Photo Sets, detail views, media rendering, and the photo
 context menu share the same selection and mutation behavior.
 
+Folder, photographed-taxon, and photo list rows are selectable content surfaces:
+their displayed names can be copied while normal click, keyboard navigation,
+double-click actions, and context menus remain available. Tree expansion
+controls are separate non-selectable command buttons.
+
+Selectable photo-list filenames support native drag and double-click text
+selection. When text selection wins, any pending single-click navigation is
+cancelled; ordinary single-click and double-click photo actions remain
+available when no text is selected.
+
 Native desktop context menus are disabled across the application. Every main
 full-photo view uses the Vividarium Photo Context Menu; the Map preview remains
 a lightweight preview without a photo context menu.

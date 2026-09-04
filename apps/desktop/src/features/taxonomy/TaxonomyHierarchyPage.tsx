@@ -33,6 +33,7 @@ import {
   type TaxonNameGroupKind,
 } from "./taxonEditing";
 import { formatTaxonName } from "./taxonNameFormatting";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 type TaxonomyHierarchyPageProps = {
   initialTaxonId: number;
@@ -348,20 +349,32 @@ export function TaxonomyHierarchyPage({
                 <span className="taxonomy-children-empty">No direct children</span>
               ) : null}
               {children.items.map((child) => (
-                <button
-                  className="taxonomy-child-button"
-                  type="button"
+                <div
+                  className="taxonomy-child-button selectable-content"
+                  role="button"
+                  tabIndex={0}
                   key={child.taxon_id}
-                  onClick={() => navigateTo(
-                    child.taxon_id,
-                    formatTaxonName(child.names, nameParts, `Taxon ${child.taxon_id}`),
-                  )}
+                  onClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) return;
+                    navigateTo(
+                      child.taxon_id,
+                      formatTaxonName(child.names, nameParts, `Taxon ${child.taxon_id}`),
+                    );
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    navigateTo(
+                      child.taxon_id,
+                      formatTaxonName(child.names, nameParts, `Taxon ${child.taxon_id}`),
+                    );
+                  }}
                 >
                   <span className="taxon-rank">{child.rank}</span>
                   <strong>{formatTaxonName(child.names, nameParts, `Taxon ${child.taxon_id}`)}</strong>
                   <span>Taxon {child.taxon_id}</span>
                   <ChevronRight size={14} />
-                </button>
+                </div>
               ))}
               {children.hasMore ? (
                 <Button disabled={children.loading} onClick={() => void children.loadMore()}>

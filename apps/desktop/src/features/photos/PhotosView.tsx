@@ -52,6 +52,7 @@ import { useViewState } from "../../shared/viewState";
 import { ResizablePanels } from "../../shared/ResizablePanels";
 import { usePublishedPhotoTaxonSummary, type PhotoTaxonDisplayState } from "./photoTaxonSummary";
 import { isPhotoFullscreenActive } from "./photoFullscreenState";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 type DirectoryTreeRow =
   | { kind: "directory"; directory: PhotoDirectory; depth: number }
@@ -435,22 +436,38 @@ export function FolderPhotosView({
                   >
                     {tree.nodes.get(item.directory.directory_id)?.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                   </IconButton>
-                  <button className="tree-node-button" type="button" onClick={() => enter(item.directory)}>
+                  <div
+                    className="tree-node-content selectable-content"
+                    onClick={(event) => {
+                      if (!selectionIntersectsElement(event.currentTarget)) enter(item.directory);
+                    }}
+                  >
                     <Folder size={14} />
                     <span className="tree-label">{item.directory.name}</span>
-                  </button>
+                  </div>
                 </div>
               ) : item.kind === "photo" ? (
-                <button
-                  className={`finder-row${directoryTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
+                <div
+                  className={`finder-row selectable-content${directoryTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
                   style={{ paddingLeft: 4 + item.depth * 14 }}
-                  type="button"
-                  onClick={() => activation.clickPhoto(item.photo)}
-                  onDoubleClick={() => activation.doubleClickPhoto(item.photo)}
+                  onClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) {
+                      activation.cancelPendingClick();
+                      return;
+                    }
+                    activation.clickPhoto(item.photo);
+                  }}
+                  onDoubleClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) {
+                      activation.cancelPendingClick();
+                      return;
+                    }
+                    activation.doubleClickPhoto(item.photo);
+                  }}
                   onContextMenu={(event) => openDirectoryPhotoContextMenu(event, item)}
                 >
                   <Images size={14} /><span>{item.photo.filename}</span>
-                </button>
+                </div>
               ) : (
                 <button
                   className={`finder-row tree-more${directoryTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
@@ -747,15 +764,39 @@ export function TaxonPhotosView({
                   >
                     {tree.nodes.get(item.taxon.taxon_id)?.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                   </IconButton>
-                  <button className="tree-node-button" type="button" title={formatTaxonName(item.taxon.names, nameParts, `Taxon ${item.taxon.taxon_id}`)} onClick={() => enterTaxon(item.taxon)}>
+                  <div
+                    className="tree-node-content selectable-content"
+                    title={formatTaxonName(item.taxon.names, nameParts, `Taxon ${item.taxon.taxon_id}`)}
+                    onClick={(event) => {
+                      if (!selectionIntersectsElement(event.currentTarget)) enterTaxon(item.taxon);
+                    }}
+                  >
                     <Network size={14} />
                     <span className="tree-label">{formatTaxonName(item.taxon.names, nameParts, `Taxon ${item.taxon.taxon_id}`)}</span>
-                  </button>
+                  </div>
                 </div>
               ) : item.kind === "photo" ? (
-                <button className={`finder-row${taxonTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`} style={{ paddingLeft: 4 + item.depth * 14 }} type="button" onClick={() => activation.clickPhoto(item.photo)} onDoubleClick={() => activation.doubleClickPhoto(item.photo)} onContextMenu={(event) => openTaxonPhotoContextMenu(event, item)}>
+                <div
+                  className={`finder-row selectable-content${taxonTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
+                  style={{ paddingLeft: 4 + item.depth * 14 }}
+                  onClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) {
+                      activation.cancelPendingClick();
+                      return;
+                    }
+                    activation.clickPhoto(item.photo);
+                  }}
+                  onDoubleClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) {
+                      activation.cancelPendingClick();
+                      return;
+                    }
+                    activation.doubleClickPhoto(item.photo);
+                  }}
+                  onContextMenu={(event) => openTaxonPhotoContextMenu(event, item)}
+                >
                   <Images size={14} /><span>{item.photo.filename}</span>
-                </button>
+                </div>
               ) : (
                 <button
                   className={`finder-row tree-more${taxonTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}

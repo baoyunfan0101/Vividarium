@@ -16,6 +16,10 @@ Parameters:
 
 Returns: cursor-backed operation summaries and audit rows.
 
+Operation summary rows are selectable content surfaces. Summary text can be
+copied while clicking the row still opens the operation detail; selection
+checkboxes and operation actions remain independent controls.
+
 Both history lists use the full available width, keep each operation summary on
 one row, and support selecting individual loaded operations or all loaded
 operations. Audit export and rollback apply only to the selection. Taxonomy

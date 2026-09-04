@@ -122,8 +122,8 @@
   transition: none;
 }
 
-button.operation-summary-main:hover:not(:disabled),
-button.operation-summary-main:active:not(:disabled) {
+.operation-summary-main:hover,
+.operation-summary-main:active {
   background-color: transparent;
   filter: none;
   transform: none;

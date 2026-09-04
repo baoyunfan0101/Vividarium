@@ -34,6 +34,7 @@ import {
   getRollbackOrder,
   getSelectedOperations,
 } from "./historySelection";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 type HistoryDomain = "photo" | "taxonomy";
 
@@ -262,10 +263,20 @@ export function OperationHistoryView({
                       onChange={(event) => toggleOperation(item.operation_id, event.target.checked)}
                     />
                   </label>
-                  <button
-                    className="operation-summary-main"
-                    type="button"
-                    onClick={() => setSelectedOperationId(item.operation_id)}
+                  <div
+                    className="operation-summary-main selectable-content"
+                    role="button"
+                    tabIndex={0}
+                    onClick={(event) => {
+                      if (!selectionIntersectsElement(event.currentTarget)) {
+                        setSelectedOperationId(item.operation_id);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      setSelectedOperationId(item.operation_id);
+                    }}
                   >
                     <strong>{item.kind} #{item.operation_id}</strong>
                     <span>{item.applied_at}</span>
@@ -274,7 +285,7 @@ export function OperationHistoryView({
                       {item.total_items} total / {item.succeeded_items} succeeded / {item.failed_items} failed
                     </span>
                     <span>{item.rollbackable ? "Rollbackable" : "Audit only"}</span>
-                  </button>
+                  </div>
                 </article>
               );
             }}

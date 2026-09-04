@@ -179,6 +179,8 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; back
 button, input, textarea, select { font: inherit; color: inherit; }
 button, .button {
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
   transition:
     color var(--button-transition),
     background-color var(--button-transition),

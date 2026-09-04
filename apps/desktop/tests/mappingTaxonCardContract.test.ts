@@ -27,11 +27,12 @@ test("current, candidate, and search cards open taxon detail", () => {
 
 test("TaxonCard allows text selection without triggering navigation", () => {
   const card = source("../src/features/taxonomy/TaxonCard.tsx");
-  const styles = source("../src/styles/taxonomy.css");
-  assert.match(styles, /\.taxon-card-main \{[^}]*user-select: text;/);
-  assert.match(card, /target\.closest\("\.taxon-card-actions button"\)/);
-  assert.match(card, /selection && !selection\.isCollapsed && selection\.toString\(\)\.length > 0/);
-  assert.match(card, /if \(selection[^\n]+\) return;\s*onClick\(\);/);
+  const styles = source("../src/styles/shared.css");
+  assert.match(styles, /\.selectable-content \{[\s\S]*?user-select: text;/);
+  assert.match(card, /className="taxon-card-main selectable-content"/);
+  assert.match(card, /selectionIntersectsElement\(event\.currentTarget\)/);
+  assert.match(card, /role=\{onClick \? "button" : undefined\}/);
+  assert.match(card, /event\.key !== "Enter" && event\.key !== " "/);
 });
 
 test("compact mapping cards reserve four-line vertical space", () => {

@@ -17,6 +17,7 @@ import {
   usePublishedPhotoTaxonSummary,
   type PhotoTaxonDisplayState,
 } from "./photoTaxonSummary";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 export function PhotoBrowser({
   title,
@@ -119,16 +120,27 @@ export function PhotoBrowser({
             onMoveActive={moveSelection}
             onTypeSelect={typeSelect}
             renderItem={(photo) => (
-              <button
-                className={`photo-list-row${interaction.selectedId === photo.photo_id ? " active" : ""}`}
-                type="button"
-                onClick={() => activation.clickPhoto(photo)}
-                onDoubleClick={() => activation.doubleClickPhoto(photo)}
+              <div
+                className={`photo-list-row selectable-content${interaction.selectedId === photo.photo_id ? " active" : ""}`}
+                onClick={(event) => {
+                  if (selectionIntersectsElement(event.currentTarget)) {
+                    activation.cancelPendingClick();
+                    return;
+                  }
+                  activation.clickPhoto(photo);
+                }}
+                onDoubleClick={(event) => {
+                  if (selectionIntersectsElement(event.currentTarget)) {
+                    activation.cancelPendingClick();
+                    return;
+                  }
+                  activation.doubleClickPhoto(photo);
+                }}
                 onContextMenu={(event) => interaction.openContextMenu(event, photo)}
               >
                 <ImageIcon size={14} />
                 <span>{photo.filename}</span>
-              </button>
+              </div>
             )}
           />
         </aside>)}

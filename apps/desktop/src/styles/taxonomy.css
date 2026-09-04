@@ -9,9 +9,9 @@
 .taxon-card.active { background: var(--active); }
 .taxon-card:hover { background: var(--hover); }
 .taxon-card.clickable:active { background: var(--active); filter: brightness(.94); transform: translateY(1px) scale(.98); }
-.taxon-card-main { display: flex; min-width: 0; flex: 1; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 10px; overflow: hidden; border: 0; text-align: left; user-select: text; background: transparent; }
+.taxon-card-main { display: flex; min-width: 0; flex: 1; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 10px; overflow: hidden; border: 0; text-align: left; background: transparent; }
 .taxon-card.compact .taxon-card-main { padding-block: 4px; }
-.taxon-card-main:hover:not(:disabled), .taxon-card-main:active:not(:disabled) { background: transparent; filter: none; transform: none; }
+.taxon-card-main:hover, .taxon-card-main:active { background: transparent; filter: none; transform: none; }
 .taxon-card-main strong, .taxon-card-main > span:last-of-type { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .taxon-card-main > span:last-of-type { color: var(--muted); }
 .taxon-card-main .taxon-card-description { max-width: 100%; overflow: hidden; color: var(--accent-bright); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }

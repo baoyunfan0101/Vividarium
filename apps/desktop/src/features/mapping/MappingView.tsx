@@ -21,6 +21,7 @@ import { useCursorPage } from "../../shared/useCursorPage";
 import { ResizablePanels } from "../../shared/ResizablePanels";
 import { PhotoPaneHeader } from "../photos/PhotoPaneHeader";
 import { usePublishedPhotoTaxonSummary, type PhotoTaxonDisplayState } from "../photos/photoTaxonSummary";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 const statuses = ["matched", "ambiguous", "unmatched", "processing"] as const;
 const emptyMetadata: MappingMetadata = {
@@ -160,14 +161,15 @@ export function MappingView({
             onMoveActive={moveSelection}
             onTypeSelect={typeSelect}
             renderItem={(item) => (
-              <button
-                className={`mapping-photo-row${selected?.photo.photo_id === item.photo.photo_id ? " active" : ""}`}
-                type="button"
-                onClick={() => interaction.selectPhoto(item.photo)}
+              <div
+                className={`mapping-photo-row selectable-content${selected?.photo.photo_id === item.photo.photo_id ? " active" : ""}`}
+                onClick={(event) => {
+                  if (!selectionIntersectsElement(event.currentTarget)) interaction.selectPhoto(item.photo);
+                }}
                 onContextMenu={(event) => interaction.openContextMenu(event, item.photo)}
               >
                 <span>{item.photo.filename}</span>
-              </button>
+              </div>
             )}
           />
           {page.loading && <div className="pane-overlay">Loading</div>}
