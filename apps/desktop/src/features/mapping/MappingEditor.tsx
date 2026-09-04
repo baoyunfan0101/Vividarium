@@ -12,10 +12,11 @@ import {
   type TaxonDetail,
 } from "../../api/taxonomy";
 import { errorMessage } from "../../api/common";
-import { Busy, Button, EmptyState, VirtualList } from "../../shared/ui";
+import { Busy, Button, EmptyState } from "../../shared/ui";
+import { VariableVirtualList } from "../../shared/VariableVirtualList";
 import { PhotoStage } from "../photos/PhotoMedia";
 import { TaxonCard } from "../taxonomy/TaxonCard";
-import { taxonMatchExplanation } from "../taxonomy/taxonMatchExplanation";
+import { taxonMatchExplanations } from "../taxonomy/taxonMatchExplanation";
 import { MappingBadge } from "./MappingBadge";
 import { emitPhotoMutation, usePhotoMutation } from "../photos/photoMutations";
 import { useTaxonSearch } from "../taxonomy/useTaxonSearch";
@@ -157,7 +158,7 @@ export function MappingEditor({
         <TaxonCard
           compact
           taxon={currentTaxon}
-          description={taxonMatchExplanation(match.matched_names)}
+          matchExplanations={taxonMatchExplanations(match.matched_names)}
           onClick={() => handlers.openTaxon(currentTaxon.taxon_id)}
           actions={(
             <Button
@@ -170,17 +171,18 @@ export function MappingEditor({
           )}
         />
       ) : match?.mapping.status === "ambiguous" ? (
-        <VirtualList
+        <VariableVirtualList
           stateKey="mapping-editor.candidates"
+          resetKey={`${photo.photo_id}:${refreshKey}:${mappingRefresh}`}
           className="candidate-stack"
           items={match.candidates}
-          rowHeight={60}
+          estimatedRowHeight={90}
           itemKey={(candidate) => candidate.summary.taxon_id}
           renderItem={(candidate) => (
             <TaxonCard
               compact
               taxon={candidate.summary}
-              description={taxonMatchExplanation(candidate.matched_names)}
+              matchExplanations={taxonMatchExplanations(candidate.matched_names)}
               onClick={() => handlers.openTaxon(candidate.summary.taxon_id)}
               actions={
                 <Button
@@ -205,18 +207,18 @@ export function MappingEditor({
         <Search size={14} />
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search taxonomy" />
       </label>
-      <VirtualList
+      <VariableVirtualList
         stateKey="mapping-editor.results"
         resetKey={query.trim()}
         className="mapping-search-results"
         items={taxonomySearch.results}
-        rowHeight={60}
+        estimatedRowHeight={90}
         itemKey={(item) => item.taxon_id}
         renderItem={(item) => (
           <TaxonCard
             compact
             taxon={item}
-            description={taxonMatchExplanation(item.matches)}
+            matchExplanations={taxonMatchExplanations(item.matches)}
             onClick={() => handlers.openTaxon(item.taxon_id)}
             actions={
               <Button size="small" disabled={Boolean(busy)} onClick={() => void mutate(`Mapping ${item.taxon_id}`, () => setPhotoMapping(photo.photo_id, item.taxon_id))}>

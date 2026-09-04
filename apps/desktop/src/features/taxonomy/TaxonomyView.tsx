@@ -23,6 +23,7 @@ import { waitForOperation } from "../../api/tasks";
 import { operationResult } from "../../app/backgroundTaskResult";
 import { getTaxonomyNameSeparator } from "../../api/settings";
 import { Busy, Button, EmptyState, SectionHeader, VirtualList } from "../../shared/ui";
+import { VariableVirtualList } from "../../shared/VariableVirtualList";
 import { TaxonCard } from "./TaxonCard";
 import { useMetadataChange } from "../../shared/metadataChanges";
 import { useTaxonSearch } from "./useTaxonSearch";
@@ -38,7 +39,7 @@ import {
   currentTaxonForRoot,
   reconcileSelectedRoot,
   recordHierarchyPosition,
-  taxonSearchMatchExplanation,
+  taxonSearchMatchExplanations,
   type HierarchyPositions,
 } from "./hierarchyNavigation";
 import type { TaxonNameParts } from "../../api/general";
@@ -145,17 +146,17 @@ export function TaxonomySearchView({
     : currentTaxonForRoot(selectedRootTaxonId, hierarchyPositions);
   const resultsPane = (
     <aside className="taxonomy-results">
-      <VirtualList
+      <VariableVirtualList
         stateKey="taxonomy-search.results-list"
         resetKey={`${submittedQuery}:${refreshKey}`}
         items={taxonomySearch.results}
-        rowHeight={60}
+        estimatedRowHeight={90}
         itemKey={(item) => item.taxon_id}
         renderItem={(item) => (
           <TaxonCard
             taxon={item}
             active={selectedRootTaxonId === item.taxon_id}
-            description={taxonSearchMatchExplanation(item)}
+            matchExplanations={taxonSearchMatchExplanations(item)}
             onClick={() => setSelectedRootTaxonId(item.taxon_id)}
           />
         )}

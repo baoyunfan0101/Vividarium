@@ -6,9 +6,16 @@ import {
   hierarchyNavigationReducer,
   reconcileSelectedRoot,
   recordHierarchyPosition,
-  taxonSearchMatchExplanation,
+  taxonSearchMatchExplanations,
 } from "../src/features/taxonomy/hierarchyNavigation.ts";
-import { taxonMatchExplanation } from "../src/features/taxonomy/taxonMatchExplanation.ts";
+import {
+  taxonMatchExplanations,
+  type TaxonMatchExplanation,
+} from "../src/features/taxonomy/taxonMatchExplanation.ts";
+
+function explanationText(explanations: TaxonMatchExplanation[]) {
+  return explanations.map((explanation) => `${explanation.label} · ${explanation.name}`);
+}
 
 test("stores an independent current taxon for each search root", () => {
   let positions = {};
@@ -46,50 +53,53 @@ test("loads children only after expansion and resets them on navigation", () => 
   assert.deepEqual(state, createHierarchyNavigationState(11));
 });
 
-test("explains alias matches but not accepted-name matches", () => {
+test("taxonomy search explains non-accepted matches alongside accepted matches", () => {
   const result = {
     taxon_id: 10,
     rank: "species" as const,
     names: { sci_name: "Canis lupus", zh_name: null, en_name: "Wolf" },
     matches: [{ name_id: 2, name_type: "synonym" as const, name: "Canis lycaon" }],
   };
-  assert.equal(taxonSearchMatchExplanation(result), "Matched synonym: Canis lycaon");
-  assert.equal(taxonSearchMatchExplanation({
+  assert.deepEqual(explanationText(taxonSearchMatchExplanations(result)), [
+    "Matched synonym · Canis lycaon",
+  ]);
+  assert.deepEqual(taxonSearchMatchExplanations({
     ...result,
     matches: [{ name_id: 1, name_type: "sci_name", name: "Canis lupus" }],
-  }), null);
-  assert.equal(taxonSearchMatchExplanation({
+  }), []);
+  assert.deepEqual(explanationText(taxonSearchMatchExplanations({
     ...result,
     matches: [
       { name_id: 1, name_type: "sci_name", name: "Canis lupus" },
       { name_id: 2, name_type: "synonym", name: "Canis lycaon" },
     ],
-  }), null);
+  })), ["Matched synonym · Canis lycaon"]);
 });
 
-test("shares accepted-name suppression and alias explanations", () => {
-  assert.equal(taxonMatchExplanation([{ name_type: "sci_name", name: "Panthera leo" }]), null);
-  assert.equal(taxonMatchExplanation([{ name_type: "zh_name", name: "lion" }]), null);
-  assert.equal(taxonMatchExplanation([{ name_type: "en_name", name: "Lion" }]), null);
-  assert.equal(
-    taxonMatchExplanation([{ name_type: "synonym", name: "Felis leo" }]),
-    "Matched synonym: Felis leo",
-  );
-  assert.equal(
-    taxonMatchExplanation([{ name_type: "zh_alias", name: "old lion" }]),
-    "Matched Chinese alias: old lion",
-  );
-  assert.equal(
-    taxonMatchExplanation([{ name_type: "en_alias", name: "Cave lion" }]),
-    "Matched English alias: Cave lion",
-  );
-  assert.equal(taxonMatchExplanation([
+test("shared match explanations cover aliases, deduplication, and deterministic order", () => {
+  assert.deepEqual(taxonMatchExplanations([
     { name_type: "sci_name", name: "Panthera leo" },
+    { name_type: "zh_name", name: "lion" },
+    { name_type: "en_name", name: "Lion" },
+  ]), []);
+  assert.deepEqual(explanationText(taxonMatchExplanations([
+    { name_type: "zh_alias", name: "old lion" },
+  ])), ["Matched Chinese alias · old lion"]);
+  assert.deepEqual(explanationText(taxonMatchExplanations([
+    { name_type: "en_alias", name: "Cave lion" },
+  ])), ["Matched English alias · Cave lion"]);
+  assert.deepEqual(explanationText(taxonMatchExplanations([
+    { name_type: "en_alias", name: "Cave lion" },
+    { name_type: "sci_name", name: "Panthera leo" },
+    { name_type: "zh_alias", name: "old lion" },
     { name_type: "synonym", name: "Felis leo" },
-  ]), null);
-  assert.equal(taxonMatchExplanation([
-    { name_type: "synonym", name: "Felis leo" },
+    { name_type: "synonym", name: "Leo leo" },
     { name_type: "synonym", name: "Felis leo" },
     { name_type: "en_alias", name: "Cave lion" },
-  ]), "Matched synonym: Felis leo; Matched English alias: Cave lion");
+  ])), [
+    "Matched synonym · Felis leo",
+    "Matched synonym · Leo leo",
+    "Matched Chinese alias · old lion",
+    "Matched English alias · Cave lion",
+  ]);
 });

@@ -68,6 +68,7 @@
 .virtual-spacer, .virtual-grid-spacer { position: relative; width: 100%; }
 .virtual-window { position: absolute; top: 0; right: 0; left: 0; }
 .virtual-row { width: 100%; min-width: 0; }
+.variable-virtual-row { position: absolute; top: 0; right: 0; left: 0; height: auto; }
 .virtual-grid-window {
   position: absolute;
   top: 0;

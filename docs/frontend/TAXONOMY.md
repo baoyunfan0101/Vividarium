@@ -121,8 +121,10 @@ dot, or a dash when both names are absent. Taxon cards always retain this full
 accepted-name presentation and do not use visible-name preferences.
 Taxon-card text is selectable and copyable. Dragging a text selection does not
 run card navigation, and action buttons remain isolated from the card action.
-Search and Mapping surfaces share one matched-name explanation for synonyms and
-Chinese or English aliases; accepted-name matches omit the explanation.
+Taxonomy search cards display accepted taxon names as their primary identity.
+When a result also matches through a scientific synonym, Chinese alias, or
+English alias, the card shows each matching non-accepted name explicitly.
+Accepted-name matches do not suppress these explanations.
 `useTaxonSuggestions(query, enabled)` returns lightweight suggestions after a
 260 ms input pause; only the latest request may publish its low-priority
 result. `useTaxonSearch(query, options)` returns submitted search results,

@@ -13,6 +13,10 @@ optional end-of-list callback. `VirtualList` clamps persisted scroll state when
 the collection shrinks; consumers may provide `resetKey` to return to the first
 row when a query or filter changes.
 
+Virtualized collections use fixed row heights by default. Content whose height
+depends on its data may opt into measured variable-height rows; visible rows
+are measured while unmeasured rows use an estimate for scroll layout.
+
 `SectionHeader`, `EmptyState`, `Modal`, `Segmented`, `Disclosure`, and `Busy`
 provide domain-neutral presentation. `CodeEditor` provides the common SQL and
 Rhai editing surface with syntax highlighting. `Modal` defaults to dismissible

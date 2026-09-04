@@ -34,9 +34,11 @@ mapping, ambiguous candidates, and search results use the same taxon-card
 interaction: selecting the card opens Taxon Detail, while Map, Select, and
 Unmap perform only their mapping action. Non-primary names that produced a
 match are shown beneath accepted names with the shared taxonomy-search
-explanation. Accepted-name matches and explicit manual mappings have no
-redundant explanation. Taxon-card text is selectable and copyable without
-triggering navigation.
+explanation. Mapping taxon cards use the same match explanation as Taxonomy
+Search. Automatic matches and ambiguous candidates identify matched scientific
+synonyms, Chinese aliases, and English aliases when that provenance is
+available. Manual taxon assignment does not invent matched-name provenance.
+Taxon-card text is selectable and copyable without triggering navigation.
 
 The Mapping workspace exposes independent dividers between the photo list,
 preview, and editor. The standalone editor also separates its photo from the

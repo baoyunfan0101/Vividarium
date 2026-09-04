@@ -6,6 +6,7 @@ import {
 } from "../../api/taxonomy";
 import { taxonCommonNameLine } from "./taxonCardNames";
 import { selectionIntersectsElement } from "../../shared/selectableSurface";
+import type { TaxonMatchExplanation } from "./taxonMatchExplanation";
 
 type TaxonCardTaxon = {
   taxon_id: number;
@@ -18,14 +19,14 @@ export function TaxonCard({
   compact = false,
   active = false,
   actions,
-  description,
+  matchExplanations = [],
   onClick,
 }: {
   taxon: TaxonCardTaxon;
   compact?: boolean;
   active?: boolean;
   actions?: ReactNode;
-  description?: string | null;
+  matchExplanations?: TaxonMatchExplanation[];
   onClick?: () => void;
 }) {
   return (
@@ -47,8 +48,16 @@ export function TaxonCard({
       >
         <span className="taxon-rank">{taxon.rank}</span>
         <strong>{displayTaxon(taxon)}</strong>
-        <span>{taxonCommonNameLine(taxon.names)}</span>
-        {description ? <small className="taxon-card-description">{description}</small> : null}
+        <span className="taxon-card-common-names">{taxonCommonNameLine(taxon.names)}</span>
+        {matchExplanations.length > 0 ? (
+          <span className="taxon-card-match-explanations">
+            {matchExplanations.map((explanation) => (
+              <small key={`${explanation.nameType}:${explanation.name}`}>
+                {explanation.label} · {explanation.name}
+              </small>
+            ))}
+          </span>
+        ) : null}
       </div>
       {actions && <div className="taxon-card-actions">{actions}</div>}
     </article>

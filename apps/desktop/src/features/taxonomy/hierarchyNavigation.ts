@@ -1,5 +1,5 @@
 import type { TaxonSearchResult } from "../../api/taxonomy";
-import { taxonMatchExplanation } from "./taxonMatchExplanation.ts";
+import { taxonMatchExplanations } from "./taxonMatchExplanation.ts";
 
 export type HierarchyPositions = Record<string, number>;
 
@@ -63,6 +63,6 @@ export function reconcileSelectedRoot(
   return resultTaxonIds[0] ?? null;
 }
 
-export function taxonSearchMatchExplanation(result: TaxonSearchResult): string | null {
-  return taxonMatchExplanation(result.matches);
+export function taxonSearchMatchExplanations(result: TaxonSearchResult) {
+  return taxonMatchExplanations(result.matches);
 }

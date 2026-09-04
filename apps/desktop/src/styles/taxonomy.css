@@ -12,9 +12,10 @@
 .taxon-card-main { display: flex; min-width: 0; flex: 1; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 10px; overflow: hidden; border: 0; text-align: left; background: transparent; }
 .taxon-card.compact .taxon-card-main { padding-block: 4px; }
 .taxon-card-main:hover, .taxon-card-main:active { background: transparent; filter: none; transform: none; }
-.taxon-card-main strong, .taxon-card-main > span:last-of-type { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.taxon-card-main > span:last-of-type { color: var(--muted); }
-.taxon-card-main .taxon-card-description { max-width: 100%; overflow: hidden; color: var(--accent-bright); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.taxon-card-main strong, .taxon-card-common-names { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.taxon-card-common-names { color: var(--muted); }
+.taxon-card-match-explanations { display: grid; max-width: 100%; color: var(--accent-bright); font-size: 10px; }
+.taxon-card-match-explanations small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .taxon-card-actions { display: flex; align-items: center; padding: 5px; }
 .taxon-rank { color: var(--accent-bright); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .two-line-heading { display: flex; min-width: 0; flex-direction: column; justify-content: center; gap: 3px; padding: 7px 12px; border-bottom: 1px solid var(--line); }
@@ -37,7 +38,6 @@
 }
 .taxonomy-columns { min-height: 0; }
 .taxonomy-results { position: relative; height: 100%; min-height: 0; }
-.taxonomy-results .taxon-card { height: 100%; }
 .taxonomy-results .taxon-card-main { padding-block: 4px; }
 .taxonomy-results-loading { position: absolute; right: 8px; bottom: 8px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--popover); box-shadow: 0 4px 16px var(--shadow); }
 .taxonomy-records { width: 100%; height: 100%; min-height: 0; }
