@@ -150,16 +150,23 @@ jobs:
         run: |
           mkdir release-assets
           gh release download "$GITHUB_REF_NAME" --dir release-assets
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" > release-assets/release.json
           VERSION="${GITHUB_REF_NAME#v}"
           node scripts/validate-updater-json.mjs release-assets/latest.json "$VERSION"
           find release-assets -type f -name '*.dmg' -print -quit | grep -q . || { echo "::error::macOS DMG is missing"; exit 1; }
           find release-assets -type f -name '*-setup.exe' -print -quit | grep -q . || { echo "::error::Windows NSIS installer is missing"; exit 1; }
           node - <<'NODE'
           const { existsSync, readFileSync } = require("node:fs");
-          const { basename } = require("node:path");
           const manifest = JSON.parse(readFileSync("release-assets/latest.json", "utf8"));
+          const release = JSON.parse(readFileSync("release-assets/release.json", "utf8"));
           for (const entry of Object.values(manifest.platforms)) {
-            const asset = basename(new URL(entry.url).pathname);
+            const releaseAsset = release.assets.find(
+              (asset) => asset.url === entry.url || asset.browser_download_url === entry.url,
+            );
+            if (!releaseAsset) {
+              throw new Error(`updater URL does not reference a release asset: ${entry.url}`);
+            }
+            const asset = releaseAsset.name;
             if (!existsSync(`release-assets/${asset}`) || !existsSync(`release-assets/${asset}.sig`)) {
               throw new Error(`missing updater artifact or signature for ${asset}`);
             }
