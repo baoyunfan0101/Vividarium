@@ -2,7 +2,7 @@
 
 All notable changes to Vividarium are documented in this file.
 
-## [3.1.0] - 2026-08-26
+## [3.1.0] - 2026-09-09
 
 ### Added
 
@@ -15,6 +15,8 @@ All notable changes to Vividarium are documented in this file.
 - Made ordinary Settings autosave while keeping remapping and taxonomy-based renaming explicitly user-triggered.
 - Improved taxonomy matching, name-family handling, hierarchy display, and mapping review UX.
 - Improved photo headers, status bars, context menus, fullscreen behavior, keyboard navigation, and taxonomy display.
+- Expanded Operation History with source-aware inputs and safer atomic rollback conflict handling.
+- Standardized selectable and copyable record surfaces while keeping command controls non-selectable across photo, taxonomy, mapping, and history views.
 - Upgraded Vividarium 3.0.0 schema-2 databases automatically to schema 3.
 - Hardened the desktop release and updater pipeline with version, signature, manifest, and artifact validation.
 
