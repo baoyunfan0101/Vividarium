@@ -23,18 +23,20 @@ pub struct GeneralSettings {
     pub recent_searches_limit: u8,
     #[serde(default = "default_csv_delimiter")]
     pub csv_delimiter: String,
-    #[serde(default = "default_taxon_tree_name_parts")]
-    pub taxon_tree_name_parts: TaxonTreeNameParts,
+    #[serde(default = "default_taxon_name_parts", alias = "taxon_tree_name_parts")]
+    pub photos_taxon_name_parts: TaxonNameParts,
+    #[serde(default = "default_taxon_name_parts")]
+    pub taxonomy_taxon_name_parts: TaxonNameParts,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct TaxonTreeNameParts {
+pub struct TaxonNameParts {
     pub sci_name: bool,
     pub zh_name: bool,
     pub en_name: bool,
 }
 
-impl Default for TaxonTreeNameParts {
+impl Default for TaxonNameParts {
     fn default() -> Self {
         Self {
             sci_name: true,
@@ -44,8 +46,8 @@ impl Default for TaxonTreeNameParts {
     }
 }
 
-fn default_taxon_tree_name_parts() -> TaxonTreeNameParts {
-    TaxonTreeNameParts::default()
+fn default_taxon_name_parts() -> TaxonNameParts {
+    TaxonNameParts::default()
 }
 
 fn default_csv_delimiter() -> String {
@@ -59,7 +61,8 @@ impl Default for GeneralSettings {
             restore_tabs: true,
             recent_searches_limit: 10,
             csv_delimiter: default_csv_delimiter(),
-            taxon_tree_name_parts: TaxonTreeNameParts::default(),
+            photos_taxon_name_parts: TaxonNameParts::default(),
+            taxonomy_taxon_name_parts: TaxonNameParts::default(),
         }
     }
 }
@@ -199,13 +202,15 @@ fn validate_general_settings(settings: &GeneralSettings) -> CoreResult<()> {
         ));
     }
     csv_delimiter_byte(&settings.csv_delimiter)?;
-    if !settings.taxon_tree_name_parts.sci_name
-        && !settings.taxon_tree_name_parts.zh_name
-        && !settings.taxon_tree_name_parts.en_name
-    {
-        return Err(CoreError::InvalidArgument(
-            "at least one taxon tree name part must be visible".to_string(),
-        ));
+    for parts in [
+        &settings.photos_taxon_name_parts,
+        &settings.taxonomy_taxon_name_parts,
+    ] {
+        if !parts.sci_name && !parts.zh_name && !parts.en_name {
+            return Err(CoreError::InvalidArgument(
+                "at least one taxon name part must be visible".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -279,7 +284,8 @@ mod tests {
                 restore_tabs: true,
                 recent_searches_limit: 10,
                 csv_delimiter: ",".into(),
-                taxon_tree_name_parts: TaxonTreeNameParts::default(),
+                photos_taxon_name_parts: TaxonNameParts::default(),
+                taxonomy_taxon_name_parts: TaxonNameParts::default(),
             }
         );
     }
@@ -292,10 +298,15 @@ mod tests {
             restore_tabs: false,
             recent_searches_limit: 24,
             csv_delimiter: "\t".into(),
-            taxon_tree_name_parts: TaxonTreeNameParts {
+            photos_taxon_name_parts: TaxonNameParts {
                 sci_name: true,
                 zh_name: false,
                 en_name: true,
+            },
+            taxonomy_taxon_name_parts: TaxonNameParts {
+                sci_name: false,
+                zh_name: true,
+                en_name: false,
             },
         };
         assert_eq!(
@@ -342,20 +353,55 @@ mod tests {
     }
 
     #[test]
-    fn rejects_hidden_taxon_tree_name_parts() {
+    fn rejects_hidden_taxon_name_parts() {
         let (_directory, database) = test_database();
-        let settings = GeneralSettings {
-            taxon_tree_name_parts: TaxonTreeNameParts {
+        for photos in [true, false] {
+            let hidden = TaxonNameParts {
                 sci_name: false,
                 zh_name: false,
                 en_name: false,
-            },
-            ..GeneralSettings::default()
-        };
-        assert!(matches!(
-            update_general_settings(&database, &settings),
-            Err(CoreError::InvalidArgument(_))
-        ));
+            };
+            let settings = if photos {
+                GeneralSettings {
+                    photos_taxon_name_parts: hidden,
+                    ..GeneralSettings::default()
+                }
+            } else {
+                GeneralSettings {
+                    taxonomy_taxon_name_parts: hidden,
+                    ..GeneralSettings::default()
+                }
+            };
+            assert!(matches!(
+                update_general_settings(&database, &settings),
+                Err(CoreError::InvalidArgument(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn reads_legacy_taxon_tree_names_as_photo_names() {
+        let (_directory, database) = test_database();
+        metadata::set_raw(
+            &database.connect_metadata().unwrap(),
+            MetadataKey::GeneralSettings,
+            r#"{"theme":"dark","restore_tabs":true,"recent_searches_limit":10,"csv_delimiter":",","taxon_tree_name_parts":{"sci_name":false,"zh_name":true,"en_name":false}}"#,
+        )
+        .unwrap();
+
+        let settings = get_general_settings(&database).unwrap();
+        assert_eq!(
+            settings.photos_taxon_name_parts,
+            TaxonNameParts {
+                sci_name: false,
+                zh_name: true,
+                en_name: false,
+            }
+        );
+        assert_eq!(
+            settings.taxonomy_taxon_name_parts,
+            TaxonNameParts::default()
+        );
     }
 
     #[test]

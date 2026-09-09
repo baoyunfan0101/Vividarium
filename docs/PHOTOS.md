@@ -130,6 +130,9 @@ retained in the operation-status payload.
 | `set_photo_filename_format_settings` | `settings: &PhotoFilenameFormatSettings` | `()` | Save settings; at least one field must be enabled. |
 | `format_photo_filename` | `info: &TaxonomicNameInfo`, `suffix: &str`, `settings: &PhotoFilenameFormatSettings` | `String` | Format a filename without reading the database. |
 
+Saving filename-format settings does not rename existing files. Rename from
+taxonomy is an explicit operation and reads the latest saved format each time.
+
 ### Photo operation interfaces
 
 The photo module exports the common interfaces below:

@@ -1,4 +1,5 @@
 import { call } from "./client";
+import { demoCompletedOperation, type OperationState } from "./tasks";
 
 export type SqlValue =
   | { type: "null" }
@@ -92,10 +93,15 @@ export function demoTaxonomySqlSchema(alias: string): SqlSourceSchema {
   };
 }
 
-export const executeCustomSql = (sql: string, maximumResultRows: number | null = 1000) =>
-  call<CustomSqlExecutionResult>("execute_custom_taxonomy_sql", {
+export const executeCustomSql = (
+  sql: string,
+  ownerId: string,
+  maximumResultRows: number | null = 1000,
+) =>
+  call<OperationState>("execute_custom_taxonomy_sql", {
     request: { sql, maximum_result_rows: maximumResultRows },
-  }, () => ({
+    ownerId,
+  }, () => demoCompletedOperation("taxonomy", "execute_custom_taxonomy_sql", {
     operation_id: null,
     changeset_size: 0,
     result_sets: [{
@@ -108,10 +114,19 @@ export const executeCustomSql = (sql: string, maximumResultRows: number | null =
     script_saved: true,
     warnings: [],
   }));
-export const exportCustomSqlQuery = (sql: string, destinationPath: string) =>
-  call<SqlExportResult>("export_custom_taxonomy_query", {
-    request: { sql, destination_path: destinationPath },
-  }, () => ({ path: destinationPath, row_count: 1 }));
+export const exportCustomSqlQuery = (
+  sql: string,
+  statementIndex: number,
+  destinationPath: string,
+  ownerId: string,
+) =>
+  call<OperationState>("export_custom_taxonomy_query", {
+    request: { sql, statement_index: statementIndex, destination_path: destinationPath },
+    ownerId,
+  }, () => demoCompletedOperation("taxonomy", "export_custom_taxonomy_query", {
+    path: destinationPath,
+    row_count: 1,
+  }));
 export const getCustomTaxonomySql = () =>
   call<string>("get_custom_taxonomy_sql", undefined, () => "SELECT * FROM taxa LIMIT 100;");
 export const listCustomSqlInputs = () =>

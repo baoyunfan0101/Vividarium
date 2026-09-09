@@ -19,7 +19,7 @@ taxonomy history. Domain functions are exported by
 | `has_formatted_input` | `bool` | Whether taxonomy formatted input is available. |
 
 History list interfaces return summaries only. They never include complete
-audit or formatted input rows.
+audit rows or operation source input.
 
 ## `OperationAuditRow`
 
@@ -38,6 +38,20 @@ audit or formatted input rows.
 Photo rename rows use `entity_type = "photo"` and `action = "rename"`.
 Their JSON state contains `directory_relative_path` and `filename`.
 Taxonomy rows use the same fields for taxon and taxon-name changes.
+
+## `OperationInput`
+
+Operation input records what the user submitted, independently from audit rows
+that record what changed. The source-aware variants are:
+
+| Kind | Content |
+| --- | --- |
+| `custom_sql` | Exact submitted SQL, including comments and whitespace. |
+| `formatted_update` | Ordered `TaxonInputRow` values from the replayable formatted input store. |
+| `taxonomy_action` | Direct taxonomy action name and submitted request fields. |
+
+`get_operation_input` loads this detail separately from summary and audit
+pagination. Operations created without source input return `None`.
 
 ## `OperationPage<T>`
 
@@ -74,24 +88,31 @@ the complete CSV is never materialized by the export interface. The delimiter
 is comma by default and follows the application-wide General setting; supported
 values are comma, semicolon, tab, and pipe.
 
-Successful rollback deletes the original operation and its audit data.
-Taxonomy rollback also applies its reverse changeset and records pending
-photo-library synchronization. No user-visible reverse operation is created.
+Taxonomy rollback applies the inverse changeset in one transaction while
+preserving relational dependencies. It then verifies foreign-key integrity,
+validates the taxonomy, records pending photo-library synchronization, and
+deletes the original operation. A data, row, constraint, or foreign-key
+conflict aborts the transaction with a diagnostic rollback error, preserving
+the taxonomy and every operation-owned record. Successful rollback removes the
+summary, audit rows, changeset, source input, and formatted input. No
+user-visible reverse operation is created.
 
-## Taxonomy formatted input
+## Taxonomy operation input
 
-Only formatted updates and direct UI edits converted to formatted updates set
-`has_formatted_input`.
+Formatted updates set `has_formatted_input` and retain their submitted rows as
+canonical replayable input. Custom SQL retains its exact script once at the
+operation level. Direct taxonomy actions retain their submitted action input.
 
 The taxonomy module additionally exposes:
 
 | Function | Parameters after `database` | Return |
 | --- | --- | --- |
+| `get_operation_input` | `operation_id: i64` | `Option<OperationInput>` |
 | `export_operation_input` | `operation_id: i64` | Formatted-update CSV `String` |
 | `export_operations_input` | `operation_ids: &[i64]` | Formatted-update CSV `String` |
 | `export_all_replayable_inputs` | none | Formatted-update CSV `String` |
 
-Delete and custom SQL operations have audit rows but no formatted input.
+Delete and custom SQL operations are not formatted-input CSV operations.
 Selected input export returns an error if any selected operation is not
 replayable. Desktop audit and formatted-input export commands take an absolute
 destination path selected by the caller and write the resulting CSV there with

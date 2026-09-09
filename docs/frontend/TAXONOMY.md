@@ -22,6 +22,19 @@ names followed by rank. Submitted searches show a centered searching status
 until results resolve. Every formal submission starts a fresh request even
 when the normalized query is unchanged, and the result list returns to its
 first row for the new response.
+Taxonomy Search reports searching state and the number of results currently
+shown in the status bar.
+
+Hierarchy breadcrumbs, the current heading, and child navigation use the
+Taxonomy visible-name preference for scientific, Chinese, and English accepted
+names. The complete name-group editor always shows the stored records and is
+independent of this display preference.
+
+Every taxon requires one scientific accepted name, which cannot be deleted.
+Chinese and English accepted names are optional and unique. A localized
+accepted name can be deleted only while its corresponding alias group is
+empty. Chinese and English aliases require their corresponding accepted name.
+Synonyms and localized aliases remain independently deletable and promotable.
 
 ### `FormattedUpdateView({ onStatus, mutationDisabled })`
 
@@ -43,12 +56,26 @@ matching, ancestor disambiguation, and strict-parent recursive creation.
 Parameters include a status callback and optional mutation guard.
 
 Returns: a SQL editor, execution messages, typed result sets, warnings, and
-full export for truncated read-only queries. Its source sidebar has two
-mutually exclusive VS Code-style groups: Input sources is expanded by default,
-and All accessible tables shows only the complete readable internal `main`
-taxonomy schema. Uploaded sources remain exclusively in Input sources. The
-expanded group body scrolls independently.
-CSV sources and exports use the application-wide CSV delimiter.
+complete CSV export for every read-only query result. Multi-statement output is
+grouped by executable statement index. Result tables share an execution-wide
+minimum width determined by the largest result column count; each statement
+still displays only its real columns. Long values remain single-line and use
+ellipsis without changing row-specific column widths. The latest successful
+execution and its SQL remain visible while the editor changes or a later Run
+fails, and every Export action uses that executed SQL snapshot and its result
+statement index. The script-level execution summary is reported through the tab
+status bar. The output pane scrolls across statement sections that exceed the
+available height, while each result table scrolls its own rows. A statement
+that both mutates and returns rows uses one combined result header. Its source
+sidebar has two mutually exclusive VS Code-style
+groups: Input sources is expanded by default, and All accessible tables shows
+only the complete readable internal `main` taxonomy schema. Uploaded sources
+remain exclusively in Input sources. The expanded group body scrolls
+independently. CSV sources and exports use the application-wide CSV delimiter.
+Running operations show the current phase, the active statement index during
+SQL execution, and elapsed time. Long-running statements have an execution
+limit, and a timeout appears as an operation failure. A successful execution
+snapshot remains the source for result display and export.
 The leading Help action opens the integer mappings for `taxa.rank` and
 `taxon_names.name_type`.
 
@@ -63,7 +90,9 @@ shows only the current internal taxonomy schema, which SQL Import can read
 through the `taxonomy` alias. Uploaded sources and the `sql_import` staging
 schema appear only in Input sources, so neither is duplicated in All
 accessible tables. Its leading Help action shows the same taxonomy integer
-code mappings as Custom SQL.
+code mappings as Custom SQL. SQL Import operations show the current phase, the
+active statement index, and elapsed time. Staging and validation phases appear
+only after SQL execution succeeds.
 
 ### `DirectImportSettings({ onApplied })`
 
@@ -88,7 +117,14 @@ types.
 
 `TaxonCard` renders a `TaxonSummary` with optional selection and actions. Its
 third line displays available Chinese and English names separated by a middle
-dot, or a dash when both names are absent.
+dot, or a dash when both names are absent. Taxon cards always retain this full
+accepted-name presentation and do not use visible-name preferences.
+Taxon-card text is selectable and copyable. Dragging a text selection does not
+run card navigation, and action buttons remain isolated from the card action.
+Taxonomy search cards display accepted taxon names as their primary identity.
+When a result also matches through a scientific synonym, Chinese alias, or
+English alias, the card shows each matching non-accepted name explicitly.
+Accepted-name matches do not suppress these explanations.
 `useTaxonSuggestions(query, enabled)` returns lightweight suggestions after a
 260 ms input pause; only the latest request may publish its low-priority
 result. `useTaxonSearch(query, options)` returns submitted search results,

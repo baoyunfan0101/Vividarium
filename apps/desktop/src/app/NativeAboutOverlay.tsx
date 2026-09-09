@@ -9,7 +9,7 @@ import {
 } from "../api/external";
 
 export function NativeAboutOverlay({ onClose }: { onClose: () => void }) {
-  const [version, setVersion] = useState("3.0.0");
+  const [version, setVersion] = useState("Loading...");
   const [linkError, setLinkError] = useState("");
 
   useEffect(() => {

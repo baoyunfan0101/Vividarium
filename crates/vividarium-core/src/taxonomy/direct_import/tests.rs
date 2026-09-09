@@ -34,6 +34,7 @@ fn replaces_taxonomy_preserves_source_ids_and_queues_all_photos() {
     let directory = tempfile::tempdir().unwrap();
     let database = Database::open_test(directory.path().join("vividarium.db")).unwrap();
     let old_taxon_ids = seed_old_taxonomy_tree(&database);
+    let old_identity = database.taxonomy_identity().unwrap();
     let old_taxon_id = old_taxon_ids[2];
     let connection = database.connect().unwrap();
     connection
@@ -87,11 +88,31 @@ fn replaces_taxonomy_preserves_source_ids_and_queues_all_photos() {
 
     let source_path = directory.path().join("direct-import.db");
     create_direct_import_database(&source_path);
-    let result = apply_direct_import(&database, &source_path).unwrap();
+    let mut progress = Vec::new();
+    let result = apply_direct_import_with_progress_and_cancellation(
+        &database,
+        &source_path,
+        &mut |event| {
+            if event.stage == APPLYING_DIRECT_IMPORT {
+                assert_eq!(database.taxonomy_identity().unwrap(), old_identity);
+            }
+            progress.push(event);
+        },
+        &CancellationToken::new(),
+    )
+    .unwrap();
     let sync = sync::synchronize_pending_photo_libraries(&database).unwrap();
 
     assert_eq!(result.metadata.taxa_count, 2);
     assert_eq!(result.metadata.taxon_names_count, 2);
+    assert_eq!(
+        progress
+            .iter()
+            .map(|event| event.stage.as_str())
+            .collect::<Vec<_>>(),
+        [VALIDATING_DIRECT_IMPORT_DATABASE, APPLYING_DIRECT_IMPORT]
+    );
+    assert_ne!(database.taxonomy_identity().unwrap(), old_identity);
     assert_eq!(sync.synchronized[0].queued_photo_count, 1);
     for taxon_id in old_taxon_ids {
         assert!(get_taxon_detail(&database, taxon_id).unwrap().is_none());
@@ -171,6 +192,32 @@ fn rejects_a_direct_import_database_with_text_name_types() {
         error
             .to_string()
             .contains("taxon_names column name_type must use INTEGER")
+    );
+}
+
+#[test]
+fn rejects_duplicate_names_within_a_direct_import_name_family() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = Database::open(directory.path().join("vividarium.db")).unwrap();
+    let source_path = directory.path().join("direct-import.db");
+    create_direct_import_database(&source_path);
+    Connection::open(&source_path)
+        .unwrap()
+        .execute(
+            r#"
+            INSERT INTO taxon_names (name_id, taxon_id, name_type, name)
+            VALUES (1003, 101, 2, 'New kingdom')
+            "#,
+            [],
+        )
+        .unwrap();
+
+    let error = apply_direct_import(&database, &source_path).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate name 'New kingdom' in one name family")
     );
 }
 

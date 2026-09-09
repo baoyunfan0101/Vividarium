@@ -46,8 +46,13 @@ export function canPromoteTaxonName(kind: TaxonNameGroupKind): boolean {
   return kind === "synonym" || kind === "zh_alias" || kind === "en_alias";
 }
 
-export function canDeleteTaxonName(kind: TaxonNameGroupKind): boolean {
-  return kind === "synonym" || kind === "zh_alias" || kind === "en_alias";
+export function canDeleteTaxonName(
+  kind: TaxonNameGroupKind,
+  hasAliases: boolean,
+): boolean {
+  if (kind === "sci_name") return false;
+  if (kind === "zh_name" || kind === "en_name") return !hasAliases;
+  return true;
 }
 
 export function createTaxonNameDraftRows(records: TaxonNameDetail[]): TaxonNameDraftRow[] {

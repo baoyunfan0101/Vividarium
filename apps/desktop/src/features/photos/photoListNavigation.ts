@@ -4,6 +4,25 @@ export function nextListIndex(length: number, activeIndex: number, direction: -1
   return Math.min(Math.max(activeIndex + direction, 0), length - 1);
 }
 
+export function resolvePhotoListEntryIndex<T>({
+  rows,
+  selectedPhotoId,
+  direction,
+  getPhotoId,
+}: {
+  rows: T[];
+  selectedPhotoId: number | null;
+  direction: -1 | 1;
+  getPhotoId: (row: T) => number | null;
+}): number {
+  if (selectedPhotoId !== null) {
+    const selectedIndex = rows.findIndex((row) => getPhotoId(row) === selectedPhotoId);
+    if (selectedIndex >= 0) return selectedIndex;
+  }
+  const indices = rows.flatMap((row, index) => getPhotoId(row) === null ? [] : [index]);
+  return direction === 1 ? indices[0] ?? -1 : indices[indices.length - 1] ?? -1;
+}
+
 export function treeArrowAction(
   expanded: boolean,
   direction: -1 | 1,

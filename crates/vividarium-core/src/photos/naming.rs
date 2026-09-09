@@ -203,8 +203,11 @@ mod tests {
     fn saves_and_reloads_photo_filename_format_settings() {
         let directory = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("unchanged.jpg"), b"photo").unwrap();
         let database = Database::open(directory.path().join("vividarium.db")).unwrap();
-        crate::photos::open_library(&database, root.path().to_str().unwrap()).unwrap();
+        let library =
+            crate::photos::open_library(&database, root.path().to_str().unwrap()).unwrap();
+        crate::photos::refresh_directory(&database, library.root_directory_id).unwrap();
         let settings = PhotoFilenameFormatSettings {
             family_zh: true,
             family_sci: true,
@@ -220,6 +223,11 @@ mod tests {
             get_photo_filename_format_settings(&database).unwrap(),
             settings
         );
+        assert_eq!(
+            crate::photos::list_photos(&database).unwrap()[0].filename,
+            "unchanged.jpg"
+        );
+        assert!(root.path().join("unchanged.jpg").is_file());
     }
 
     #[test]

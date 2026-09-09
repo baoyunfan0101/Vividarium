@@ -12,7 +12,12 @@ test("normalizes missing and invalid general settings to defaults", () => {
     restore_tabs: true,
     recent_searches_limit: 10,
     csv_delimiter: ",",
-    taxon_tree_name_parts: {
+    photos_taxon_name_parts: {
+      sci_name: true,
+      zh_name: true,
+      en_name: true,
+    },
+    taxonomy_taxon_name_parts: {
       sci_name: true,
       zh_name: true,
       en_name: true,
@@ -31,32 +36,60 @@ test("preserves valid general settings", () => {
     restore_tabs: false,
     recent_searches_limit: 1,
     csv_delimiter: "\t",
-    taxon_tree_name_parts: {
+    photos_taxon_name_parts: {
       sci_name: false,
       zh_name: true,
       en_name: false,
+    },
+    taxonomy_taxon_name_parts: {
+      sci_name: true,
+      zh_name: false,
+      en_name: true,
     },
   }), {
     theme: "light",
     restore_tabs: false,
     recent_searches_limit: 1,
     csv_delimiter: "\t",
-    taxon_tree_name_parts: {
+    photos_taxon_name_parts: {
       sci_name: false,
       zh_name: true,
       en_name: false,
     },
+    taxonomy_taxon_name_parts: {
+      sci_name: true,
+      zh_name: false,
+      en_name: true,
+    },
   });
 });
 
-test("keeps at least one taxon tree name part visible", () => {
+test("keeps at least one name part visible in each independent context", () => {
   assert.deepEqual(normalizeGeneralSettings({
-    taxon_tree_name_parts: {
+    photos_taxon_name_parts: {
       sci_name: false,
       zh_name: false,
       en_name: false,
     },
   }), defaultGeneralSettings());
+
+  const photosOnly = normalizeGeneralSettings({
+    photos_taxon_name_parts: {
+      sci_name: false,
+      zh_name: true,
+      en_name: false,
+    },
+  });
+  assert.deepEqual(photosOnly.photos_taxon_name_parts, {
+    sci_name: false,
+    zh_name: true,
+    en_name: false,
+  });
+  assert.deepEqual(photosOnly.taxonomy_taxon_name_parts, {
+    sci_name: true,
+    zh_name: true,
+    en_name: true,
+  });
 });
 
 test("applies forced themes and removes the override for system theme", () => {

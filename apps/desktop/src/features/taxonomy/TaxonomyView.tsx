@@ -13,12 +13,17 @@ import {
   getTaxonomyTemplate,
   parseTaxonomyCsv,
   previewTaxonomyRows,
+  type FormattedUpdatePreviewResult,
   type TaxonInputRow,
   type TaxonRowOutcome,
+  type TaxonomyOperationResult,
 } from "../../api/taxonomy";
 import { downloadCsv, errorMessage } from "../../api/common";
+import { waitForOperation } from "../../api/tasks";
+import { operationResult } from "../../app/backgroundTaskResult";
 import { getTaxonomyNameSeparator } from "../../api/settings";
 import { Busy, Button, EmptyState, SectionHeader, VirtualList } from "../../shared/ui";
+import { VariableVirtualList } from "../../shared/VariableVirtualList";
 import { TaxonCard } from "./TaxonCard";
 import { useMetadataChange } from "../../shared/metadataChanges";
 import { useTaxonSearch } from "./useTaxonSearch";
@@ -34,15 +39,20 @@ import {
   currentTaxonForRoot,
   reconcileSelectedRoot,
   recordHierarchyPosition,
-  taxonSearchMatchExplanation,
+  taxonSearchMatchExplanations,
   type HierarchyPositions,
 } from "./hierarchyNavigation";
+import type { TaxonNameParts } from "../../api/general";
 
 export function TaxonomySearchView({
   onOpenPhotos,
+  onStatus,
+  nameParts,
   mutationDisabled = false,
 }: {
   onOpenPhotos: (taxonId: number, label: string) => void;
+  onStatus: (message: string) => void;
+  nameParts: TaxonNameParts;
   mutationDisabled?: boolean;
 }) {
   const [query, setQuery] = useViewState("taxonomy-search.query", "");
@@ -68,6 +78,20 @@ export function TaxonomySearchView({
   useTaxonomyMutation(() => {
     setRefreshKey((current) => current + 1);
   });
+
+  useEffect(() => {
+    if (!submittedQuery.trim()) {
+      onStatus("Ready");
+      return;
+    }
+    if (taxonomySearch.loading) {
+      onStatus("Searching...");
+    } else if (!taxonomySearch.error) {
+      onStatus(taxonomySearch.results.length === 0
+        ? "No results"
+        : `${taxonomySearch.results.length} results shown`);
+    }
+  }, [onStatus, submittedQuery, taxonomySearch.error, taxonomySearch.loading, taxonomySearch.results.length]);
 
   useEffect(() => {
     setSelectedSuggestionIndex(-1);
@@ -122,17 +146,17 @@ export function TaxonomySearchView({
     : currentTaxonForRoot(selectedRootTaxonId, hierarchyPositions);
   const resultsPane = (
     <aside className="taxonomy-results">
-      <VirtualList
+      <VariableVirtualList
         stateKey="taxonomy-search.results-list"
         resetKey={`${submittedQuery}:${refreshKey}`}
         items={taxonomySearch.results}
-        rowHeight={60}
+        estimatedRowHeight={90}
         itemKey={(item) => item.taxon_id}
         renderItem={(item) => (
           <TaxonCard
             taxon={item}
             active={selectedRootTaxonId === item.taxon_id}
-            description={taxonSearchMatchExplanation(item)}
+            matchExplanations={taxonSearchMatchExplanations(item)}
             onClick={() => setSelectedRootTaxonId(item.taxon_id)}
           />
         )}
@@ -158,6 +182,7 @@ export function TaxonomySearchView({
             recordHierarchyPosition(current, selectedResult.taxon_id, currentTaxonId)
           ))}
           onOpenPhotos={onOpenPhotos}
+          nameParts={nameParts}
           mutationDisabled={mutationDisabled}
         />
       )}
@@ -257,9 +282,11 @@ type FormattedBusy = "" | "import" | "template" | "preview" | "apply";
 
 export function FormattedUpdateView({
   onStatus,
+  taskOwnerId,
   mutationDisabled = false,
 }: {
   onStatus: (message: string) => void;
+  taskOwnerId: string;
   mutationDisabled?: boolean;
 }) {
   const [rows, setRows] = useState<TaxonInputRow[]>([{ species: "" }]);
@@ -355,7 +382,11 @@ export function FormattedUpdateView({
     setMessage("");
     setCurrentPreview(null);
     try {
-      const result = await previewTaxonomyRows(rows);
+      const started = await previewTaxonomyRows(rows, taskOwnerId);
+      const completed = started.task_id && ["queued", "running"].includes(started.state)
+        ? await waitForOperation(started.task_id)
+        : started;
+      const result = operationResult<FormattedUpdatePreviewResult>(completed, started.task_id);
       setOutcomes(result.rows);
       setCurrentPreview(result.preview_id);
       report(`${result.rows.length} rows previewed`);
@@ -373,7 +404,11 @@ export function FormattedUpdateView({
     setMessage("");
     setCurrentPreview(null);
     try {
-      const result = await applyTaxonomyRows(currentPreviewId);
+      const started = await applyTaxonomyRows(currentPreviewId, taskOwnerId);
+      const completed = started.task_id && ["queued", "running"].includes(started.state)
+        ? await waitForOperation(started.task_id)
+        : started;
+      const result = operationResult<TaxonomyOperationResult>(completed, started.task_id);
       setOutcomes(result.rows);
       report(`${result.succeeded_rows} succeeded, ${result.failed_rows} failed`);
       emitTaxonomyMutation();

@@ -52,8 +52,8 @@ export const addSqlImportInput = (kind: "csv" | "sqlite", alias: string, path: s
   });
 export const removeSqlImportInput = (alias: string) =>
   call<RemoveSqlInputResult>("remove_sql_import_input", { request: { alias } }, () => ({ inputs: [], warnings: [] }));
-export const startSqlImportValidation = (sql: string) =>
-  call<OperationState>("start_sql_import_validation", { request: { sql } }, () => {
+export const startSqlImportValidation = (sql: string, ownerId: string) =>
+  call<OperationState>("start_sql_import_validation", { request: { sql }, ownerId }, () => {
     const operation = demoOperation("sql_import", "ready_to_apply");
     operation.operation = "validate_sql_import";
     operation.result = {
@@ -79,7 +79,7 @@ export const startSqlImportValidation = (sql: string) =>
     } satisfies ValidateSqlImportResult;
     return operation;
   });
-export const applySqlImport = () => call<OperationState>("apply_sql_import", undefined, () => {
+export const applySqlImport = (ownerId: string) => call<OperationState>("apply_sql_import", { ownerId }, () => {
   const operation = demoOperation("sql_import", "SQL Import applied");
   operation.result = {
     metadata: {

@@ -7,18 +7,15 @@ This package contains the React interface and Tauri desktop adapter for Vividari
 ```text
 src/
   App.tsx                  Top-level navigation and screen routing
-  bridge.ts                Typed React-to-Rust IPC and dialog bridge
-  components/              Shared navigation, status, virtual list, and viewer
+  api/                     Typed React-to-Rust IPC wrappers
+  app/                     Desktop shell, workspace, and application state
   features/                Admin, Photos, Taxonomy, and Map screens
-  lib/                     Browser, path, storage, taxon, and split helpers
+  shared/                  Shared UI, layout, and interaction utilities
   styles/                  Global, layout, component, and feature styles
 src-tauri/
   capabilities/            Narrow desktop permissions
-  icons/                   Icon source and generated platform formats
+  icons/                   Generated platform icon formats
   src/                     Tauri IPC, state, paths, and media protocol
-  tauri.conf.json          Shared application and bundle configuration
-  tauri.macos.conf.json    Apple Silicon DMG and ad-hoc signing settings
-  tauri.windows.conf.json  Windows NSIS and WebView2 settings
 ```
 
 The interface never receives arbitrary file-system privileges. Photos are requested by database ID through the private `vividarium://` protocol, and Rust validates the configured photo root before reading a file.

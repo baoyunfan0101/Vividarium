@@ -185,17 +185,17 @@ const vividariumEditorTheme = EditorView.theme({
   ".cm-line": { padding: "0" },
   ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--text)" },
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": {
-    backgroundColor: "#477057aa !important",
+    backgroundColor: "var(--code-selection) !important",
   },
   ".cm-content[contenteditable=false]": { caretColor: "transparent" },
 });
 
 const vividariumHighlightStyle = HighlightStyle.define([
-  { tag: tags.keyword, color: "#c586c0" },
-  { tag: [tags.string, tags.special(tags.string)], color: "#ce9178" },
-  { tag: [tags.number, tags.bool, tags.null], color: "#b5cea8" },
-  { tag: [tags.lineComment, tags.blockComment], color: "#6a9955", fontStyle: "italic" },
-  { tag: tags.function(tags.variableName), color: "#dcdcaa" },
-  { tag: [tags.variableName, tags.propertyName], color: "#9cdcfe" },
-  { tag: [tags.operator, tags.bracket], color: "#d4d4d4" },
+  { tag: tags.keyword, color: "var(--code-keyword)" },
+  { tag: [tags.string, tags.special(tags.string)], color: "var(--code-string)" },
+  { tag: [tags.number, tags.bool, tags.null], color: "var(--code-number)" },
+  { tag: [tags.lineComment, tags.blockComment], color: "var(--code-comment)", fontStyle: "italic" },
+  { tag: tags.function(tags.variableName), color: "var(--code-function)" },
+  { tag: [tags.variableName, tags.propertyName], color: "var(--code-variable)" },
+  { tag: [tags.operator, tags.bracket], color: "var(--code-operator)" },
 ]);

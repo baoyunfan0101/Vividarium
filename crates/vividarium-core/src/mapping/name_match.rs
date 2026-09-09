@@ -47,14 +47,17 @@ impl PhotoNameField {
         }
     }
 
-    pub(crate) fn name_types(self) -> [TaxonomyNameType; 2] {
+    pub(crate) fn accepted_name_type(self) -> TaxonomyNameType {
         match self {
-            Self::SpeciesSci | Self::GenusSci | Self::FamilySci => {
-                [TaxonomyNameType::SciName, TaxonomyNameType::Synonym]
-            }
-            Self::SpeciesZh | Self::GenusZh | Self::FamilyZh => {
-                [TaxonomyNameType::ZhName, TaxonomyNameType::ZhAlias]
-            }
+            Self::SpeciesSci | Self::GenusSci | Self::FamilySci => TaxonomyNameType::SciName,
+            Self::SpeciesZh | Self::GenusZh | Self::FamilyZh => TaxonomyNameType::ZhName,
+        }
+    }
+
+    pub(crate) fn alias_name_type(self) -> TaxonomyNameType {
+        match self {
+            Self::SpeciesSci | Self::GenusSci | Self::FamilySci => TaxonomyNameType::Synonym,
+            Self::SpeciesZh | Self::GenusZh | Self::FamilyZh => TaxonomyNameType::ZhAlias,
         }
     }
 }
@@ -81,20 +84,11 @@ pub fn set_photo_name_match_settings(
     settings: &PhotoNameMatchSettings,
 ) -> CoreResult<()> {
     validate(settings)?;
-    let mut connection = database.connect()?;
-    let transaction = connection.transaction()?;
-    metadata::set_json(&transaction, MetadataKey::PhotoNameMatchSettings, settings)?;
-    transaction.execute(
-        r#"
-        INSERT INTO photo_mapping_queue (photo_id, reason)
-        SELECT photo_id, 'settings' FROM photos
-        WHERE true
-        ON CONFLICT(photo_id) DO UPDATE SET reason = excluded.reason
-        "#,
-        [],
-    )?;
-    transaction.commit()?;
-    Ok(())
+    metadata::set_json(
+        &database.connect()?,
+        MetadataKey::PhotoNameMatchSettings,
+        settings,
+    )
 }
 
 pub(crate) fn load(connection: &rusqlite::Connection) -> CoreResult<PhotoNameMatchSettings> {

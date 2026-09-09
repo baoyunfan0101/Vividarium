@@ -14,6 +14,8 @@ BEGIN IMMEDIATE;
 --    remaining ancestor as parent.
 -- 4. For rows with the same taxon and name, aggregate them into
 --    one row and use MAX(authority_year) as the authority year.
+-- 5. Do not import a scientific synonym when it is the same as
+--    the taxon's accepted scientific name.
 -- ============================================================
 
 -- ============================================================
@@ -70,13 +72,18 @@ BEGIN IMMEDIATE;
 --         GENERATED ALWAYS AS (lower(name)) STORED
 --     ,authority_year TEXT
 --     ,source TEXT
---     ,UNIQUE (taxon_id, name_type, name)
 --     ,CHECK (name_type BETWEEN 1 AND 6)
 --     ,CHECK (length(trim(name)) > 0)
 --     ,FOREIGN KEY (taxon_id)
 --         REFERENCES taxa(taxon_id)
 --         ON DELETE CASCADE
 -- );
+-- CREATE UNIQUE INDEX idx_taxon_names_scientific_family_name
+--     ON taxon_names(taxon_id, name) WHERE name_type IN (1, 2);
+-- CREATE UNIQUE INDEX idx_taxon_names_chinese_family_name
+--     ON taxon_names(taxon_id, name) WHERE name_type IN (3, 4);
+-- CREATE UNIQUE INDEX idx_taxon_names_english_family_name
+--     ON taxon_names(taxon_id, name) WHERE name_type IN (5, 6);
 -- ============================================================
 
 -- Create the SQL Import staging database
@@ -104,8 +111,6 @@ CREATE TABLE sql_import.taxon_names (
     ,authority_year TEXT
     ,source TEXT
 
-    ,UNIQUE (taxon_id, name_type, name)
-
     ,CHECK (name_type BETWEEN 1 AND 6)
     -- name_type: 1 = sci_name; 2 = synonym; 3 = zh_name; 4 = zh_alias; 5 = en_name; 6 = en_alias
 
@@ -115,6 +120,15 @@ CREATE TABLE sql_import.taxon_names (
         REFERENCES taxa(taxon_id)
         ON DELETE CASCADE
 );
+
+CREATE UNIQUE INDEX sql_import.idx_taxon_names_scientific_family_name
+    ON taxon_names(taxon_id, name) WHERE name_type IN (1, 2);
+CREATE UNIQUE INDEX sql_import.idx_taxon_names_chinese_family_name
+    ON taxon_names(taxon_id, name) WHERE name_type IN (3, 4);
+CREATE UNIQUE INDEX sql_import.idx_taxon_names_english_family_name
+    ON taxon_names(taxon_id, name) WHERE name_type IN (5, 6);
+CREATE INDEX sql_import.idx_taxon_names_taxon_type
+    ON taxon_names(taxon_id, name_type);
 
 -- ============================================================
 
@@ -307,10 +321,13 @@ FROM (
         parent
         ,synonym
 ) AS synonym
+JOIN biolib.taxa AS source
+    ON synonym.parent = source.id
 JOIN sql_import.taxa AS retained
     ON synonym.parent = retained.taxon_id
-WHERE synonym IS NOT NULL
-    AND trim(synonym) <> ''
+WHERE synonym.synonym IS NOT NULL
+    AND trim(synonym.synonym) <> ''
+    AND synonym.synonym <> source.scientific_name
 ORDER BY
     synonym.parent
     ,synonym.synonym

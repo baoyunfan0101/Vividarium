@@ -108,15 +108,25 @@ pub struct OperationProgress {
     pub stage: String,
     pub current: Option<u64>,
     pub total: Option<u64>,
-    pub statement_index: Option<u64>,
-    pub statement_total: Option<u64>,
+    pub unit: Option<OperationProgressUnit>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationProgressUnit {
+    Items,
+    Files,
+    Photos,
+    Names,
+    Taxa,
+    Bytes,
+    Statements,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundTaskState {
     Queued,
-    #[default]
     Running,
     Completed,
     Failed,
@@ -128,17 +138,10 @@ pub struct OperationState {
     pub task_id: Option<String>,
     pub task_kind: Option<String>,
     pub task_scope: Option<String>,
-    #[serde(default)]
     pub state: BackgroundTaskState,
     pub operation: Option<String>,
-    pub running: bool,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
-    pub message: String,
-    #[serde(default)]
-    pub completed: u64,
-    pub processed: u64,
-    pub total: Option<u64>,
     pub progress: Option<OperationProgress>,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,

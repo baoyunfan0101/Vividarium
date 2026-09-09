@@ -16,7 +16,8 @@ use crate::db::{Database, ensure_photo_library_index_state, photo_from_row};
 use crate::error::{CoreError, CoreResult};
 use crate::mapping;
 use crate::models::{
-    DirectoryEntryCounts, NewPhoto, Photo, PhotoDirectory, PhotoLibrary, PhotoSyncResult,
+    DirectoryEntryCounts, NewPhoto, OperationProgress, OperationProgressUnit, Photo,
+    PhotoDirectory, PhotoLibrary, PhotoSyncResult,
 };
 
 pub use crate::models::{PhotoDirectoryItem, PhotoPage};
@@ -63,7 +64,7 @@ pub(crate) fn lock_photo_workspace() -> CoreResult<MutexGuard<'static, ()>> {
         .map_err(|_| CoreError::InvalidArgument("photo workspace lock is poisoned".into()))
 }
 
-pub type ProgressCallback<'a> = dyn FnMut(u64, Option<u64>, &str) + Send + 'a;
+pub type ProgressCallback<'a> = dyn FnMut(OperationProgress) + Send + 'a;
 
 #[derive(Debug)]
 struct ScannedDirectory {
@@ -430,11 +431,19 @@ pub fn browse_directory(
 }
 
 pub fn refresh_directory(database: &Database, directory_id: i64) -> CoreResult<PhotoSyncResult> {
+    let mut progress = |_: OperationProgress| {};
+    refresh_directory_with_progress(database, directory_id, &mut progress)
+}
+
+pub fn refresh_directory_with_progress(
+    database: &Database,
+    directory_id: i64,
+    progress: &mut ProgressCallback<'_>,
+) -> CoreResult<PhotoSyncResult> {
     let library = database.active_photo_library()?.ok_or_else(|| {
         CoreError::InvalidArgument("no active photo library is registered".into())
     })?;
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
-    refresh_directory_for_library(database, &library, directory_id, false, &mut progress)
+    refresh_directory_for_library(database, &library, directory_id, false, progress)
 }
 
 fn refresh_directory_for_library(
@@ -450,7 +459,12 @@ fn refresh_directory_for_library(
         .ok_or_else(|| CoreError::NotFound(format!("photo directory {directory_id}")))?;
     let root = library_root(&connection)?;
     let path = safe_directory_path(&root, &directory.relative_path)?;
-    progress(0, None, "Discovering photos");
+    progress(OperationProgress {
+        stage: "scanning_files".into(),
+        current: None,
+        total: None,
+        unit: Some(OperationProgressUnit::Files),
+    });
     let mut processed = 0;
     let mut stats = DirectoryRefreshStats::default();
     let mut pending = VecDeque::from([(directory, path)]);
@@ -458,7 +472,12 @@ fn refresh_directory_for_library(
 
     while let Some((directory, path)) = pending.pop_front() {
         let scanned = scan_directory(&path, &mut processed, progress)?;
-        progress(processed, None, "Updating photo index");
+        progress(OperationProgress {
+            stage: "updating_photo_index".into(),
+            current: None,
+            total: None,
+            unit: Some(OperationProgressUnit::Files),
+        });
         let scanned_photo_names = scanned
             .photos
             .iter()
@@ -528,7 +547,12 @@ fn refresh_directory_for_library(
         )?;
     }
     if complete_initial_index {
-        progress(processed, Some(processed), "Initial photo index complete");
+        progress(OperationProgress {
+            stage: "photo_index_complete".into(),
+            current: Some(processed),
+            total: Some(processed),
+            unit: Some(OperationProgressUnit::Files),
+        });
     }
     Ok(PhotoSyncResult {
         directory_id,
@@ -858,7 +882,7 @@ pub fn rename_photos_from_taxa(
     database: &Database,
     photo_ids: &[i64],
 ) -> CoreResult<PhotoRenameOperationResult> {
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     rename_photos_from_taxa_with_progress(database, photo_ids, &mut progress)
 }
 
@@ -871,7 +895,12 @@ pub fn rename_photos_from_taxa_with_progress(
         .lock()
         .map_err(|_| CoreError::InvalidArgument("photo workspace lock is poisoned".into()))?;
     let total = photo_ids.len() as u64;
-    progress(0, Some(total), "Renaming photos from taxonomy");
+    progress(OperationProgress {
+        stage: "renaming_photos".into(),
+        current: Some(0),
+        total: Some(total),
+        unit: Some(OperationProgressUnit::Photos),
+    });
     if photo_ids.is_empty() {
         return Ok(PhotoRenameOperationResult {
             operation_id: None,
@@ -919,11 +948,12 @@ pub fn rename_photos_from_taxa_with_progress(
             },
             Err(error) => return Err(error),
         });
-        progress(
-            row_number as u64,
-            Some(total),
-            "Renaming photos from taxonomy",
-        );
+        progress(OperationProgress {
+            stage: "renaming_photos".into(),
+            current: Some(row_number as u64),
+            total: Some(total),
+            unit: Some(OperationProgressUnit::Photos),
+        });
     }
     let audit_rows = rows
         .iter()
@@ -957,7 +987,7 @@ pub fn rename_photos_in_directory_from_taxa(
     directory_id: i64,
     include_descendants: bool,
 ) -> CoreResult<PhotoRenameOperationResult> {
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     rename_photos_in_directory_from_taxa_with_progress(
         database,
         directory_id,
@@ -1302,7 +1332,12 @@ fn scan_directory(
             });
         }
         *processed += 1;
-        progress(*processed, None, "Scanning photo library");
+        progress(OperationProgress {
+            stage: "scanning_files".into(),
+            current: None,
+            total: None,
+            unit: Some(OperationProgressUnit::Files),
+        });
     }
     Ok(ScannedDirectoryContents {
         directories,

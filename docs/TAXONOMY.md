@@ -18,6 +18,23 @@ rank is strictly higher than the child rank. Intermediate ranks may be
 omitted; equal-rank, reversed-rank, missing-parent, and cyclic relationships
 are invalid.
 
+Taxonomy validation loads the parent graph once and checks cyclic parent
+relationships in memory. Each taxon that belongs to a cycle is reported as a
+`parent_cycle` issue; taxa that only descend from a cycle retain their own
+parent relationship validation results.
+
+Validation checks cover parent structure, accepted-name counts, name-family
+uniqueness, orphan names, and normalized stored names. General taxonomy writes
+use the complete validation set. SQL Import staging uses the same checks except
+raw name-family uniqueness, because its canonical duplicate validation covers
+that condition before candidate construction.
+
+Background SQL Import reports taxonomy validation as separate stages for
+loading structure, parent cycles, parent relationships, scientific names,
+localized names, duplicate names, orphan names, and normalized names. Staging
+omits the duplicate-name and normalized-name stages; candidate validation uses
+the complete set.
+
 `TaxonomyNameType` values are:
 
 | Value | Stored code | Meaning |
@@ -29,8 +46,13 @@ are invalid.
 | `en_name` | `5` | Unique accepted English name. |
 | `en_alias` | `6` | English alias. |
 
-Every taxon has exactly one `sci_name`, at most one `zh_name`, and at most one
-`en_name`. Synonyms and Chinese or English aliases have no count limit.
+Every taxon has exactly one `sci_name`. A taxon may have zero or one `zh_name`
+and zero or one `en_name`. Synonyms and Chinese or English aliases have no
+count limit. Chinese aliases require a Chinese accepted name, and English
+aliases require an English accepted name.
+Within a taxon, the same case-sensitive stored `name` may appear only once in
+each name family: scientific (`sci_name` and `synonym`), Chinese (`zh_name` and
+`zh_alias`), or English (`en_name` and `en_alias`).
 
 `TaxonomyPage<T>` contains `items` and an opaque `next_cursor`. Pass `None`
 for the first page and reuse a returned cursor only with the same interface
@@ -43,6 +65,8 @@ and parent resource. Page limits are clamped to `1..=500`.
 | `TaxonDisplayNames` | `sci_name`, `zh_name`, `en_name` | Compact accepted names. |
 | `TaxonBreadcrumbItem` | `taxon_id`, `rank`, `names` | One ancestor. |
 | `TaxonSummary` | `taxon_id`, `rank`, `breadcrumb`, `names` | Compact taxon and lineage. |
+| `TaxonDisplayItem` | `taxon_id`, `rank`, `names` | One lightweight accepted-name display node. |
+| `TaxonDisplaySummary` | `current_rank`, `items` | Family-to-current display path, or only the current node above family. |
 | `TaxonChild` | `taxon_id`, `rank`, `names` | Compact direct child. |
 | `TaxonNameDetail` | `name_id`, `name`, `authority_year`, `source` | One stable name record. |
 | `TaxonNamesDetail` | `sci_name`, `synonyms`, `zh_name`, `zh_aliases`, `en_name`, `en_aliases` | Names grouped by type. |
@@ -51,6 +75,7 @@ and parent resource. Page limits are clamped to `1..=500`.
 | Function | Parameters after `database` | Return |
 | --- | --- | --- |
 | `get_taxon_summary` | `taxon_id: i64` | `Option<TaxonSummary>` |
+| `get_taxon_display_summary` | `taxon_id: i64` | `Option<TaxonDisplaySummary>` |
 | `get_taxon_detail` | `taxon_id: i64` | `Option<TaxonDetail>` |
 | `list_taxon_children` | `taxon_id: i64`, `cursor: Option<&str>`, `limit: usize` | `TaxonomyPage<TaxonChild>` |
 
@@ -58,6 +83,11 @@ and parent resource. Page limits are clamped to `1..=500`.
 the immediate parent. It does not repeat the current taxon. Children are
 loaded separately with `list_taxon_children`; they are not embedded in the
 detail response.
+
+`TaxonDisplaySummary` is independent from the complete `TaxonSummary`. It
+contains accepted scientific, Chinese, and English names only. Family, genus,
+and species targets include the available path from family through the target;
+kingdom and order targets include only the target itself.
 
 ## Search
 
@@ -103,8 +133,7 @@ taxon as an error.
 | `en_name` | `Option<String>` | First English input name. |
 | `en_alias` | `Vec<String>` | Additional English input names. |
 | `geological_range` | `Option<String>` | Geological range for the target taxon. |
-| `source` | `Option<String>` | Source applied to supplied names when allowed. |
-| `selected_taxon_id` | `Option<i64>` | Exact target used by UI direct edit; not part of CSV. |
+| `source` | `Option<String>` | Source applied to supplied names on the target taxon when allowed. |
 
 The CSV columns are:
 
@@ -123,24 +152,31 @@ word of the species scientific name into `genus`. Every later step therefore
 treats that row exactly like a row that supplied both fields.
 
 Matching starts at the lowest supplied rank. The rank name and then each input
-synonym are considered in input order, and each name is matched against one
-combined set of existing `sci_name` and `synonym` records. Zero candidates
-means the target is new; one candidate selects it immediately without checking
-any supplied ancestor. Multiple candidates are narrowed using supplied
-ancestor names from the nearest rank upward, stopping as soon as one remains.
-Ancestor matching uses the same combined scientific-name and synonym rule.
-After a target is selected or created, the other supplied scientific names are
-appended or supplemented as target synonyms.
+synonym are considered in input order. For each input name, exact `sci_name`
+matches are used when present; `synonym` is queried only when that name has no
+`sci_name` candidate. Matching uses the case-sensitive stored `name`, not
+`normalized_name`. Zero candidates means the target is new; one candidate
+selects it immediately without checking any supplied ancestor. Multiple
+candidates are narrowed using supplied ancestor names from the nearest rank
+upward, stopping as soon as one remains. Ancestor matching uses the same
+`sci_name`-first, `synonym`-fallback rule. After a target is selected or
+created, the other supplied scientific names are appended or supplemented as
+target synonyms.
+
+The row source is stored only on supplied name records for the target taxon.
+Scientific names used to resolve or create its lineage have independent source
+values.
 
 Updating a selected target keeps the existing supplement, append, and
 overwrite behavior. Creating a target requires its strict parent-rank name.
-That parent is resolved with the same zero, one, or multiple-candidate rules:
-one candidate is reused without consulting higher ranks, zero candidates
-creates that parent, and multiple candidates are narrowed by the nearest
-supplied ancestor. Creating a missing parent recursively requires and resolves
-its own strict parent, so one formatted row can create every missing rank in a
-complete supplied lineage. Missing strict-parent input and unresolved
-ambiguity fail the row without applying a partial lineage.
+That parent is resolved with the same exact `sci_name`-first fallback and the
+same zero, one, or multiple-candidate rules: one candidate is reused without
+consulting higher ranks, zero candidates creates that parent, and multiple
+candidates are narrowed by the nearest supplied ancestor. Creating a missing
+parent recursively requires and resolves its own strict parent, so one
+formatted row can create every missing rank in a complete supplied lineage.
+Missing strict-parent input and unresolved ambiguity fail the row without
+applying a partial lineage.
 
 ### Preview and apply types
 
@@ -169,6 +205,10 @@ and the same ordered row log.
 | `get_taxonomy_name_separator` | none | `String` |
 | `set_taxonomy_name_separator` | `separator: &str` | `()` |
 
+The desktop Formatted Update preview and apply commands return operation
+handles. Both keep owner-scoped cancellation while `OperationManager` records
+their lifecycle and result. The page waits for the exact returned task ID.
+
 `prepare_rows` evaluates and validates the update in a rolled-back transaction,
 retaining its inputs, row outcomes, taxonomy changeset, taxonomy identity, and
 operation revision in one in-memory candidate. `apply_prepared_rows` rejects a
@@ -185,10 +225,6 @@ asynchronously.
 
 ## Direct UI changes
 
-`TaxonUpdateInput` identifies `taxon_id` and supplies editable taxonomy
-fields. It is converted to one formatted input row and therefore returns a
-normal `TaxonomyOperationResult`.
-
 `PromoteTaxonNameInput` and `DeleteTaxonNameInput` both identify a name by
 `taxon_id` plus stable `name_id`.
 
@@ -203,15 +239,14 @@ name of the parent genus.
 group accepts at most one name, and an alias or synonym can be added only when
 its accepted-name group is present. New species scientific names and synonyms
 must start with the accepted scientific name of the parent genus. Blank,
-duplicate, mismatched-group, and otherwise invalid additions are rejected
-without applying any part of the group save.
+family-duplicate, mismatched-group, and otherwise invalid additions are
+rejected without applying any part of the group save.
 
 | Function | Parameters after `database` | Return | Description |
 | --- | --- | --- | --- |
-| `update_taxon` | `input: TaxonUpdateInput` | `TaxonomyOperationResult` | Apply one direct edit as formatted input. |
 | `promote_taxon_name` | `input: PromoteTaxonNameInput` | `()` | Exchange an alias type with its accepted type. |
 | `save_taxon_name_group` | `input: SaveTaxonNameGroupInput` | `()` | Atomically update metadata and append records in one name group. |
-| `delete_taxon_name` | `input: DeleteTaxonNameInput` | `()` | Delete a non-`sci_name` record. |
+| `delete_taxon_name` | `input: DeleteTaxonNameInput` | `()` | Delete an alias, synonym, or localized accepted name whose alias group is empty. Scientific accepted names cannot be deleted. |
 | `delete_taxon` | `taxon_id: i64` | `()` | Delete a childless taxon. |
 
 Group saves, promotion, and deletion create rollbackable audit operations
@@ -239,9 +274,10 @@ Custom SQL and SQL Import keep separate source registries. Sources persist
 across database reopen until explicitly removed. Once registry removal
 commits, managed-file cleanup errors are warnings and do not change success.
 
-`CustomTaxonomySqlRequest` contains one statement in `sql` and optional
-`maximum_result_rows`. `CustomTaxonomySqlExportRequest` contains one read-only
-query in `sql` and an absolute `destination_path`.
+`CustomTaxonomySqlRequest` contains an SQL script and optional
+`maximum_result_rows`. `CustomTaxonomySqlExportRequest` contains the executed
+script, a 1-based executable `statement_index`, and an absolute
+`destination_path`.
 
 ### SQL result types
 
@@ -255,10 +291,10 @@ query in `sql` and an absolute `destination_path`.
 
 `SqlValue` is tagged by `type` and has the variants `null`, `integer`, `real`,
 `text`, and `blob`. Blob values use Base64 in both IPC results and CSV export.
-The normal execution limit defaults to and is capped at 1000 rows per result
-set. A read-only statement stops after reading the limit plus one row.
-Statements that may mutate data always run to completion, including
-`UPDATE ... RETURNING`, while retaining only the limited preview rows.
+`maximum_result_rows` defaults to 1000 and is capped at 1000. Read-only result
+previews retain at most that many rows; this preview limit is independent of
+the execution limit. Statements that may mutate data always run to completion,
+including `UPDATE ... RETURNING`, while retaining only the limited preview rows.
 
 `SqlSourceSchema` contains `alias` and `objects`. Each `SqlSourceObject`
 contains `name`, `object_type`, and ordered `columns`. `SqlObjectType` values
@@ -280,17 +316,37 @@ Schema changes, transaction control, attachment control, internal-table
 writes, unsafe pragmas, and extension loading are denied while each statement
 executes.
 
-The statement succeeds or fails as one unit and the resulting taxonomy must
-remain valid. A pure query creates no operation. A successful mutation creates
-a rollbackable operation without formatted input and records photo-library
-synchronization. SQL is saved only after prepare, execution, and transaction
-commit succeed. A script-save failure returns the committed execution with
-`script_saved = false` and a warning; an execution failure does not replace
-the last successful SQL. Export accepts exactly one
-read-only query and streams its rows to the destination CSV using the
-application-wide delimiter.
-Desktop source removal, SQL execution, and query export commands execute file
-and database work on blocking workers and resolve asynchronously.
+Custom SQL accepts one or more executable statements and runs them sequentially
+in one transaction. Each executable statement has a 30-second execution limit
+and may fail through cancellation, timeout, SQLite execution, or validation.
+Whitespace and comments do not increment the 1-based statement indexes retained
+by result sets and messages. The script succeeds or fails as one unit and the
+resulting taxonomy must remain valid. A pure query creates no operation. A
+successful mutation script creates one rollbackable operation, retains the
+exact executed SQL as operation input, and records photo-library
+synchronization. Mutations are validated before commit. Small affected
+dependency scopes use incremental validation, while larger scopes use full
+taxonomy validation. A validation failure prevents the transaction from
+committing. SQL is saved to the current workspace only after prepare,
+execution, and transaction commit succeed. Historical operation input remains
+independent of that workspace save. A script-save failure returns the committed
+execution with `script_saved = false` and a warning; an execution failure does
+not replace the last successful SQL.
+
+Export locates one result-producing read-only statement by its executable index,
+executes only that statement, and streams its complete rows to the destination
+CSV using the application-wide delimiter. Each export query has a 30-second
+execution limit and supports cancellation. Successful exports retain the full
+CSV. If output creation has started, an unsuccessful export removes its partial
+output; validation errors raised before output creation leave an existing
+destination unchanged. Export re-executes the query against the current
+taxonomy and input sources rather than materializing a database snapshot.
+
+Desktop SQL execution and query export return operation handles and run file
+and database work on blocking workers. They keep owner-scoped cancellation and
+report input preparation, statement execution, changeset generation, taxonomy
+validation, operation recording, and commit or finalization phases through
+`OperationManager`.
 `list_custom_sql_database_schemas` returns the complete non-SQLite-internal
 table and view catalog exposed through the `main` alias. Managed input schemas
 remain available from `list_custom_sql_inputs`; clients combine both sources
@@ -330,6 +386,7 @@ fields remain authoritative.
 | `validate_sql_import` | `request: &ValidateSqlImportRequest` | `ValidateSqlImportResult` |
 | `validate_sql_import_with_progress` | `request: &ValidateSqlImportRequest`, `progress: &mut FnMut(OperationProgress)` | `ValidateSqlImportResult` |
 | `apply_sql_import` | none | `TaxonomyImportResult` |
+| `apply_sql_import_with_progress_and_cancellation` | `progress: &mut FnMut(OperationProgress)`, `cancellation: &CancellationToken` | `TaxonomyImportResult` |
 
 SQL Import has one fixed workspace. Persistent inputs and the last successful
 SQL outlive tabs, application restarts, and successful Apply. Adding or
@@ -342,6 +399,8 @@ schemas remain available from `list_sql_import_inputs` and are presented only
 with input sources. `list_sql_import_staging_schemas` separately exposes the
 `sql_import` staging catalog when staging exists so clients can present it with
 input sources without duplicating it in the internal-database catalog.
+The built-in script imports retained scientific synonyms except rows equal to
+the same taxon's accepted scientific name.
 
 Validate first executes SQL Import SQL, which can read the current taxonomy
 through the read-only `taxonomy` alias and every managed input through its
@@ -349,27 +408,41 @@ registered alias. The script can attach only the backend-selected
 `vividarium_sql_import.db` path with the `sql_import` alias. It may create and
 mutate staging objects only in `sql_import`; the execution result never creates
 a taxonomy operation or returns Custom SQL result sets. It reports only
-per-statement messages or a syntax/runtime error. After a fully successful
-script commits, script persistence is attempted separately. Save failure is
-reported through `script_saved = false` and `warnings` without changing the
-execution result. A failed execution restores the prior staging and validation
-artifacts and stops before candidate validation.
+per-statement messages or a syntax/runtime error. Each SQL Import statement has
+a 90-second execution limit and supports cancellation. Statement failure or
+timeout ends execution. Staging finalization and validation run only when SQL
+execution succeeds; failures produce no applicable candidate. If SQL execution
+fails, times out, or is cancelled, the SQL Import workspace is restored to its
+pre-run staging, candidate, and validation state. Script persistence is
+attempted separately after a successful commit. Save failure is reported through
+`script_saved = false` and `warnings` without changing the execution result.
 
-After SQL succeeds, validation builds the candidate and checks file integrity,
+After SQL succeeds, validation checks staging data, builds the candidate, and
+performs one authoritative candidate validation covering file integrity,
 required schema and constraints, supported ranks and name types, canonical
-normalization, and the complete taxonomy invariants. Taxonomy data violations
-are returned with `valid = false`, `can_apply = false`, and structured issues;
-SQL, SQLite, file, and candidate-build failures remain interface errors. The
-result contains authoritative totals and bounded warning and error samples.
-Any later source or SQL change requires validation again.
+normalization, name-family uniqueness, and the complete taxonomy invariants.
+Stored and normalization-derived name-family duplicates are reported once as
+`duplicate_canonical_name`.
+Taxonomy data violations are returned with `valid = false`,
+`can_apply = false`, and structured issues; SQL, SQLite, file, and
+candidate-build failures remain interface errors. The result contains
+authoritative totals and bounded warning and error samples. Any later source
+or SQL change requires validation again.
 
-The progress callback reports a stage plus optional row counts and SQL
-statement indexes. Stages cover input preparation, SQL execution, staging,
-name normalization, candidate taxa and names, taxonomy validation, and the
-terminal validation result. Missing counts mean that only the stage is known;
-they do not represent a percentage.
+The progress callback reports stable stages for input preparation, SQL
+execution, staging finalization, staging fingerprinting, staging integrity and
+schema checks, name normalization, staging taxonomy validation, candidate taxa
+and name construction, candidate database validation, and the terminal
+validation result. During SQL execution, `current` is the active one-based
+statement index and `total` is the number of executable statements.
+Fingerprinting uses the staging file size and bytes read. Name work uses name
+counts, and candidate taxa report their final taxon count after the bulk insert.
+Missing counts mean that only the active stage is known; they do not represent a
+percentage.
 
 `apply_sql_import` accepts only the latest successfully validated candidate.
+Its progress callback reports candidate validation, staging fingerprint bytes,
+and applying immediately before taxonomy replacement.
 Successful replacement assigns a new taxonomy identity, clears taxonomy
 history, and marks every registered photo library for a full remap. It removes
 staging, candidate, and validation artifacts while retaining inputs and SQL.
@@ -392,25 +465,27 @@ visible table or view with its columns.
 | `get_taxonomy_import_metadata` | none | `Option<TaxonomyImportMetadata>` |
 | `inspect_direct_import_database` | `source_path: &Path` | `DirectImportDatabase` |
 | `apply_direct_import` | `source_path: &Path` | `TaxonomyImportResult` |
+| `apply_direct_import_with_progress_and_cancellation` | `source_path: &Path`, `progress: &mut FnMut(OperationProgress)`, `cancellation: &CancellationToken` | `TaxonomyImportResult` |
 
 The supplied SQLite file must contain valid `taxa` and `taxon_names` data
 using the current schema. Imported names pass through the shared canonical
-normalizer. `inspect_direct_import_database` validates the file, rejects the
-active taxonomy database as an input, and returns its canonical path and
-schema without changing application data. `apply_direct_import` repeats
-validation so a file changed after inspection cannot bypass the checks.
+normalizer and must be unique within each taxon's scientific, Chinese, and
+English name families. `inspect_direct_import_database` validates the file,
+rejects the active taxonomy database as an input, and returns its canonical
+path and schema without changing application data. `apply_direct_import`
+repeats validation so a file changed after inspection cannot bypass the
+checks.
 Successful replacement creates a new taxonomy identity, clears
 taxonomy user history, and causes every registered photo library to rebuild
 mapping state when synchronized. Immediate synchronization and mapping of the
 active photo library are best-effort follow-up work; no active library or an
 unavailable library does not change a successful replacement result.
 
-The desktop `inspect_direct_import_database` command accepts
-`source_path: String`, runs on a blocking worker, and returns
-`DirectImportDatabase` directly. The desktop `apply_direct_import` command
-accepts `source_path: String` and returns a `direct_import` `OperationState`.
-It validates and replaces the database on a blocking worker, returns validation
-or file failures through the completed operation error, and schedules
+The desktop Direct Import inspection and apply commands accept
+`source_path: String` and return `direct_import` operation handles. Inspection
+completes with `DirectImportDatabase`. Apply reports validation and applying at
+the core operation boundaries, completes with `TaxonomyImportResult`, returns
+validation or file failures through the operation error, and schedules
 taxonomy/photo synchronization only after replacement commits.
 
 ## Photo-library synchronization
@@ -442,6 +517,7 @@ The taxonomy module exports the common interfaces below:
 | --- | --- | --- |
 | `list_operations` | `cursor: Option<&str>`, `limit: usize` | `OperationPage<OperationSummary>` |
 | `list_operation_audit` | `operation_id: i64`, `cursor: Option<&str>`, `limit: usize` | `OperationPage<OperationAuditRow>` |
+| `get_operation_input` | `operation_id: i64` | `Option<OperationInput>` |
 | `write_operation_audit` | `operation_id: i64`, `writer: &mut W` where `W: Write` | `()` |
 | `write_operations_audit` | `operation_ids: &[i64]`, `writer: &mut W` where `W: Write` | `()` |
 | `write_all_operation_audit` | `writer: &mut W` where `W: Write` | `()` |
@@ -457,8 +533,11 @@ Taxonomy adds formatted input export:
 
 Selected input export fails if any requested operation has no formatted input;
 it never silently skips unsupported operations. Successful rollback applies
-the reverse changeset, records pending photo-library synchronization, and
-deletes the original operation. Desktop history pagination, rollback, audit
+the reverse changeset atomically, verifies foreign-key integrity and taxonomy
+validity, records pending photo-library synchronization, and deletes the
+original operation with its audit, changeset, and input records. A conflict
+leaves both taxonomy and operation records unchanged. Desktop history
+pagination, rollback, audit
 export, and formatted-input export execute database and file work on blocking
 workers and resolve asynchronously. Desktop audit and formatted-input export
 commands accept an absolute destination path and write the CSV after the caller

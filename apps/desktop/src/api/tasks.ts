@@ -5,8 +5,7 @@ export type OperationProgress = {
   stage: string;
   current: number | null;
   total: number | null;
-  statement_index: number | null;
-  statement_total: number | null;
+  unit: "items" | "files" | "photos" | "names" | "taxa" | "bytes" | "statements" | null;
 };
 
 export type OperationState = {
@@ -16,13 +15,8 @@ export type OperationState = {
   task_scope: string | null;
   state: "queued" | "running" | "completed" | "failed";
   operation: string | null;
-  running: boolean;
   started_at: string | null;
   finished_at: string | null;
-  message: string;
-  completed: number;
-  processed: number;
-  total: number | null;
   progress: OperationProgress | null;
   result: unknown;
   error: string | null;
@@ -30,7 +24,7 @@ export type OperationState = {
 
 export type OperationsStatus = Record<string, OperationState>;
 
-export function demoOperation(module: string, message: string): OperationState {
+export function demoOperation(module: string, _message: string): OperationState {
   return {
     module,
     task_id: null,
@@ -38,16 +32,23 @@ export function demoOperation(module: string, message: string): OperationState {
     task_scope: null,
     state: "completed",
     operation: null,
-    running: false,
     started_at: null,
     finished_at: null,
-    message,
-    completed: 0,
-    processed: 0,
-    total: null,
     progress: null,
     result: null,
     error: null,
+  };
+}
+
+export function demoCompletedOperation(
+  module: string,
+  operation: string,
+  result: unknown,
+): OperationState {
+  return {
+    ...demoOperation(module, "Complete"),
+    operation,
+    result,
   };
 }
 
@@ -55,17 +56,16 @@ export const getOperationsStatus = () =>
   call<OperationsStatus>("get_operations_status", undefined, () => ({}));
 
 export async function waitForOperation(
-  module: string,
-  taskId: string | null,
+  taskId: string,
   onChange?: (operation: OperationState) => void,
 ): Promise<OperationState> {
-  if (!taskId) return demoOperation(module, "Complete");
   while (true) {
     const operation = operationByTaskId(await getOperationsStatus(), taskId);
-    if (operation) onChange?.(operation);
-    if (!operation || operation.task_id !== taskId || !["queued", "running"].includes(operation.state)) {
-      return operation ?? demoOperation(module, "Complete");
+    if (!operation || operation.task_id !== taskId) {
+      throw new Error(`Background task ${taskId} is unavailable`);
     }
+    onChange?.(operation);
+    if (!["queued", "running"].includes(operation.state)) return operation;
     await new Promise((resolve) => window.setTimeout(resolve, 250));
   }
 }

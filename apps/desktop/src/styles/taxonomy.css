@@ -10,10 +10,12 @@
 .taxon-card:hover { background: var(--hover); }
 .taxon-card.clickable:active { background: var(--active); filter: brightness(.94); transform: translateY(1px) scale(.98); }
 .taxon-card-main { display: flex; min-width: 0; flex: 1; flex-direction: column; align-items: flex-start; justify-content: center; padding: 8px 10px; overflow: hidden; border: 0; text-align: left; background: transparent; }
-.taxon-card-main:hover:not(:disabled), .taxon-card-main:active:not(:disabled) { background: transparent; filter: none; transform: none; }
-.taxon-card-main strong, .taxon-card-main > span:last-of-type { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.taxon-card-main > span:last-of-type { color: var(--muted); }
-.taxon-card-main .taxon-card-description { max-width: 100%; overflow: hidden; color: var(--accent-bright); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.taxon-card.compact .taxon-card-main { padding-block: 4px; }
+.taxon-card-main:hover, .taxon-card-main:active { background: transparent; filter: none; transform: none; }
+.taxon-card-main strong, .taxon-card-common-names { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.taxon-card-common-names { color: var(--muted); }
+.taxon-card-match-explanations { display: grid; max-width: 100%; color: var(--accent-bright); font-size: 10px; }
+.taxon-card-match-explanations small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .taxon-card-actions { display: flex; align-items: center; padding: 5px; }
 .taxon-rank { color: var(--accent-bright); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .two-line-heading { display: flex; min-width: 0; flex-direction: column; justify-content: center; gap: 3px; padding: 7px 12px; border-bottom: 1px solid var(--line); }
@@ -36,7 +38,6 @@
 }
 .taxonomy-columns { min-height: 0; }
 .taxonomy-results { position: relative; height: 100%; min-height: 0; }
-.taxonomy-results .taxon-card { height: 100%; }
 .taxonomy-results .taxon-card-main { padding-block: 4px; }
 .taxonomy-results-loading { position: absolute; right: 8px; bottom: 8px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--popover); box-shadow: 0 4px 16px var(--shadow); }
 .taxonomy-records { width: 100%; height: 100%; min-height: 0; }
@@ -117,7 +118,7 @@
 .log-row { display: grid; height: 100%; grid-template-columns: 36px minmax(160px, 30%) minmax(0, 1fr); align-items: center; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line); }
 .log-row > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .log-row span { color: var(--muted); }
-.log-row code { overflow: hidden; color: #b6b6b6; text-overflow: ellipsis; white-space: nowrap; }
+.log-row code { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .file-button { position: relative; overflow: hidden; }
 .file-button.disabled { opacity: .55; pointer-events: none; }
 .file-button input { position: absolute; inset: 0; opacity: 0; }
@@ -189,22 +190,25 @@
 .custom-sql-editor .code-editor, .sql-import-editor .code-editor { width: 100%; height: 100%; }
 .sql-workbench-primary { display: grid; width: 100%; height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr) auto; }
 .sql-output-split { min-height: 0; }
-.sql-results { min-height: 0; overflow: auto; }
-.sql-result-summary { display: flex; min-height: 38px; align-items: center; gap: 14px; padding: 5px 9px; border-bottom: 1px solid var(--line); }
-.sql-result-summary button { margin-left: auto; }
+.sql-results { width: 100%; height: 100%; min-height: 0; overflow: auto; }
 .sql-message { margin: 0; padding: 5px 9px; color: var(--muted); border-bottom: 1px solid var(--line); }
-.sql-result-set { height: min(320px, 42vh); border-bottom: 1px solid var(--line); }
-.sql-result-set > header { display: flex; height: 34px; align-items: center; justify-content: space-between; padding: 0 9px; }
-.sql-result-header, .sql-result-row { display: grid; min-width: max-content; }
+.sql-result-set { border-bottom: 1px solid var(--line); }
+.sql-result-set-header { display: flex; height: 34px; align-items: center; gap: 9px; padding: 0 9px; }
+.sql-result-set-header button { margin-left: auto; }
+.sql-result-scroll { width: 100%; height: calc(100% - 34px); overflow-x: auto; overflow-y: hidden; }
+.sql-result-table { width: 100%; height: 100%; }
+.sql-result-header, .sql-result-row { display: grid; width: 100%; min-width: 0; }
 .sql-result-header { height: 34px; border-block: 1px solid var(--line); background: var(--panel-2); }
-.sql-result-header span, .sql-result-row code { min-width: 130px; padding: 7px 8px; overflow: hidden; border-right: 1px solid var(--line); text-overflow: ellipsis; white-space: nowrap; }
+.sql-result-header span, .sql-result-row code { min-width: 0; padding: 7px 8px; overflow: hidden; border-right: 1px solid var(--line); text-overflow: ellipsis; white-space: nowrap; }
 .sql-result-header span { display: flex; justify-content: space-between; font-weight: 600; }
 .sql-result-header i { color: var(--quiet); font-style: normal; font-weight: 400; }
-.sql-result-rows { height: calc(100% - 68px); }
+.sql-result-rows { height: calc(100% - 34px); overflow-x: hidden; overflow-y: auto; }
 .sql-result-row { height: 32px; }
 .sql-result-row:nth-child(2n) { background: var(--panel); }
 
 .sql-import-settings { overflow: hidden; }
+.sql-import-settings.inactive { display: none; }
+.direct-import-settings.inactive { display: none; }
 .sql-import-metadata-grid { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 1px; background: var(--line); }
 .sql-import-metadata-grid > div { display: grid; gap: 4px; padding: 9px; overflow: hidden; background: var(--panel); }
 .sql-import-metadata-grid span { color: var(--muted); }
@@ -214,7 +218,8 @@
 .sql-import-progress { display: flex; min-height: 34px; align-items: center; gap: 8px; padding: 6px 9px; border-top: 1px solid var(--line); background: var(--panel-2); }
 .sql-import-progress span { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 .direct-import-settings { display: grid; height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr) auto; }
-.direct-import-description { display: grid; align-self: start; gap: 8px; margin: 16px 12px; padding: 14px; border: 1px solid var(--line); background: var(--panel); }
+.direct-import-description { display: grid; align-self: start; gap: 0; margin: 16px 12px; padding: 14px; border: 1px solid var(--line); background: var(--panel); }
+.direct-import-description > * + * { margin-top: 8px; }
 .direct-import-description p { margin: 0; color: var(--muted); line-height: 1.5; }
 .direct-import-source-list { min-height: 0; margin: 12px; overflow: auto; border: 1px solid var(--line); }
 .direct-import-source-list .sql-source-card > code { overflow-wrap: anywhere; text-overflow: initial; white-space: normal; }
@@ -224,8 +229,10 @@
 .validation-counts { display: flex; flex-wrap: wrap; gap: 8px; padding: 7px; border-bottom: 1px solid var(--line); }
 .validation-counts span { padding: 3px 6px; border-radius: 3px; background: var(--panel-2); }
 .validation-issues { min-height: 110px; }
-.validation-issue { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 8px; padding: 8px; border-bottom: 1px solid var(--line); }
-.validation-issue code { color: var(--muted); }
+.validation-issue { display: grid; width: 100%; height: 100%; min-width: 0; box-sizing: border-box; grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; padding: 3px 8px 4px; border-bottom: 1px solid var(--line); }
+.validation-issue-message,
+.validation-issue-context { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 17px; }
+.validation-issue-context { color: var(--muted); }
 
 @media (max-width: 1050px) {
   .sql-import-metadata-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }

@@ -1,6 +1,6 @@
 # Building and Releasing Vividarium
 
-This guide describes the complete release process for Vividarium `v3.0.0`.
+This guide describes the Vividarium desktop release process.
 
 ## Release Matrix
 
@@ -87,14 +87,16 @@ The macOS configuration uses `signingIdentity: "-"`. This creates an ad-hoc sign
 From the repository root:
 
 ```bash
+VERSION=$(node -p "require('./apps/desktop/package.json').version")
+
 codesign --verify --deep --strict --verbose=2 \
   target/aarch64-apple-darwin/release/bundle/macos/Vividarium.app
 
 hdiutil verify \
-  target/aarch64-apple-darwin/release/bundle/dmg/Vividarium_3.0.0_aarch64.dmg
+  "target/aarch64-apple-darwin/release/bundle/dmg/Vividarium_${VERSION}_aarch64.dmg"
 
 shasum -a 256 \
-  target/aarch64-apple-darwin/release/bundle/dmg/Vividarium_3.0.0_aarch64.dmg
+  "target/aarch64-apple-darwin/release/bundle/dmg/Vividarium_${VERSION}_aarch64.dmg"
 ```
 
 Gatekeeper assessment is expected to reject this private build because it is not notarized.
@@ -143,7 +145,8 @@ The installer uses the WebView2 download bootstrapper. If WebView2 is absent, in
 ### Verify
 
 ```powershell
-$Installer = "target\x86_64-pc-windows-msvc\release\bundle\nsis\Vividarium_3.0.0_x64-setup.exe"
+$Version = (Get-Content apps\desktop\package.json | ConvertFrom-Json).version
+$Installer = "target\x86_64-pc-windows-msvc\release\bundle\nsis\Vividarium_${Version}_x64-setup.exe"
 
 Get-FileHash $Installer -Algorithm SHA256
 Get-AuthenticodeSignature $Installer
@@ -155,7 +158,7 @@ Test the installer on a clean Windows 10 or Windows 11 virtual machine with no R
 
 ### Install on another Windows computer
 
-1. Run `Vividarium_3.0.0_x64-setup.exe`.
+1. Run `Vividarium_<version>_x64-setup.exe`.
 2. If SmartScreen appears, select More info.
 3. Select Run anyway.
 4. Allow the installer to download WebView2 if requested.
@@ -190,7 +193,9 @@ Tauri reads its application version from `apps/desktop/package.json`.
 Run the release checks:
 
 ```bash
+cargo fmt --all -- --check
 cargo test --workspace --locked
+node scripts/check-release-version.mjs v$(node -p "require('./apps/desktop/package.json').version")
 
 cd apps/desktop
 npm ci
@@ -205,14 +210,28 @@ updater signing secrets are non-empty before compiling the application.
 Create and push the release tag:
 
 ```bash
-git tag -a v3.0.0 -m "Vividarium v3.0.0"
-git push origin v3.0.0
+VERSION=$(node -p "require('./apps/desktop/package.json').version")
+git tag -a "v${VERSION}" -m "Vividarium v${VERSION}"
+git push origin "v${VERSION}"
 ```
 
-The workflow creates the `v3.0.0` GitHub release and uploads:
+Before pushing the tag, confirm:
 
-- `Vividarium_3.0.0_aarch64.dmg`
-- `Vividarium_3.0.0_x64-setup.exe`
+- [ ] Cargo tests pass.
+- [ ] Desktop tests pass.
+- [ ] The production frontend build passes.
+- [ ] Package, Cargo, and tag versions match.
+- [ ] Updater signing secrets are configured and the public key is unchanged.
+- [ ] Schema-v2 migration tests pass.
+- [ ] macOS and Windows packages are produced.
+- [ ] `latest.json` contains signed macOS and Windows updater entries.
+- [ ] The release remains draft until release asset validation passes.
+
+The workflow creates a draft GitHub release, validates its complete updater
+manifest and both platform artifacts, then publishes it. It uploads:
+
+- `Vividarium_<version>_aarch64.dmg`
+- `Vividarium_<version>_x64-setup.exe`
 - Signed updater artifacts and signature files
 - `latest.json`, which the installed application uses to discover updates
 

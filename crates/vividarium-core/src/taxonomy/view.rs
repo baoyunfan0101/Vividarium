@@ -34,6 +34,19 @@ pub struct TaxonSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonDisplayItem {
+    pub taxon_id: i64,
+    pub rank: TaxonRank,
+    pub names: TaxonDisplayNames,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaxonDisplaySummary {
+    pub current_rank: TaxonRank,
+    pub items: Vec<TaxonDisplayItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaxonChild {
     pub taxon_id: i64,
     pub rank: TaxonRank,
@@ -72,6 +85,13 @@ pub fn get_taxon_summary(database: &Database, taxon_id: i64) -> CoreResult<Optio
     load_taxon_summary(&database.connect_taxonomy_metadata_context()?, taxon_id)
 }
 
+pub fn get_taxon_display_summary(
+    database: &Database,
+    taxon_id: i64,
+) -> CoreResult<Option<TaxonDisplaySummary>> {
+    load_taxon_display_summary(&database.connect_taxonomy_metadata_context()?, taxon_id)
+}
+
 pub fn get_taxon_detail(database: &Database, taxon_id: i64) -> CoreResult<Option<TaxonDetail>> {
     load_taxon_detail(&database.connect_taxonomy_metadata_context()?, taxon_id)
 }
@@ -104,6 +124,73 @@ pub(super) fn load_taxon_summary(
         rank,
         breadcrumb,
         names,
+    }))
+}
+
+pub(crate) fn load_taxon_display_summary(
+    connection: &Connection,
+    taxon_id: i64,
+) -> CoreResult<Option<TaxonDisplaySummary>> {
+    let mut statement = connection.prepare(
+        r#"
+        WITH RECURSIVE lineage(taxon_id, rank, parent_taxon_id) AS (
+            SELECT taxon_id, rank, parent_taxon_id
+            FROM taxa
+            WHERE taxon_id = ?1
+            UNION
+            SELECT parent.taxon_id, parent.rank, parent.parent_taxon_id
+            FROM taxa parent
+            JOIN lineage child ON child.parent_taxon_id = parent.taxon_id
+        ),
+        current AS (
+            SELECT rank FROM lineage WHERE taxon_id = ?1
+        )
+        SELECT
+            lineage.taxon_id,
+            lineage.rank,
+            current.rank,
+            MAX(CASE WHEN taxon_names.name_type = 1 THEN taxon_names.name END),
+            MAX(CASE WHEN taxon_names.name_type = 3 THEN taxon_names.name END),
+            MAX(CASE WHEN taxon_names.name_type = 5 THEN taxon_names.name END)
+        FROM lineage
+        CROSS JOIN current
+        LEFT JOIN taxon_names
+          ON taxon_names.taxon_id = lineage.taxon_id
+         AND taxon_names.name_type IN (1, 3, 5)
+        WHERE lineage.taxon_id = ?1
+           OR (current.rank >= 3 AND lineage.rank >= 3)
+        GROUP BY lineage.taxon_id, lineage.rank, current.rank
+        ORDER BY lineage.rank, lineage.taxon_id
+        "#,
+    )?;
+    let rows = statement.query_map([taxon_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut current_rank = None;
+    let mut items = Vec::new();
+    for row in rows {
+        let (item_taxon_id, rank, current, sci_name, zh_name, en_name) = row?;
+        current_rank = Some(TaxonRank::from_code(current)?);
+        items.push(TaxonDisplayItem {
+            taxon_id: item_taxon_id,
+            rank: TaxonRank::from_code(rank)?,
+            names: TaxonDisplayNames {
+                sci_name,
+                zh_name,
+                en_name,
+            },
+        });
+    }
+    Ok(current_rank.map(|current_rank| TaxonDisplaySummary {
+        current_rank,
+        items,
     }))
 }
 
@@ -416,6 +503,39 @@ mod tests {
         assert_eq!(detail.names.zh_aliases[0].name_id, 7);
         assert_eq!(detail.names.en_name.unwrap().name_id, 8);
         assert_eq!(detail.names.en_aliases[0].name_id, 9);
+    }
+
+    #[test]
+    fn display_summary_returns_only_family_through_the_current_rank() {
+        let (_directory, database) = database();
+
+        for (taxon_id, expected) in [
+            (
+                4,
+                vec![
+                    (2, TaxonRank::Family),
+                    (3, TaxonRank::Genus),
+                    (4, TaxonRank::Species),
+                ],
+            ),
+            (3, vec![(2, TaxonRank::Family), (3, TaxonRank::Genus)]),
+            (2, vec![(2, TaxonRank::Family)]),
+            (1, vec![(1, TaxonRank::Kingdom)]),
+        ] {
+            let summary = get_taxon_display_summary(&database, taxon_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                summary
+                    .items
+                    .iter()
+                    .map(|item| (item.taxon_id, item.rank))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(summary.current_rank, summary.items.last().unwrap().rank);
+        }
+        assert!(get_taxon_display_summary(&database, 404).unwrap().is_none());
     }
 
     #[test]

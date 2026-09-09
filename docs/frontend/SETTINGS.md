@@ -20,8 +20,14 @@ through one settings workbench.
 | `generalSettings` | `GeneralSettings` | Current application-wide settings. |
 | `onGeneralSettingsChange` | `(settings) => void` | Applies a committed General settings value to the application. |
 | `generalSettingsLoadError` | optional string | Reports a load failure while the default settings remain usable. |
+| `onStatus` | `(message) => void` | Reports transient feedback through the owning tab status bar. |
 
 Returns the complete Settings workbench.
+
+Ordinary Settings save automatically. Selection, checkbox, and priority
+controls save when changed. Text and numeric preferences save when editing is
+completed with blur or Enter. Persistent load, validation, and save errors
+remain inline; transient progress and success feedback use the tab status bar.
 
 `SettingsSection` includes General, Storage, Photo Libraries, Taxonomy
 Databases, SQL Import, Direct Import, Naming, Map, Filename Parser, Synonym
@@ -35,8 +41,15 @@ Reads and updates the application theme, workspace-tab restoration preference,
 recent-search limit, and global CSV delimiter. The delimiter choices are comma,
 semicolon, tab, and pipe; comma is the default. It controls formatted-update
 templates and imports, SQL CSV sources and exports, and every history CSV
-export. Changes are persisted immediately; there is no page-level Save action.
-Recent-search contents remain in browser-local storage.
+export. Selection and checkbox changes are persisted immediately; there is no
+page-level Save action. The recent-search limit uses a local draft and saves a
+validated integer from 1 through 50 on blur or Enter. Recent-search contents
+remain in browser-local storage.
+
+Visible taxon names are configured independently for Photos and Taxonomy.
+Each context can show scientific, Chinese, and English accepted names. Photos
+controls photo taxonomy rows, breadcrumbs, and current-photo summaries;
+Taxonomy controls hierarchy breadcrumbs, headings, and child navigation.
 
 ### Storage
 
@@ -90,12 +103,17 @@ resources and schedules every registered Photo Library for remapping.
 
 Edits the six-field mapping priority, mapped-photo filename fields, and the
 formatted-input multiple-name separator. Each value remains visible with a
-usable default if loading fails.
+usable default if loading fails. Priority and filename-field changes save
+immediately. The separator saves on blur or Enter. Changing mapping priority
+does not remap existing photos, and changing filename format does not rename
+existing files; both settings apply to later explicit mapping, remapping, or
+rename actions.
 
 ### Map
 
 Edits the tile provider and provider token. The token is editable only for
-Tianditu; selecting another provider preserves the stored Tianditu value.
+Tianditu; selecting another provider preserves the stored Tianditu value. The
+provider saves when selected, while the token saves on blur or Enter.
 
 ### Filename Parser and Synonym Splitter
 
@@ -103,9 +121,10 @@ Each Hook page edits one Rhai source and its ordered project tests. Tests are
 numbered by array position and contain raw input, expected output, actual
 output, and pass or failure state.
 
-`Test` runs the current unsaved source and tests without persistence. `Save`
-is enabled only after every test passes and the source and tests remain
-unchanged. Saving persists the source and tests atomically.
+`Test` captures and runs the current source and project tests. A failing report
+is not saved. A passing report automatically saves exactly the tested snapshot,
+including its test cases. Edits made while testing remain a separate untested
+draft.
 
 ### About
 

@@ -7,6 +7,7 @@ import {
   exportTaxonomyOperationInput,
   exportTaxonomyOperationsAudit,
   exportTaxonomyOperationsInput,
+  getTaxonomyOperationInput,
   listPhotoOperationAudit,
   listPhotoOperationSummaries,
   listTaxonomyOperationAudit,
@@ -14,6 +15,7 @@ import {
   rollbackPhotoOperation,
   rollbackTaxonomyOperation,
   type OperationAuditRow,
+  type OperationInput,
   type OperationSummary,
 } from "../../api/operations";
 import { errorMessage } from "../../api/common";
@@ -32,8 +34,25 @@ import {
   getRollbackOrder,
   getSelectedOperations,
 } from "./historySelection";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 type HistoryDomain = "photo" | "taxonomy";
+
+const FORMATTED_INPUT_COLUMNS = [
+  "kingdom",
+  "order",
+  "family",
+  "genus",
+  "species",
+  "authority_year",
+  "synonyms",
+  "zh_name",
+  "zh_alias",
+  "en_name",
+  "en_alias",
+  "geological_range",
+  "source",
+] as const;
 
 export function OperationHistoryView({
   domain,
@@ -244,10 +263,20 @@ export function OperationHistoryView({
                       onChange={(event) => toggleOperation(item.operation_id, event.target.checked)}
                     />
                   </label>
-                  <button
-                    className="operation-summary-main"
-                    type="button"
-                    onClick={() => setSelectedOperationId(item.operation_id)}
+                  <div
+                    className="operation-summary-main selectable-content"
+                    role="button"
+                    tabIndex={0}
+                    onClick={(event) => {
+                      if (!selectionIntersectsElement(event.currentTarget)) {
+                        setSelectedOperationId(item.operation_id);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      setSelectedOperationId(item.operation_id);
+                    }}
                   >
                     <strong>{item.kind} #{item.operation_id}</strong>
                     <span>{item.applied_at}</span>
@@ -256,7 +285,7 @@ export function OperationHistoryView({
                       {item.total_items} total / {item.succeeded_items} succeeded / {item.failed_items} failed
                     </span>
                     <span>{item.rollbackable ? "Rollbackable" : "Audit only"}</span>
-                  </button>
+                  </div>
                 </article>
               );
             }}
@@ -350,6 +379,9 @@ function OperationAuditDetail({
 }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [operationInput, setOperationInput] = useState<OperationInput | null>(null);
+  const [inputLoading, setInputLoading] = useState(domain === "taxonomy");
+  const [inputError, setInputError] = useState("");
   const audit = useCursorPage<OperationAuditRow, { domain: HistoryDomain; operationId: number }>({
     params: { domain, operationId: operation.operation_id },
     resetKey: `${domain}:${operation.operation_id}`,
@@ -358,6 +390,30 @@ function OperationAuditDetail({
       ? listPhotoOperationAudit(params.operationId, cursor)
       : listTaxonomyOperationAudit(params.operationId, cursor),
   });
+
+  useEffect(() => {
+    let active = true;
+    if (domain !== "taxonomy") {
+      setOperationInput(null);
+      setInputLoading(false);
+      setInputError("");
+      return () => { active = false; };
+    }
+    setOperationInput(null);
+    setInputLoading(true);
+    setInputError("");
+    void getTaxonomyOperationInput(operation.operation_id)
+      .then((input) => {
+        if (active) setOperationInput(input);
+      })
+      .catch((nextError) => {
+        if (active) setInputError(errorMessage(nextError));
+      })
+      .finally(() => {
+        if (active) setInputLoading(false);
+      });
+    return () => { active = false; };
+  }, [domain, operation.operation_id]);
 
   async function exportAudit() {
     const destination = await selectCsvDestination(
@@ -443,15 +499,23 @@ function OperationAuditDetail({
         />
       </header>
       <div className="history-body">
-        {(error || audit.error) && (
-          <div className="inline-error" role="alert">{error || audit.error}</div>
+        {(error || inputError || audit.error) && (
+          <div className="inline-error" role="alert">{error || inputError || audit.error}</div>
         )}
-        {audit.items.length === 0 && !audit.loading ? (
-          <EmptyState title="No audit rows" detail="This operation has no audit details." />
-        ) : (
-          <div className="history-audit-scroll">
-            {audit.items.map((item) => (
-              <AuditRow key={`${item.operation_id}:${item.sequence}`} row={item} />
+        <div className="history-audit-scroll">
+          {domain === "taxonomy" && (
+            <OperationInputSection input={operationInput} loading={inputLoading} />
+          )}
+          <section className="history-detail-section history-changes-section">
+            <h2>Changes</h2>
+            {audit.items.length === 0 && !audit.loading ? (
+              <EmptyState title="No audit rows" detail="This operation has no audit details." />
+            ) : audit.items.map((item) => (
+              <AuditRow
+                key={`${item.operation_id}:${item.sequence}`}
+                hideJson={operation.source === "custom_sql"}
+                row={item}
+              />
             ))}
             {audit.loading && <div className="history-load-status">Loading audit rows...</div>}
             {audit.hasMore && !audit.loading && (
@@ -459,22 +523,98 @@ function OperationAuditDetail({
                 <Button onClick={() => void audit.loadMore()}>Load more</Button>
               </div>
             )}
-          </div>
-        )}
+          </section>
+        </div>
       </div>
     </div>
   );
 }
 
-function AuditRow({ row }: { row: OperationAuditRow }) {
+function OperationInputSection({
+  input,
+  loading,
+}: {
+  input: OperationInput | null;
+  loading: boolean;
+}) {
+  return (
+    <section className="history-detail-section history-input-section">
+      <h2>Input</h2>
+      {loading ? (
+        <div className="history-input-unavailable">Loading operation input...</div>
+      ) : input === null ? (
+        <div className="history-input-unavailable">
+          Input is not available for this historical operation.
+        </div>
+      ) : input.kind === "custom_sql" ? (
+        <CodeEditor
+          ariaLabel="Custom SQL operation input"
+          className="history-input-sql"
+          language="sql"
+          onChange={() => undefined}
+          readOnly
+          value={input.sql}
+        />
+      ) : input.kind === "formatted_update" ? (
+        <div className="history-input-table-scroll">
+          <table className="history-input-table">
+            <thead>
+              <tr>{FORMATTED_INPUT_COLUMNS.map((column) => <th key={column}>{column}</th>)}</tr>
+            </thead>
+            <tbody>
+              {input.rows.map((row, index) => (
+                <tr key={index}>
+                  {FORMATTED_INPUT_COLUMNS.map((column) => (
+                    <td key={column}>{formatOperationInputValue(row[column])}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="history-action-input">
+          <strong>{formatOperationInputLabel(input.action)}</strong>
+          <dl>
+            {Object.entries(input.input).map(([label, value]) => (
+              <div key={label}>
+                <dt>{formatOperationInputLabel(label)}</dt>
+                <dd>{formatOperationInputValue(value)}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function formatOperationInputLabel(value: string): string {
+  return value.replace(/_/g, " ").replace(/^./, (character: string) => character.toUpperCase());
+}
+
+function formatOperationInputValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return value.map(formatOperationInputValue).join("; ");
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([label, nested]) => `${formatOperationInputLabel(label)}: ${formatOperationInputValue(nested)}`)
+      .join(", ");
+  }
+  return String(value);
+}
+
+function AuditRow({ row, hideJson = false }: { row: OperationAuditRow; hideJson?: boolean }) {
   return (
     <article className={`audit-row${row.succeeded ? "" : " failed"}`}>
       <header>
         <b>#{row.sequence}</b>
-        <strong>{row.entity_type} / {row.action}</strong>
+        <strong>
+          {row.entity_type}{row.entity_id ? ` ${row.entity_id}` : ""} / {row.action}
+        </strong>
         <span>{row.message || "-"}</span>
       </header>
-      <div className="audit-json-grid">
+      {!hideJson && <div className="audit-json-grid">
         <section>
           <b>Before</b>
           <CodeEditor
@@ -501,7 +641,7 @@ function AuditRow({ row }: { row: OperationAuditRow }) {
             value={formatAuditJson(row.after_json)}
           />
         </section>
-      </div>
+      </div>}
     </article>
   );
 }

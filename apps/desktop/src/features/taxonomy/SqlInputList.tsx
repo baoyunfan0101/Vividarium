@@ -151,9 +151,8 @@ export function SqlInputList({
       {pending && (
         <Modal
           title={`Add ${pending.kind === "sqlite" ? "SQLite" : "CSV"} input`}
-          onClose={() => {
-            if (!adding) setPending(null);
-          }}
+          dismissible={!adding}
+          onClose={() => setPending(null)}
           actions={(
             <>
               <Button disabled={adding} onClick={() => setPending(null)}>Cancel</Button>

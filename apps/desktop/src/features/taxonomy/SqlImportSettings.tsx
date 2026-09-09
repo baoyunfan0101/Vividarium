@@ -15,7 +15,7 @@ import {
 import type { TaxonomyImportResult } from "../../api/taxonomyImport";
 import type { PersistentSqlInput, SqlSourceSchema } from "../../api/customSql";
 import { errorMessage } from "../../api/common";
-import { waitForOperation } from "../../api/tasks";
+import { waitForOperation, type OperationState } from "../../api/tasks";
 import { CodeEditor } from "../../shared/CodeEditor";
 import { ResizablePanels } from "../../shared/ResizablePanels";
 import { Button, Modal, SectionHeader, VirtualList } from "../../shared/ui";
@@ -23,9 +23,22 @@ import { SqlInputList } from "./SqlInputList";
 import { SqlEnumHelpModal } from "./TaxonomyHelpModal";
 import { emitTaxonomyMutation } from "./taxonomyMutations";
 import { formatTaxonomyImportApplyMessage } from "./taxonomyImportMessages";
+import {
+  SQL_IMPORT_VALIDATION_ISSUE_ROW_HEIGHT,
+  sqlImportValidationIssueRow,
+} from "./sqlImportValidation";
 import { resolveSqlWorkbenchLoads } from "./sqlWorkbenchLoading";
+import { sqlOperationProgress } from "./sqlOperationProgress";
 
-export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
+export function SqlImportSettings({
+  active = true,
+  onApplied,
+  taskOwnerId,
+}: {
+  active?: boolean;
+  onApplied?: () => void;
+  taskOwnerId: string;
+}) {
   const [inputs, setInputs] = useState<PersistentSqlInput[]>([]);
   const [databaseSchemas, setDatabaseSchemas] = useState<SqlSourceSchema[]>([]);
   const [stagingSchemas, setStagingSchemas] = useState<SqlSourceSchema[]>([]);
@@ -37,6 +50,7 @@ export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
   const [error, setError] = useState("");
   const [loadingWorkbench, setLoadingWorkbench] = useState(true);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [operation, setOperation] = useState<OperationState | null>(null);
 
   useEffect(() => {
     void Promise.allSettled([
@@ -80,10 +94,12 @@ export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
     setMessage("");
     setError("");
     setValidation(null);
+    setOperation(null);
     try {
-      const started = await startSqlImportValidation(sql);
+      const started = await startSqlImportValidation(sql, taskOwnerId);
+      setOperation(started);
       const completed = started.task_id
-        ? await waitForOperation("sql_import", started.task_id)
+        ? await waitForOperation(started.task_id, setOperation)
         : started;
       if (completed.error) throw new Error(completed.error);
       const result = completed.result as ValidateSqlImportResult | null;
@@ -107,6 +123,7 @@ export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
       setError(errorMessage(nextError));
     } finally {
       setBusy("");
+      setOperation(null);
     }
   }
 
@@ -115,8 +132,10 @@ export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
     setMessage("");
     setError("");
     try {
-      const operation = await applySqlImport();
-      const completed = await waitForOperation(operation.module, operation.task_id);
+      const operation = await applySqlImport(taskOwnerId);
+      const completed = operation.task_id
+        ? await waitForOperation(operation.task_id)
+        : operation;
       if (completed.error) throw new Error(completed.error);
       const result = completed.result as TaxonomyImportResult | null;
       if (!result) throw new Error("SQL import completed without a replacement result");
@@ -176,6 +195,11 @@ export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
       />
       {error ? (
         <div className="inline-error sql-import-status" role="alert">{error}</div>
+      ) : operation && sqlOperationProgress(operation) ? (
+        <div className="sql-import-progress" role="status" aria-live="polite">
+          <LoaderCircle className="spin" size={15} />
+          <strong>{sqlOperationProgress(operation)}</strong>
+        </div>
       ) : loadingWorkbench ? (
         <div className="sql-import-progress" role="status" aria-live="polite">
           <LoaderCircle className="spin" size={15} />
@@ -201,20 +225,23 @@ export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
       <VirtualList
         className="validation-issues"
         items={[...validation.errors, ...validation.warnings]}
-        rowHeight={58}
+        rowHeight={SQL_IMPORT_VALIDATION_ISSUE_ROW_HEIGHT}
         itemKey={(item, index) => `${item.code}:${item.row_identifier}:${index}`}
-        renderItem={(item) => (
-          <div className="validation-issue">
-            <span>{item.message}</span>
-            <code>{issueContext(item)}</code>
-          </div>
-        )}
+        renderItem={(item) => {
+          const row = sqlImportValidationIssueRow(item);
+          return (
+            <div className="validation-issue">
+              <span className="validation-issue-message" title={row.message}>{row.message}</span>
+              <code className="validation-issue-context" title={row.context}>{row.context}</code>
+            </div>
+          );
+        }}
       />
     </div>
   ) : null;
 
   return (
-    <div className="sql-import-settings">
+    <div aria-hidden={!active} className={`sql-import-settings${active ? "" : " inactive"}`}>
       <SectionHeader
         title="SQL Import"
         detail="Build, validate, and apply a replacement taxonomy database."
@@ -247,7 +274,8 @@ export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
       {confirming && (
         <Modal
           title="Apply SQL import"
-          onClose={() => !busy && setConfirming(false)}
+          dismissible={!busy}
+          onClose={() => setConfirming(false)}
           actions={(
             <>
               <Button disabled={Boolean(busy)} onClick={() => setConfirming(false)}>Cancel</Button>
@@ -267,12 +295,4 @@ export function SqlImportSettings({ onApplied }: { onApplied?: () => void }) {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><strong title={value}>{value}</strong></div>;
-}
-
-function issueContext(issue: SqlImportValidationResult["errors"][number]): string {
-  const context = [];
-  if (issue.taxon_id !== null) context.push(`Taxon ${issue.taxon_id}`);
-  if (issue.related_taxon_id !== null) context.push(`Related taxon ${issue.related_taxon_id}`);
-  if (context.length === 0) context.push(...[issue.table, issue.row_identifier].filter(Boolean));
-  return context.join(" / ");
 }

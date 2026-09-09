@@ -3,56 +3,65 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react
 import type { Photo } from "../../api/photos";
 import { IconButton, VirtualGrid } from "../../shared/ui";
 import { PhotoStage, PhotoThumb } from "./PhotoMedia";
+import { isPhotoFullscreenActive } from "./photoFullscreenState";
+import { createPhotoActivationController } from "./photoActivation";
 
 export type PhotoDisplayMode = "thumbnails" | "image";
-const photoDoubleClickDelayMs = 250;
 
 export function usePhotoActivation({
   onSelect,
   onOpenImage,
-  onOpenDetails,
+  onOpenFullscreen,
 }: {
   onSelect: (photo: Photo) => void;
   onOpenImage: (photo: Photo) => void;
-  onOpenDetails: (photo: Photo) => void;
+  onOpenFullscreen: (photo: Photo) => void;
 }) {
-  const singleClickTimer = useRef<number | null>(null);
+  const callbacksRef = useRef({ onSelect, onOpenImage, onOpenFullscreen });
+  callbacksRef.current = { onSelect, onOpenImage, onOpenFullscreen };
+  const activationRef = useRef<ReturnType<typeof createPhotoActivationController> | null>(null);
+  if (activationRef.current === null) {
+    activationRef.current = createPhotoActivationController({
+      onSelect: (photo) => callbacksRef.current.onSelect(photo),
+      onOpenImage: (photo) => callbacksRef.current.onOpenImage(photo),
+      onOpenFullscreen: (photo) => callbacksRef.current.onOpenFullscreen(photo),
+    });
+  }
 
-  useEffect(() => () => {
-    if (singleClickTimer.current !== null) window.clearTimeout(singleClickTimer.current);
-  }, []);
+  useEffect(() => () => activationRef.current?.dispose(), []);
 
-  const clickPhoto = useCallback((photo: Photo) => {
-    onSelect(photo);
-    if (singleClickTimer.current !== null) window.clearTimeout(singleClickTimer.current);
-    singleClickTimer.current = window.setTimeout(() => {
-      singleClickTimer.current = null;
-      onOpenImage(photo);
-    }, photoDoubleClickDelayMs);
-  }, [onOpenImage, onSelect]);
-
-  const doubleClickPhoto = useCallback((photo: Photo) => {
-    if (singleClickTimer.current !== null) {
-      window.clearTimeout(singleClickTimer.current);
-      singleClickTimer.current = null;
-    }
-    onSelect(photo);
-    onOpenDetails(photo);
-  }, [onOpenDetails, onSelect]);
-
-  return { clickPhoto, doubleClickPhoto };
+  return activationRef.current;
 }
 
-export function usePhotoDisplayMode() {
+export function usePhotoDisplayMode({
+  onEscapeToThumbnails,
+  onEnterFullscreen,
+}: {
+  onEscapeToThumbnails?: () => void;
+  onEnterFullscreen?: () => void;
+} = {}) {
   const [mode, setMode] = useState<PhotoDisplayMode>("thumbnails");
   const modeRef = useRef(mode);
+  const onEscapeToThumbnailsRef = useRef(onEscapeToThumbnails);
+  const onEnterFullscreenRef = useRef(onEnterFullscreen);
   modeRef.current = mode;
+  onEscapeToThumbnailsRef.current = onEscapeToThumbnails;
+  onEnterFullscreenRef.current = onEnterFullscreen;
 
   useEffect(() => {
     const returnToThumbnails = (event: KeyboardEvent) => {
+      if (modeRef.current === "image" && event.key === "Enter" && !event.defaultPrevented) {
+        const target = event.target;
+        if (target instanceof HTMLElement && target.closest("button, input, textarea, select, [contenteditable=true]")) return;
+        event.preventDefault();
+        onEnterFullscreenRef.current?.();
+        return;
+      }
       if (modeRef.current !== "image" || event.key !== "Escape" || event.defaultPrevented) return;
+      if (isPhotoFullscreenActive()) return;
       event.preventDefault();
       setMode("thumbnails");
+      onEscapeToThumbnailsRef.current?.();
     };
     window.addEventListener("keydown", returnToThumbnails, true);
     return () => window.removeEventListener("keydown", returnToThumbnails, true);

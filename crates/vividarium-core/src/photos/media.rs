@@ -15,7 +15,9 @@ use super::{
 };
 use crate::db::{Database, photo_from_row};
 use crate::error::{CoreError, CoreResult};
-use crate::models::{Photo, PhotoLibraryRegistration, PhotoMetadata};
+use crate::models::{
+    OperationProgress, OperationProgressUnit, Photo, PhotoLibraryRegistration, PhotoMetadata,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PhotoMetadataIndexResult {
@@ -111,7 +113,12 @@ pub fn index_photo_metadata_for_library(
         })?;
     drop(connection);
     let mut current = previously_indexed;
-    progress(current, Some(total), "Reading photo metadata");
+    progress(OperationProgress {
+        stage: "indexing_photo_metadata".into(),
+        current: Some(current),
+        total: Some(total),
+        unit: Some(OperationProgressUnit::Photos),
+    });
 
     loop {
         let connection = database.connect_photo_library_registration(&library)?;
@@ -152,7 +159,12 @@ pub fn index_photo_metadata_for_library(
         drop(connection);
         drop(_guard);
         current = current.saturating_add(batch_len).min(total);
-        progress(current, Some(total), "Reading photo metadata");
+        progress(OperationProgress {
+            stage: "indexing_photo_metadata".into(),
+            current: Some(current),
+            total: Some(total),
+            unit: Some(OperationProgressUnit::Photos),
+        });
         std::thread::yield_now();
     }
 

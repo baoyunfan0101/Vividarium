@@ -78,9 +78,9 @@ function publishPhotoMutation(
   prior: OperationState | undefined,
   operation: OperationState,
 ) {
-  const stage = operation.progress?.stage ?? operation.message;
+  const stage = operation.progress?.stage ?? operation.operation ?? operation.module;
   const progressed = operation.state === "running"
-    && operation.completed !== prior?.completed;
+    && operation.progress?.current !== prior?.progress?.current;
   if (operation.module === "photos" && progressed) {
     emitPhotoMutation({
       photoId: null,

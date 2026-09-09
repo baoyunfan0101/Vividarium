@@ -19,6 +19,9 @@ import { findTypeSelectIndex, nextListIndex } from "../photos/photoListNavigatio
 import { useDeferredPhotoMutation } from "../photos/photoMutations";
 import { useCursorPage } from "../../shared/useCursorPage";
 import { ResizablePanels } from "../../shared/ResizablePanels";
+import { PhotoPaneHeader } from "../photos/PhotoPaneHeader";
+import { usePublishedPhotoTaxonSummary, type PhotoTaxonDisplayState } from "../photos/photoTaxonSummary";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 const statuses = ["matched", "ambiguous", "unmatched", "processing"] as const;
 const emptyMetadata: MappingMetadata = {
@@ -32,10 +35,12 @@ const emptyMetadata: MappingMetadata = {
 export function MappingView({
   active,
   onStatus,
+  onPhotoTaxonDisplayState,
   handlers,
 }: {
   active: boolean;
   onStatus: (message: string, busy?: boolean) => void;
+  onPhotoTaxonDisplayState: (state: PhotoTaxonDisplayState | null) => void;
   handlers: PhotoOpenHandlers;
 }) {
   const [status, setStatus] = useState<PhotoTaxonStatus>("ambiguous");
@@ -65,6 +70,12 @@ export function MappingView({
     photos,
     handlers,
     knownMapping,
+    onStatus,
+  });
+  usePublishedPhotoTaxonSummary({
+    photoId: interaction.selectedId,
+    active,
+    onChange: onPhotoTaxonDisplayState,
   });
   useDeferredPhotoMutation(active, () => {
     void page.reload();
@@ -150,14 +161,15 @@ export function MappingView({
             onMoveActive={moveSelection}
             onTypeSelect={typeSelect}
             renderItem={(item) => (
-              <button
-                className={`mapping-photo-row${selected?.photo.photo_id === item.photo.photo_id ? " active" : ""}`}
-                type="button"
-                onClick={() => interaction.selectPhoto(item.photo)}
+              <div
+                className={`mapping-photo-row selectable-content${selected?.photo.photo_id === item.photo.photo_id ? " active" : ""}`}
+                onClick={(event) => {
+                  if (!selectionIntersectsElement(event.currentTarget)) interaction.selectPhoto(item.photo);
+                }}
                 onContextMenu={(event) => interaction.openContextMenu(event, item.photo)}
               >
                 <span>{item.photo.filename}</span>
-              </button>
+              </div>
             )}
           />
           {page.loading && <div className="pane-overlay">Loading</div>}
@@ -170,11 +182,12 @@ export function MappingView({
           minSecond={320}
           separatorLabel="Resize mapping photo and editor"
           stateKey="mapping.editor"
-          first={(<main className="mapping-photo-stage">
+          first={(<main className={`mapping-photo-stage${interaction.selected ? " with-header" : ""}`}>
+            {interaction.selected ? <header className="photo-pane-heading"><PhotoPaneHeader photo={interaction.selected} /></header> : null}
             <PhotoStage photo={interaction.selected} onContextMenu={interaction.openContextMenu} />
           </main>)}
           second={(<aside className="mapping-editor-pane">
-            {selected ? <MappingEditor photo={selected.photo} embedded onOpenTaxon={handlers.openTaxon} refreshKey={editorRevision} /> : <div className="empty-copy">Select a photo</div>}
+            {selected ? <MappingEditor photo={selected.photo} embedded handlers={handlers} onStatus={onStatus} refreshKey={editorRevision} /> : <div className="empty-copy">Select a photo</div>}
           </aside>)}
         />)}
       />

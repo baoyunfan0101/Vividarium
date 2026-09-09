@@ -7,12 +7,15 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  forwardRef,
   useEffect,
   useId,
+  useImperativeHandle,
   useRef,
   useState,
   type ButtonHTMLAttributes,
   type CSSProperties,
+  type ForwardedRef,
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
@@ -26,6 +29,7 @@ export type IconComponent = LucideIcon;
 
 export type ButtonVariant = "primary" | "secondary" | "ghost";
 export type ButtonSize = "default" | "small";
+export type VirtualListHandle = { focus: () => void };
 
 export function Button({
   className = "",
@@ -73,25 +77,7 @@ export function IconButton({
   );
 }
 
-export function VirtualList<T>({
-  items,
-  activeIndex = null,
-  focusWhen = false,
-  rowHeight = 42,
-  className = "",
-  overscan = 8,
-  itemKey,
-  renderItem,
-  onActivateActive,
-  onClearActive,
-  onMoveHorizontal,
-  onMoveActive,
-  onNearEnd,
-  onContextMenu,
-  onTypeSelect,
-  resetKey,
-  stateKey,
-}: {
+type VirtualListProps<T> = {
   items: T[];
   activeIndex?: number | null;
   focusWhen?: boolean;
@@ -109,7 +95,27 @@ export function VirtualList<T>({
   onTypeSelect?: (query: string, shouldCycle: boolean) => void;
   resetKey?: string | number | boolean | null;
   stateKey?: string;
-}) {
+};
+
+function VirtualListInner<T>({
+  items,
+  activeIndex = null,
+  focusWhen = false,
+  rowHeight = 42,
+  className = "",
+  overscan = 8,
+  itemKey,
+  renderItem,
+  onActivateActive,
+  onClearActive,
+  onMoveHorizontal,
+  onMoveActive,
+  onNearEnd,
+  onContextMenu,
+  onTypeSelect,
+  resetKey,
+  stateKey,
+}: VirtualListProps<T>, ref: ForwardedRef<VirtualListHandle>) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const previousResetKey = useRef(resetKey);
   const typeBuffer = useRef("");
@@ -120,6 +126,10 @@ export function VirtualList<T>({
     stateKey ? `${stateKey}.scroll-top` : null,
     0,
   );
+
+  useImperativeHandle(ref, () => ({
+    focus: () => viewportRef.current?.focus({ preventScroll: true }),
+  }), []);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -249,6 +259,10 @@ export function VirtualList<T>({
     </div>
   );
 }
+
+export const VirtualList = forwardRef(VirtualListInner) as <T>(
+  props: VirtualListProps<T> & { ref?: ForwardedRef<VirtualListHandle> },
+) => JSX.Element;
 
 export function VirtualGrid<T>({
   items,
@@ -417,24 +431,26 @@ export function Modal({
   actions,
   onClose,
   width = 520,
+  dismissible = true,
 }: {
   title: string;
   children: ReactNode;
   actions?: ReactNode;
   onClose: () => void;
   width?: number;
+  dismissible?: boolean;
 }) {
   const titleId = useId();
   useEffect(() => {
     const close = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && dismissible) onClose();
     };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
+  }, [dismissible, onClose]);
 
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
+    <div className="modal-backdrop" onMouseDown={() => dismissible && onClose()}>
       <section
         className="modal-card"
         style={{ "--modal-width": `${width}px` } as CSSProperties}
@@ -445,7 +461,7 @@ export function Modal({
       >
         <header>
           <strong id={titleId}>{title}</strong>
-          <IconButton onClick={onClose} aria-label="Close"><X size={15} /></IconButton>
+          <IconButton onClick={onClose} disabled={!dismissible} aria-label="Close"><X size={15} /></IconButton>
         </header>
         <div className="modal-body">{children}</div>
         {actions && <footer>{actions}</footer>}

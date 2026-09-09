@@ -2,8 +2,7 @@ use super::*;
 use crate::naming::{NamingHookKind, set_naming_hook, take_hook_compile_count};
 use crate::photos::{self, open_library, refresh_directory};
 use crate::taxonomy::{
-    CustomTaxonomySqlRequest, TaxonInputRow, TaxonUpdateInput, apply_rows,
-    execute_custom_taxonomy_sql, update_taxon,
+    CustomTaxonomySqlRequest, TaxonInputRow, apply_rows, execute_custom_taxonomy_sql,
 };
 use std::fs;
 
@@ -44,7 +43,7 @@ fn one_mapping_run_compiles_the_hook_once_across_batches() {
     drop(connection);
 
     take_hook_compile_count();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     let result = process_pending_photo_matches(&database, &mut progress).unwrap();
 
     assert_eq!(result.processed, PHOTO_MAPPING_BATCH_SIZE + 1);
@@ -115,13 +114,14 @@ fn six_dimension_priority_controls_photo_mapping() {
     let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
     refresh_directory(&database, library.root_directory_id).unwrap();
     let photo = photos::list_photos(&database).unwrap().remove(0);
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     process_pending_photo_matches(&database, &mut progress).unwrap();
     let species_mapping = get_photo_mapping(&database, photo.photo_id).unwrap();
     assert_eq!(species_mapping.status, PhotoTaxonStatus::Matched);
     assert!(
-        get_photo_mapping_candidates(&database, photo.photo_id)
+        get_photo_mapping_detail(&database, photo.photo_id)
             .unwrap()
+            .candidates
             .is_empty()
     );
     let species_summary =
@@ -144,12 +144,27 @@ fn six_dimension_priority_controls_photo_mapping() {
         },
     )
     .unwrap();
+    assert_eq!(
+        database
+            .connect()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM photo_mapping_queue", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    let unchanged_mapping = get_photo_mapping(&database, photo.photo_id).unwrap();
+    assert_eq!(unchanged_mapping.taxon_id, species_mapping.taxon_id);
+
+    remap_photo(&database, photo.photo_id).unwrap();
     process_pending_photo_matches(&database, &mut progress).unwrap();
     let family_mapping = get_photo_mapping(&database, photo.photo_id).unwrap();
     assert_eq!(family_mapping.status, PhotoTaxonStatus::Matched);
     assert!(
-        get_photo_mapping_candidates(&database, photo.photo_id)
+        get_photo_mapping_detail(&database, photo.photo_id)
             .unwrap()
+            .candidates
             .is_empty()
     );
     let family_summary =
@@ -200,16 +215,16 @@ fn matches_the_filename_stem_and_builds_sparse_usage() {
     apply_rows(&database, &rows).unwrap();
     let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
     refresh_directory(&database, library.root_directory_id).unwrap();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     process_pending_photo_matches(&database, &mut progress).unwrap();
     let photo = photos::list_photos(&database).unwrap().remove(0);
     let mapping = get_photo_mapping(&database, photo.photo_id).unwrap();
     assert_eq!(mapping.status, PhotoTaxonStatus::Matched);
-    assert!(
-        get_photo_mapping_candidates(&database, photo.photo_id)
-            .unwrap()
-            .is_empty()
-    );
+    let detail = get_photo_mapping_detail(&database, photo.photo_id).unwrap();
+    assert!(detail.candidates.is_empty());
+    assert_eq!(detail.matched_names.len(), 1);
+    assert_eq!(detail.matched_names[0].name_type, TaxonomyNameType::SciName);
+    assert_eq!(detail.matched_names[0].name, "Canis lupus");
     let species_id = mapping.taxon_id.unwrap();
     let species_summary = crate::taxonomy::get_taxon_summary(&database, species_id)
         .unwrap()
@@ -231,6 +246,35 @@ fn matches_the_filename_stem_and_builds_sparse_usage() {
             .items
             .iter()
             .all(|item| matches!(item, PhotoTaxonItem::Taxon { .. }))
+    );
+    assert_eq!(
+        get_photo_taxon_counts(&database, None).unwrap(),
+        PhotoTaxonEntryCounts {
+            taxon_count: 1,
+            photo_count: 0
+        }
+    );
+    let connection = database.connect().unwrap();
+    let genus_id: i64 = connection
+        .query_row(
+            "SELECT parent_taxon_id FROM taxa WHERE taxon_id = ?",
+            [species_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        get_photo_taxon_counts(&database, genus_id.into()).unwrap(),
+        PhotoTaxonEntryCounts {
+            taxon_count: 1,
+            photo_count: 0
+        }
+    );
+    assert_eq!(
+        get_photo_taxon_counts(&database, species_id.into()).unwrap(),
+        PhotoTaxonEntryCounts {
+            taxon_count: 0,
+            photo_count: 1
+        }
     );
     let page = browse_photo_taxon(&database, mapping.taxon_id, false, None, 20).unwrap();
     assert_eq!(
@@ -258,13 +302,204 @@ fn matches_the_filename_stem_and_builds_sparse_usage() {
 }
 
 #[test]
+fn accepted_name_match_wins_and_alias_is_an_exact_fallback() {
+    let data = tempfile::tempdir().unwrap();
+    let database = Database::open_test(data.path().join("vividarium.db")).unwrap();
+    let connection = database.connect_taxonomy_metadata_context().unwrap();
+    connection
+        .execute_batch(
+            r#"
+            INSERT INTO taxa (taxon_id, rank) VALUES (1, 5), (2, 5);
+            INSERT INTO taxon_names (taxon_id, name_type, name) VALUES
+                (1, 1, 'Shared name'),
+                (2, 1, 'Other name'),
+                (2, 2, 'Shared name');
+            "#,
+        )
+        .unwrap();
+
+    let accepted =
+        find_photo_name_candidates(&connection, PhotoNameField::SpeciesSci, "Shared name").unwrap();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0].summary.taxon_id, 1);
+    assert_eq!(
+        accepted[0].matched_names[0].name_type,
+        TaxonomyNameType::SciName
+    );
+
+    connection
+        .execute(
+            "DELETE FROM taxon_names WHERE taxon_id = 1 AND name_type = 1",
+            [],
+        )
+        .unwrap();
+    let alias =
+        find_photo_name_candidates(&connection, PhotoNameField::SpeciesSci, "Shared name").unwrap();
+    assert_eq!(alias.len(), 1);
+    assert_eq!(alias[0].summary.taxon_id, 2);
+    assert_eq!(
+        alias[0].matched_names[0].name_type,
+        TaxonomyNameType::Synonym
+    );
+    assert!(
+        find_photo_name_candidates(&connection, PhotoNameField::SpeciesSci, "shared name")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn stable_mapping_provenance_replaces_a_synonym_with_an_accepted_match() {
+    let data = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("Felis leo.jpg"), b"photo").unwrap();
+    let database = Database::open_test(data.path().join("vividarium.db")).unwrap();
+    let connection = database.connect().unwrap();
+    connection
+        .execute_batch(
+            r#"
+            INSERT INTO taxa (taxon_id, rank) VALUES (1, 5);
+            INSERT INTO taxon_names (taxon_id, name_type, name) VALUES
+                (1, 1, 'Panthera leo'),
+                (1, 2, 'Felis leo');
+            "#,
+        )
+        .unwrap();
+    drop(connection);
+    let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+    refresh_directory(&database, library.root_directory_id).unwrap();
+    let photo = photos::list_photos(&database).unwrap().remove(0);
+    let mut progress = |_: OperationProgress| {};
+    process_pending_photo_matches(&database, &mut progress).unwrap();
+
+    let synonym_detail = get_photo_mapping_detail(&database, photo.photo_id).unwrap();
+    assert_eq!(synonym_detail.mapping.status, PhotoTaxonStatus::Matched);
+    assert_eq!(synonym_detail.matched_names.len(), 1);
+    assert_eq!(
+        synonym_detail.matched_names[0].name_type,
+        TaxonomyNameType::Synonym
+    );
+    assert_eq!(synonym_detail.matched_names[0].name, "Felis leo");
+
+    database
+        .connect()
+        .unwrap()
+        .execute_batch(
+            r#"
+            DELETE FROM taxon_names WHERE taxon_id = 1 AND name_type = 2;
+            UPDATE taxon_names
+            SET name = 'Felis leo'
+            WHERE taxon_id = 1 AND name_type = 1;
+            "#,
+        )
+        .unwrap();
+    remap_photo(&database, photo.photo_id).unwrap();
+
+    let accepted_detail = get_photo_mapping_detail(&database, photo.photo_id).unwrap();
+    assert_eq!(accepted_detail.matched_names.len(), 1);
+    assert_eq!(
+        accepted_detail.matched_names[0].name_type,
+        TaxonomyNameType::SciName
+    );
+    assert_eq!(accepted_detail.matched_names[0].name, "Felis leo");
+}
+
+#[test]
+fn stable_mapping_persists_chinese_alias_provenance() {
+    let data = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("input.jpg"), b"photo").unwrap();
+    let database = Database::open_test(data.path().join("vividarium.db")).unwrap();
+    database
+        .connect()
+        .unwrap()
+        .execute_batch(
+            r#"
+            INSERT INTO taxa (taxon_id, rank) VALUES (1, 5);
+            INSERT INTO taxon_names (taxon_id, name_type, name) VALUES
+                (1, 1, 'Panthera leo'),
+                (1, 3, 'lion'),
+                (1, 4, 'old lion');
+            "#,
+        )
+        .unwrap();
+    set_naming_hook(
+        &database,
+        NamingHookKind::PhotoFilename,
+        Some(
+            r#"
+            fn parse_photo_filename(filename) {
+                #{ info: #{ species_zh: "old lion" }, suffix: ".jpg" }
+            }
+            "#,
+        ),
+    )
+    .unwrap();
+    let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
+    refresh_directory(&database, library.root_directory_id).unwrap();
+    let photo = photos::list_photos(&database).unwrap().remove(0);
+    let mut progress = |_: OperationProgress| {};
+    process_pending_photo_matches(&database, &mut progress).unwrap();
+
+    let detail = get_photo_mapping_detail(&database, photo.photo_id).unwrap();
+    assert_eq!(detail.mapping.status, PhotoTaxonStatus::Matched);
+    assert_eq!(detail.matched_names.len(), 1);
+    assert_eq!(detail.matched_names[0].name_type, TaxonomyNameType::ZhAlias);
+    assert_eq!(detail.matched_names[0].name, "old lion");
+}
+
+#[test]
+fn candidate_limit_is_applied_before_loading_taxon_summaries() {
+    let data = tempfile::tempdir().unwrap();
+    let database = Database::open_test(data.path().join("vividarium.db")).unwrap();
+    let connection = database.connect_taxonomy_metadata_context().unwrap();
+    connection
+        .execute_batch(&format!(
+            r#"
+            PRAGMA foreign_keys = OFF;
+            WITH RECURSIVE ids(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM ids WHERE value < {limit}
+            )
+            INSERT INTO taxa (taxon_id, rank)
+                SELECT value, 5 FROM ids;
+            INSERT INTO taxa (taxon_id, parent_taxon_id, rank)
+                VALUES ({orphan_id}, 999999, 5);
+            WITH RECURSIVE ids(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM ids WHERE value < {orphan_id}
+            )
+            INSERT INTO taxon_names (taxon_id, name_type, name)
+                SELECT value, 1, 'Limited name' FROM ids;
+            "#,
+            limit = PHOTO_TAXON_CANDIDATE_LIMIT,
+            orphan_id = PHOTO_TAXON_CANDIDATE_LIMIT + 1,
+        ))
+        .unwrap();
+
+    let candidates =
+        find_photo_name_candidates(&connection, PhotoNameField::SpeciesSci, "Limited name")
+            .unwrap();
+
+    assert_eq!(candidates.len(), PHOTO_TAXON_CANDIDATE_LIMIT);
+    assert_eq!(
+        candidates
+            .last()
+            .map(|candidate| candidate.summary.taxon_id),
+        Some(PHOTO_TAXON_CANDIDATE_LIMIT as i64)
+    );
+}
+
+#[test]
 fn persists_ambiguous_candidates_and_accepts_a_forced_mapping() {
     let data = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("Shared name.jpg"), b"photo").unwrap();
     let database = Database::open_test(data.path().join("vividarium.db")).unwrap();
     let connection = database.connect().unwrap();
-    for accepted_name in ["Shared name", "Different name"] {
+    for _ in 0..2 {
         connection
             .execute("INSERT INTO taxa (rank) VALUES (5)", [])
             .unwrap();
@@ -275,19 +510,24 @@ fn persists_ambiguous_candidates_and_accepts_a_forced_mapping() {
                     INSERT INTO taxon_names (taxon_id, name_type, name)
                     VALUES (?, 1, ?)
                     "#,
-                params![taxon_id, accepted_name],
-            )
-            .unwrap();
-        connection
-            .execute(
-                r#"
-                    INSERT INTO taxon_names (taxon_id, name_type, name)
-                    VALUES (?, 2, 'Shared name')
-                    "#,
-                [taxon_id],
+                params![taxon_id, "Shared name"],
             )
             .unwrap();
     }
+    connection
+        .execute("INSERT INTO taxa (rank) VALUES (5)", [])
+        .unwrap();
+    let alias_taxon_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            r#"
+            INSERT INTO taxon_names (taxon_id, name_type, name) VALUES
+                (?, 1, 'Different name'),
+                (?, 2, 'Shared name')
+            "#,
+            params![alias_taxon_id, alias_taxon_id],
+        )
+        .unwrap();
     let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
     refresh_directory(&database, library.root_directory_id).unwrap();
     let photo = photos::list_photos(&database).unwrap().remove(0);
@@ -295,14 +535,21 @@ fn persists_ambiguous_candidates_and_accepts_a_forced_mapping() {
         get_photo_mapping(&database, photo.photo_id).unwrap().status,
         PhotoTaxonStatus::Processing
     );
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     process_pending_photo_matches(&database, &mut progress).unwrap();
     let mapping = get_photo_mapping(&database, photo.photo_id).unwrap();
-    let candidates = get_photo_mapping_candidates(&database, photo.photo_id).unwrap();
+    let ambiguous_detail = get_photo_mapping_detail(&database, photo.photo_id).unwrap();
+    assert!(ambiguous_detail.matched_names.is_empty());
+    let candidates = ambiguous_detail.candidates;
     assert_eq!(mapping.status, PhotoTaxonStatus::Ambiguous);
     assert_eq!(candidates.len(), 2);
-    assert_eq!(candidates[0].matched_names.len(), 2);
+    assert_eq!(candidates[0].matched_names.len(), 1);
     assert_eq!(candidates[1].matched_names.len(), 1);
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.summary.taxon_id != alias_taxon_id)
+    );
     let connection = database.connect().unwrap();
     assert_eq!(
         connection
@@ -322,7 +569,7 @@ fn persists_ambiguous_candidates_and_accepts_a_forced_mapping() {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        3
+        2
     );
     drop(connection);
     let selected_taxon_id = candidates[0].summary.taxon_id;
@@ -335,18 +582,33 @@ fn persists_ambiguous_candidates_and_accepts_a_forced_mapping() {
     assert_eq!(processing.status, PhotoTaxonStatus::Processing);
     assert_eq!(processing.taxon_id, None);
     assert!(
-        get_photo_mapping_candidates(&database, photo.photo_id)
+        get_photo_mapping_detail(&database, photo.photo_id)
             .unwrap()
+            .candidates
             .is_empty()
     );
     process_pending_photo_matches(&database, &mut progress).unwrap();
     let mapping = get_photo_mapping(&database, photo.photo_id).unwrap();
-    let candidates = get_photo_mapping_candidates(&database, photo.photo_id).unwrap();
+    let candidates = get_photo_mapping_detail(&database, photo.photo_id)
+        .unwrap()
+        .candidates;
     assert_eq!(mapping.status, PhotoTaxonStatus::Ambiguous);
     assert_eq!(candidates.len(), 2);
     let selected = set_photo_mapping(&database, photo.photo_id, selected_taxon_id).unwrap();
     assert_eq!(selected.status, PhotoTaxonStatus::Matched);
     assert_eq!(selected.taxon_id, Some(selected_taxon_id));
+    let selected_detail = get_photo_mapping_detail(&database, photo.photo_id).unwrap();
+    assert_eq!(selected_detail.matched_names.len(), 1);
+    assert_eq!(selected_detail.matched_names, candidates[0].matched_names);
+    let preserved = remap_photo(&database, photo.photo_id).unwrap();
+    assert_eq!(preserved.status, PhotoTaxonStatus::Matched);
+    assert_eq!(preserved.taxon_id, Some(selected_taxon_id));
+    assert_eq!(
+        get_photo_mapping_detail(&database, photo.photo_id)
+            .unwrap()
+            .matched_names,
+        candidates[0].matched_names
+    );
     assert_eq!(
         database
             .connect()
@@ -384,7 +646,7 @@ fn clears_forces_and_automatically_recomputes_one_mapping() {
     let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
     refresh_directory(&database, library.root_directory_id).unwrap();
     let photo = photos::list_photos(&database).unwrap().remove(0);
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     process_pending_photo_matches(&database, &mut progress).unwrap();
     assert_eq!(
         get_photo_mapping(&database, photo.photo_id)
@@ -396,6 +658,12 @@ fn clears_forces_and_automatically_recomputes_one_mapping() {
     let forced = set_photo_mapping(&database, photo.photo_id, 2).unwrap();
     assert_eq!(forced.status, PhotoTaxonStatus::Matched);
     assert_eq!(forced.taxon_id, Some(2));
+    assert!(
+        get_photo_mapping_detail(&database, photo.photo_id)
+            .unwrap()
+            .matched_names
+            .is_empty()
+    );
     assert!(get_photo_taxon_node(&database, Some(1), false).is_err());
     assert_eq!(
         get_photo_taxon_node(&database, Some(2), false)
@@ -412,9 +680,17 @@ fn clears_forces_and_automatically_recomputes_one_mapping() {
     let remapped = remap_photo(&database, photo.photo_id).unwrap();
     assert_eq!(remapped.status, PhotoTaxonStatus::Matched);
     assert_eq!(remapped.taxon_id, Some(1));
-    assert!(
-        get_photo_mapping_candidates(&database, photo.photo_id)
+    assert_eq!(
+        get_photo_mapping_detail(&database, photo.photo_id)
             .unwrap()
+            .matched_names[0]
+            .name_type,
+        TaxonomyNameType::SciName
+    );
+    assert!(
+        get_photo_mapping_detail(&database, photo.photo_id)
+            .unwrap()
+            .candidates
             .is_empty()
     );
     assert!(set_photo_mapping(&database, photo.photo_id, i64::MAX).is_err());
@@ -431,6 +707,103 @@ fn does_not_synthesize_processing_for_a_missing_photo() {
         get_photo_mapping(&database, 404).unwrap_err(),
         CoreError::NotFound(_)
     ));
+}
+
+#[test]
+fn photo_display_summary_requires_a_unique_current_mapping() {
+    let data = tempfile::tempdir().unwrap();
+    let database = Database::open_test(data.path().join("vividarium.db")).unwrap();
+    let connection = database.connect().unwrap();
+    connection
+        .execute_batch(
+            r#"
+            INSERT INTO taxa (taxon_id, parent_taxon_id, rank) VALUES
+                (1, NULL, 1),
+                (2, 1, 2),
+                (3, 2, 3),
+                (4, 3, 4),
+                (5, 4, 5);
+            INSERT INTO taxon_names (taxon_id, name_type, name) VALUES
+                (1, 1, 'Animalia'),
+                (2, 1, 'Carnivora'),
+                (3, 1, 'Felidae'),
+                (4, 1, 'Panthera'),
+                (5, 1, 'Panthera leo'),
+                (5, 2, 'Felis leo'),
+                (5, 5, 'Lion');
+            INSERT INTO photo_directories (
+                parent_directory_id, name, relative_path
+            ) VALUES (NULL, '', '');
+            "#,
+        )
+        .unwrap();
+    let directory_id = connection.last_insert_rowid();
+    let species_photo_id = insert_test_photo(&connection, directory_id, "species.jpg");
+    let order_photo_id = insert_test_photo(&connection, directory_id, "order.jpg");
+    let unmatched_photo_id = insert_test_photo(&connection, directory_id, "unmatched.jpg");
+    let ambiguous_photo_id = insert_test_photo(&connection, directory_id, "ambiguous.jpg");
+    for (photo_id, taxon_id, status) in [
+        (species_photo_id, Some(5), "matched"),
+        (order_photo_id, Some(2), "matched"),
+        (unmatched_photo_id, None, "unmatched"),
+        (ambiguous_photo_id, None, "ambiguous"),
+    ] {
+        connection
+            .execute(
+                r#"
+                INSERT INTO photo_taxon_mapping (photo_id, taxon_id, status)
+                VALUES (?, ?, ?)
+                "#,
+                params![photo_id, taxon_id, status],
+            )
+            .unwrap();
+    }
+
+    let species = get_photo_taxon_display_summary(&database, species_photo_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(species.current_rank, TaxonRank::Species);
+    assert_eq!(
+        species
+            .items
+            .iter()
+            .map(|item| (item.rank, item.names.sci_name.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            (TaxonRank::Family, Some("Felidae")),
+            (TaxonRank::Genus, Some("Panthera")),
+            (TaxonRank::Species, Some("Panthera leo")),
+        ]
+    );
+    assert_eq!(species.items[2].names.en_name.as_deref(), Some("Lion"));
+
+    let order = get_photo_taxon_display_summary(&database, order_photo_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(order.items.len(), 1);
+    assert_eq!(order.items[0].rank, TaxonRank::Order);
+    assert!(
+        get_photo_taxon_display_summary(&database, unmatched_photo_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_photo_taxon_display_summary(&database, ambiguous_photo_id)
+            .unwrap()
+            .is_none()
+    );
+
+    connection
+        .execute(
+            "INSERT INTO photo_mapping_queue (photo_id, reason) VALUES (?, 'refresh')",
+            [species_photo_id],
+        )
+        .unwrap();
+    assert!(
+        get_photo_taxon_display_summary(&database, species_photo_id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -459,7 +832,7 @@ fn rejects_a_photo_without_mapping_state() {
             .contains("neither a mapping nor a mapping queue entry")
     );
 
-    let candidates_error = get_photo_mapping_candidates(&database, photo.photo_id).unwrap_err();
+    let candidates_error = get_photo_mapping_detail(&database, photo.photo_id).unwrap_err();
     assert!(matches!(candidates_error, CoreError::Consistency(_)));
 }
 
@@ -494,7 +867,7 @@ fn queues_a_photo_when_its_selected_taxon_is_deleted() {
     let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
     refresh_directory(&database, library.root_directory_id).unwrap();
     let photo = photos::list_photos(&database).unwrap().remove(0);
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     process_pending_photo_matches(&database, &mut progress).unwrap();
     set_photo_mapping(&database, photo.photo_id, taxon_id).unwrap();
     assert_eq!(
@@ -544,36 +917,34 @@ fn taxonomy_update_queues_only_affected_photos() {
     fs::write(root.path().join("domestic cat.jpg"), b"photo").unwrap();
     let database = Database::open_test(data.path().join("vividarium.db")).unwrap();
     let connection = database.connect().unwrap();
-    connection
-        .execute("INSERT INTO taxa (rank) VALUES (1)", [])
-        .unwrap();
-    let canis_taxon_id = connection.last_insert_rowid();
-    connection
-        .execute(
-            r#"
-                INSERT INTO taxon_names (taxon_id, name_type, name)
-                VALUES (?, 1, 'Canis lupus')
-                "#,
-            [canis_taxon_id],
-        )
-        .unwrap();
-    connection
-        .execute("INSERT INTO taxa (rank) VALUES (1)", [])
-        .unwrap();
-    let felis_taxon_id = connection.last_insert_rowid();
-    connection
-        .execute(
-            r#"
-                INSERT INTO taxon_names (taxon_id, name_type, name)
-                VALUES (?, 1, 'Felis catus')
-                "#,
-            [felis_taxon_id],
-        )
-        .unwrap();
+    let insert_taxon = |parent_taxon_id: Option<i64>, rank: i64, name: &str| {
+        connection
+            .execute(
+                "INSERT INTO taxa (parent_taxon_id, rank) VALUES (?, ?)",
+                params![parent_taxon_id, rank],
+            )
+            .unwrap();
+        let taxon_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO taxon_names (taxon_id, name_type, name) VALUES (?, 1, ?)",
+                params![taxon_id, name],
+            )
+            .unwrap();
+        taxon_id
+    };
+    let animalia_taxon_id = insert_taxon(None, 1, "Animalia");
+    let carnivora_taxon_id = insert_taxon(Some(animalia_taxon_id), 2, "Carnivora");
+    let canidae_taxon_id = insert_taxon(Some(carnivora_taxon_id), 3, "Canidae");
+    let canis_genus_taxon_id = insert_taxon(Some(canidae_taxon_id), 4, "Canis");
+    let canis_taxon_id = insert_taxon(Some(canis_genus_taxon_id), 5, "Canis lupus");
+    let felidae_taxon_id = insert_taxon(Some(carnivora_taxon_id), 3, "Felidae");
+    let felis_genus_taxon_id = insert_taxon(Some(felidae_taxon_id), 4, "Felis");
+    let felis_taxon_id = insert_taxon(Some(felis_genus_taxon_id), 5, "Felis catus");
     drop(connection);
     let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
     refresh_directory(&database, library.root_directory_id).unwrap();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     process_pending_photo_matches(&database, &mut progress).unwrap();
     let photos = photos::list_photos(&database).unwrap();
     let canis_photo = photos
@@ -616,14 +987,17 @@ fn taxonomy_update_queues_only_affected_photos() {
         .unwrap();
     drop(connection);
 
-    update_taxon(
+    apply_rows(
         &database,
-        TaxonUpdateInput {
-            taxon_id: felis_taxon_id,
-            geological_range: None,
+        &[TaxonInputRow {
+            kingdom: Some("Animalia".into()),
+            order: Some("Carnivora".into()),
+            family: Some("Felidae".into()),
+            genus: Some("Felis".into()),
+            species: Some("Felis catus".into()),
             en_name: Some("domestic cat".into()),
             ..Default::default()
-        },
+        }],
     )
     .unwrap();
     crate::taxonomy::synchronize_pending_photo_libraries(&database).unwrap();

@@ -47,7 +47,7 @@ export function PhotoLibrariesSettings({
     blockingOperation && ["queued", "running"].includes(blockingOperation.state),
   );
   const mutationLockTitle = mutationLocked
-    ? `Unavailable while ${blockingOperation?.message || "Photo Library work is running"}`
+    ? "Unavailable while Photo Library work is running"
     : undefined;
 
   async function load() {

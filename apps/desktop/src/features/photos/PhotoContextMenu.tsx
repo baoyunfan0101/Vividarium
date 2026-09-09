@@ -6,8 +6,9 @@ import {
   Info,
   Link,
   Link2,
+  Maximize,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   renamePhoto,
   renamePhotoFromTaxon,
@@ -18,6 +19,7 @@ import { errorMessage } from "../../api/common";
 import { remapPhoto, type PhotoMappingSummary } from "../../api/mapping";
 import { Button, Modal } from "../../shared/ui";
 import { MappingBadge } from "../mapping/MappingBadge";
+import { renameFromTaxonomyStatus } from "./photoRenameStatus";
 
 export function PhotoContextMenu({
   photo,
@@ -29,8 +31,10 @@ export function PhotoContextMenu({
   onChanged,
   onMappingChanged,
   onOpenDetails,
+  onOpenFullscreen,
   onOpenTaxon,
   onOpenMappingEditor,
+  onStatus,
 }: {
   photo: Photo;
   mapping: PhotoMappingSummary | null;
@@ -41,8 +45,10 @@ export function PhotoContextMenu({
   onChanged: (photo: Photo) => void;
   onMappingChanged: () => void;
   onOpenDetails: () => void;
+  onOpenFullscreen: () => void;
   onOpenTaxon: (taxonId: number) => void;
   onOpenMappingEditor: () => void;
+  onStatus: (message: string) => void;
 }) {
   const [renaming, setRenaming] = useState(false);
   const [newFilename, setNewFilename] = useState(photo.filename);
@@ -52,7 +58,7 @@ export function PhotoContextMenu({
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (renaming) return;
+    if (renaming || busy) return;
     const close = (event: MouseEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) onClose();
     };
@@ -65,7 +71,7 @@ export function PhotoContextMenu({
       window.removeEventListener("mousedown", close);
       window.removeEventListener("keydown", closeKey);
     };
-  }, [onClose, renaming]);
+  }, [busy, onClose, renaming]);
 
   useEffect(() => {
     if (!renaming || !inputRef.current) return;
@@ -93,25 +99,22 @@ export function PhotoContextMenu({
       <div
         className="context-menu"
         ref={menuRef}
-        style={{ left: Math.min(x, window.innerWidth - 260), top: Math.min(y, window.innerHeight - 390) }}
+        style={{ left: Math.min(x, window.innerWidth - 268), top: Math.min(y, window.innerHeight - 330) }}
         role="menu"
       >
-        <div className="context-state">
-          <span>Mapping state</span>
-          {loading ? <span className="context-loading">Loading</span> : mapping ? <MappingBadge status={mapping.status} /> : <span>Unavailable</span>}
-        </div>
+        <MenuButton icon={Maximize} label="View fullscreen" onClick={() => {
+          onOpenFullscreen();
+          onClose();
+        }} />
+        <MenuButton icon={Info} label="View photo details" onClick={onOpenDetails} />
         <MenuSeparator />
-        <MenuButton icon={Info} label="Photo details" onClick={onOpenDetails} />
-        <MenuButton icon={Database} label="Go to taxonomy" disabled={!matched} onClick={() => matched && onOpenTaxon(mapping.taxon_id!)} />
-        <MenuSeparator />
-        <MenuButton icon={FilePenLine} label="Rename" onClick={() => setRenaming(true)} />
         <MenuButton
-          icon={FileInput}
-          label="Rename from taxonomy"
-          disabled={!matched || Boolean(busy)}
-          onClick={() => void run("Renaming", async () => onChanged(await renamePhotoFromTaxon(photo.photo_id)))}
+          icon={Database}
+          label="View taxon details"
+          disabled={!matched}
+          trailing={mapping ? <MappingBadge status={mapping.status} /> : <span className="context-loading">{loading ? "Loading" : "Unavailable"}</span>}
+          onClick={() => matched && onOpenTaxon(mapping.taxon_id!)}
         />
-        <MenuSeparator />
         <MenuButton icon={Link} label="Edit mapping" onClick={onOpenMappingEditor} />
         <MenuButton
           icon={Link2}
@@ -120,6 +123,18 @@ export function PhotoContextMenu({
           onClick={() => void run("Remapping", async () => {
             await remapPhoto(photo.photo_id);
             onMappingChanged();
+          })}
+        />
+        <MenuSeparator />
+        <MenuButton icon={FilePenLine} label="Rename" disabled={Boolean(busy)} onClick={() => setRenaming(true)} />
+        <MenuButton
+          icon={FileInput}
+          label="Rename from taxonomy"
+          disabled={!matched || Boolean(busy)}
+          onClick={() => void run("Renaming", async () => {
+            const renamed = await renamePhotoFromTaxon(photo.photo_id);
+            onChanged(renamed);
+            onStatus(renameFromTaxonomyStatus(photo.filename, renamed.filename));
           })}
         />
         <MenuSeparator />
@@ -135,16 +150,17 @@ export function PhotoContextMenu({
       {renaming && (
         <Modal
           title="Rename photo"
+          dismissible={!busy}
           onClose={() => setRenaming(false)}
           actions={
             <>
-              <Button onClick={() => setRenaming(false)}>Cancel</Button>
+              <Button disabled={Boolean(busy)} onClick={() => setRenaming(false)}>Cancel</Button>
               <Button
                 variant="primary"
                 disabled={!newFilename.trim() || Boolean(busy)}
                 onClick={() => void run("Renaming", async () => onChanged(await renamePhoto(photo.photo_id, newFilename.trim())))}
               >
-                Rename
+                {busy === "Renaming" ? "Renaming..." : "Rename"}
               </Button>
             </>
           }
@@ -165,17 +181,20 @@ function MenuButton({
   icon: Icon,
   label,
   disabled,
+  trailing,
   onClick,
 }: {
   icon: typeof Info;
   label: string;
   disabled?: boolean;
+  trailing?: ReactNode;
   onClick: () => void;
 }) {
   return (
     <button type="button" role="menuitem" disabled={disabled} onClick={onClick}>
       <Icon size={14} />
-      <span>{label}</span>
+      <span className="context-menu-label">{label}</span>
+      {trailing && <span className="context-menu-trailing">{trailing}</span>}
     </button>
   );
 }

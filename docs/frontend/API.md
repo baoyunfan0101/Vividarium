@@ -52,15 +52,29 @@ capability limits URL opening to the exact project repository and author email
 values; browser development uses the browser's ordinary external navigation.
 
 SQL Import validation returns a `sql_import` operation handle. Its structured
-progress contains a stage and optional row counts or SQL statement indexes.
+progress contains a machine-readable stage, optional current and total values,
+and an optional progress unit. Statement execution uses `statements`, staging
+fingerprinting uses `bytes`, name processing uses `names`, and candidate taxon
+construction uses `taxa`. Integrity, schema, and taxonomy checks are
+indeterminate stages when no reliable total is available.
+For statement execution, `current` is the active one-based statement index and
+`total` is the number of executable statements. For example, `current = 2`,
+`total = 5`, and `unit = statements` identifies statement 2 of 5. Apply reports
+candidate validation, staging fingerprint bytes, and
+the applying stage at the corresponding core operation boundaries.
 The completed result distinguishes a valid candidate from structured taxonomy
 validation issues; execution failures remain operation errors.
-Direct Import first calls `inspect_direct_import_database`, which performs a
-read-only validation and returns the normalized path plus table and column
-metadata. It does not replace the current taxonomy. Only the subsequent
-`apply_direct_import` call starts a `direct_import` operation. Its completed
-result is `TaxonomyImportResult`; schema, integrity, and taxonomy validation
-failures are operation errors and leave the current taxonomy unchanged.
+Direct Import inspection and apply return `direct_import` operation handles.
+Inspection completes with the normalized path plus table and column metadata
+without replacing the taxonomy. Apply completes with `TaxonomyImportResult` and
+reports validation and applying at the core replacement boundaries. Schema,
+integrity, and taxonomy validation failures are operation errors and leave the
+current taxonomy unchanged.
+
+Custom SQL execution and export plus Formatted Update preview and apply return
+operation handles. Their owner IDs remain registered for tab-close
+cancellation while `OperationManager` owns Background visibility and results.
+The foreground reads the result from the exact returned task ID.
 
 Photo Library open, register, switch, and rebind calls return
 `PhotoLibraryActivation<T>`, which contains `library` and the first scheduled
@@ -72,3 +86,11 @@ state. Live Background state comes from `operation-progress`; status fetches are
 used for startup and recovery. Callers that need a completed foreground import
 result resolve that exact task rather than a module slot. Audit details are
 loaded from Rename History.
+
+`OperationState.state` is the task lifecycle source. Running task progress is
+read exclusively from `OperationState.progress`; completed and failed tasks use
+their timestamps, result, and optional error. Determinate progress has both
+`current` and `total`. For statement execution, `current` identifies the active
+one-based statement; for other countable work, it represents accumulated
+progress. Work without a reliable total is indeterminate. The unit is one of
+items, files, photos, names, taxa, bytes, or statements.

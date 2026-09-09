@@ -33,6 +33,7 @@
 .field-stack { display: flex; flex-direction: column; gap: 6px; padding: 12px; }
 .field-stack > span { color: var(--muted); }
 .field-stack > span strong { color: var(--text); font-weight: 600; }
+.field-stack > small { color: var(--muted); line-height: 1.4; }
 .field-stack > .priority-list { margin: 0; }
 .field-stack > .checkbox-grid { padding: 0; }
 .field-stack input, .field-stack select { height: 30px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--input); }
@@ -89,9 +90,9 @@
 .library-card-select:disabled { cursor: default; }
 .library-settings-row > :not(.library-card-select) { position: relative; z-index: 1; pointer-events: none; }
 .library-settings-row > .library-actions { pointer-events: auto; }
-.library-settings-row.active { border-color: #4c7158; }
+.library-settings-row.active { border-color: var(--accent); }
 .library-heading { display: flex; align-items: center; gap: 8px; }
-.library-heading > span { padding: 2px 6px; border-radius: 8px; color: #111; }
+.library-heading > span { padding: 2px 6px; border-radius: 8px; color: var(--on-accent); }
 .library-heading > span.available { background: var(--accent-bright); }
 .library-heading > span.unavailable { background: var(--amber); }
 .library-heading > b { margin-left: auto; color: var(--accent-bright); }

@@ -1,4 +1,4 @@
-.workbench-toolbar, .section-header, .pane-header {
+.workbench-toolbar, .section-header, .pane-header, .photo-pane-heading {
   display: flex;
   min-height: 42px;
   align-items: center;
@@ -11,6 +11,10 @@
 .section-header > div:first-child, .pane-header > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .section-header strong, .pane-header strong { font-size: 12px; color: var(--text); }
 .section-header span, .pane-header span { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.photo-pane-header { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.photo-pane-header strong, .photo-pane-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.photo-pane-header strong { color: var(--text); font-size: 12px; }
+.photo-pane-header span { color: var(--muted); }
 .section-actions { display: flex; align-items: center; gap: 6px; }
 .button, .record-actions button {
   display: inline-flex;
@@ -50,11 +54,21 @@
 .button-small { height: 24px; padding: 0 7px; }
 .icon-button { width: 28px; min-width: 28px; padding: 0; border-radius: var(--button-radius); }
 .icon-button-small { width: 24px; min-width: 24px; }
+.selectable-content {
+  cursor: pointer;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.selectable-content[role="button"]:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 2px var(--button-focus-ring);
+}
 
 .virtual-viewport, .virtual-grid-viewport { position: relative; width: 100%; height: 100%; overflow: auto; outline: 0; }
 .virtual-spacer, .virtual-grid-spacer { position: relative; width: 100%; }
 .virtual-window { position: absolute; top: 0; right: 0; left: 0; }
 .virtual-row { width: 100%; min-width: 0; }
+.variable-virtual-row { position: absolute; top: 0; right: 0; left: 0; height: auto; }
 .virtual-grid-window {
   position: absolute;
   top: 0;
@@ -128,7 +142,7 @@
 .empty-state strong { color: var(--muted); }
 .empty-state-actions { display: flex; gap: 6px; }
 .busy { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
-.floating-progress { position: absolute; right: 8px; bottom: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 3px; background: #222; }
+.floating-progress { position: absolute; right: 8px; bottom: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 3px; color: var(--text); background: var(--popover); }
 .empty-copy { display: grid; height: 100%; place-items: center; color: var(--quiet); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

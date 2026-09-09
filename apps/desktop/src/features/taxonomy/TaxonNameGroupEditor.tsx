@@ -14,7 +14,6 @@ import type {
 import { Button, IconButton } from "../../shared/ui";
 import {
   buildTaxonNameGroupSaveInput,
-  canDeleteTaxonName,
   canPromoteTaxonName,
   createBlankTaxonNameDraftRow,
   createTaxonNameDraftRows,
@@ -29,6 +28,7 @@ export function TaxonNameGroupEditor({
   kind,
   records,
   primaryExists,
+  deleteAllowed,
   active,
   busy,
   error,
@@ -43,6 +43,7 @@ export function TaxonNameGroupEditor({
   kind: TaxonNameGroupKind;
   records: TaxonNameDetail[];
   primaryExists: boolean;
+  deleteAllowed: boolean;
   active: boolean;
   busy: boolean;
   error: string;
@@ -56,6 +57,7 @@ export function TaxonNameGroupEditor({
   const [rows, setRows] = useState<TaxonNameDraftRow[]>([]);
   const [validationError, setValidationError] = useState("");
   const primary = isPrimaryTaxonNameGroup(kind);
+  const promoteAllowed = canPromoteTaxonName(kind);
   const canAdd = primary ? records.length === 0 : primaryExists;
   const action = records.length > 0 ? "edit" : canAdd ? "add" : null;
   const formId = `taxonomy-name-group-${taxonId}-${kind}`;
@@ -175,9 +177,9 @@ export function TaxonNameGroupEditor({
         <article className="taxonomy-name-record" key={record.name_id}>
           <header>
             <strong>{record.name}</strong>
-            {!primary ? (
+            {promoteAllowed || deleteAllowed ? (
               <div className="taxonomy-name-actions">
-                {canPromoteTaxonName(kind) ? (
+                {promoteAllowed ? (
                   <IconButton
                     size="small"
                     aria-label={`Promote ${record.name}`}
@@ -188,7 +190,7 @@ export function TaxonNameGroupEditor({
                     <CircleArrowUp size={13} />
                   </IconButton>
                 ) : null}
-                {canDeleteTaxonName(kind) ? (
+                {deleteAllowed ? (
                   <IconButton
                     size="small"
                     className="taxonomy-danger-action"

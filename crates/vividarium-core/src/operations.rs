@@ -12,6 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_i
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::taxonomy::TaxonInputRow;
 use crate::{CoreError, CoreResult};
 
 const AUDIT_COLUMNS: [&str; 9] = [
@@ -56,6 +57,14 @@ pub struct OperationAuditRow {
 pub struct OperationPage<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OperationInput {
+    CustomSql { sql: String },
+    FormattedUpdate { rows: Vec<TaxonInputRow> },
+    TaxonomyAction { action: String, input: Value },
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +192,67 @@ pub(crate) fn insert_audit_row(
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn insert_operation_input(
+    transaction: &Transaction<'_>,
+    operation_id: i64,
+    input: &OperationInput,
+) -> CoreResult<()> {
+    transaction.execute(
+        "INSERT INTO operation_inputs (operation_id, input_json) VALUES (?, ?)",
+        params![
+            operation_id,
+            serde_json::to_string(input).map_err(invalid_operation_input)?
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn get_operation_input(
+    connection: &Connection,
+    operation_id: i64,
+) -> CoreResult<Option<OperationInput>> {
+    let operation = get_operation(connection, operation_id)?
+        .ok_or_else(|| CoreError::NotFound(format!("operation {operation_id}")))?;
+    if operation.source == "formatted_update" && operation.has_formatted_input {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT input_json
+            FROM operation_formatted_inputs
+            WHERE operation_id = ?
+            ORDER BY sequence
+            "#,
+        )?;
+        let rows = statement
+            .query_map([operation_id], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                let json = row?;
+                serde_json::from_str::<TaxonInputRow>(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Some(OperationInput::FormattedUpdate { rows }));
+    }
+    let input_json = connection
+        .query_row(
+            "SELECT input_json FROM operation_inputs WHERE operation_id = ?",
+            [operation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    input_json
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                CoreError::Consistency(format!("invalid operation input: {error}"))
+            })
+        })
+        .transpose()
 }
 
 pub(crate) fn list_operations(
@@ -512,6 +582,10 @@ fn invalid_cursor() -> CoreError {
 
 fn invalid_json(error: serde_json::Error) -> CoreError {
     CoreError::InvalidArgument(format!("invalid operation audit JSON: {error}"))
+}
+
+fn invalid_operation_input(error: serde_json::Error) -> CoreError {
+    CoreError::InvalidArgument(format!("invalid operation input: {error}"))
 }
 
 #[cfg(test)]

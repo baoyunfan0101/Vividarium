@@ -894,6 +894,14 @@ mod tests {
                 "Canos",
             ]
         );
+        assert_eq!(
+            search_taxa(&database, "cAnIs", 10)
+                .unwrap()
+                .into_iter()
+                .map(|result| result.taxon_id)
+                .collect::<Vec<_>>(),
+            vec![10, 11, 12, 13, 14]
+        );
     }
 
     #[test]

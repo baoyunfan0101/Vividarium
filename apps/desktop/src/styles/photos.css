@@ -85,7 +85,7 @@
 .recent-search-row:hover > button:last-child, .recent-search-row > button:last-child:focus-visible { opacity: 1; }
 
 .photo-browser { width: 100%; height: 100%; min-height: 0; }
-.photo-browser-list, .photo-browser-main { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: 46px minmax(0, 1fr); }
+.photo-browser-list, .photo-browser-main { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: var(--photo-pane-header-height) minmax(0, 1fr); }
 .photo-browser-loading { display: grid; place-items: center; }
 .photo-browser-list { background: var(--panel); }
 .photo-list-row, .finder-row, .mapping-photo-row {
@@ -115,7 +115,7 @@
   border-radius: 3px;
   background: #212121;
 }
-.photo-thumb:hover { border-color: #5a5a5a; }
+.photo-thumb:hover { border-color: var(--line-strong); }
 .photo-thumb.selected { border-color: var(--accent-bright); box-shadow: inset 0 0 0 1px var(--accent-bright); }
 .photo-thumb img { width: 100%; height: 100%; object-fit: cover; background: #111; }
 .photo-display-toggle { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
@@ -131,6 +131,7 @@
   background: #101010;
 }
 .photo-stage.empty { align-content: center; gap: 8px; color: var(--quiet); }
+.photo-fullscreen-presentation { position: fixed; z-index: 1000; inset: 0; background: #000; }
 .photo-stage-frame { position: absolute; inset: 0; overflow: hidden; touch-action: none; }
 .photo-stage-frame.pannable { cursor: grab; }
 .photo-stage-frame.dragging { cursor: grabbing; }
@@ -145,8 +146,6 @@
   object-fit: initial;
   user-select: none;
   transform-origin: center center;
-  backface-visibility: hidden;
-  will-change: transform;
 }
 .photo-stage.compact { min-height: 240px; }
 .photo-loader { position: absolute; }
@@ -175,7 +174,7 @@
   background: transparent;
 }
 .tree-toggle:hover:not(:disabled), .tree-toggle:active:not(:disabled) { background: transparent; filter: none; transform: none; }
-.tree-node-button {
+.tree-node-content {
   display: flex;
   height: 100%;
   min-width: 0;
@@ -201,12 +200,12 @@
 .tree-label.stacked strong { line-height: 1.15; }
 .tree-label.stacked small { font-weight: 400; }
 .tree-more { color: var(--accent-bright); }
-.pane-overlay { position: absolute; z-index: 3; right: 0; bottom: 0; left: 0; padding: 7px; color: var(--muted); text-align: center; background: #181818dd; }
+.pane-overlay { position: absolute; z-index: 3; right: 0; bottom: 0; left: 0; padding: 7px; color: var(--overlay-surface-text); text-align: center; background: var(--overlay-surface); }
 .pane-progress { position: absolute; z-index: 3; right: 7px; bottom: 7px; padding: 3px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--popover); pointer-events: none; }
 .pane-loading-label { margin-left: auto; color: var(--muted); font-weight: 400; }
 .photo-indexing-notice { position: absolute; z-index: 5; top: 46px; right: 10px; max-width: min(520px, calc(100% - 20px)); padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: color-mix(in srgb, var(--popover) 92%, transparent); pointer-events: none; }
 .map-view > .photo-indexing-notice { top: 10px; }
-.photo-detail-view { display: grid; height: 100%; min-height: 0; grid-template-rows: 52px minmax(0, 1fr); }
+.photo-detail-view { display: grid; height: 100%; min-height: 0; grid-template-rows: var(--photo-pane-header-height) minmax(0, 1fr); }
 .photo-detail-content { min-height: 0; }
 .photo-detail-sidebar { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; }
 .photo-detail-sidebar > .busy { padding: 14px; }
@@ -232,9 +231,11 @@
   padding: 0 6px;
   border: 1px solid var(--line);
   color: var(--muted);
-  background: #292929;
+  background: var(--button-bg);
   opacity: 0;
 }
+.detail-value > button:hover:not(:disabled) { background: var(--button-bg-hover); filter: none; }
+.detail-value > button:active:not(:disabled) { background: var(--button-bg-active); filter: none; transform: none; }
 .detail-value:hover > button, .detail-value > button:focus-visible { opacity: 1; }
 
 .map-view { position: relative; width: 100%; height: 100%; }
@@ -244,21 +245,23 @@
 .map-photo-preview:hover:not(:disabled) { border-color: var(--accent-bright); color: var(--text); background-color: var(--panel); box-shadow: 0 0 0 2px var(--accent-bright), 0 12px 34px var(--shadow); filter: none; transform: none; }
 .map-photo-preview img { display: block; width: 100%; height: min(190px, 24vh); object-fit: cover; }
 .map-photo-preview span { min-width: 0; padding: 9px 10px; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; background: var(--panel); }
-.map-count { position: absolute; z-index: 4; bottom: 12px; left: 12px; padding: 5px 8px; border-radius: 3px; background: #181818dd; }
 
 .context-menu {
   position: fixed;
   z-index: 100;
-  width: 244px;
+  width: 252px;
   padding: 5px;
-  border: 1px solid #555;
+  border: 1px solid var(--line-strong);
   border-radius: 5px;
-  background: #252525;
-  box-shadow: 0 10px 30px #000a;
+  color: var(--text);
+  background: var(--popover);
+  box-shadow: 0 10px 30px var(--shadow);
 }
 .context-menu > button { display: flex; width: 100%; height: 29px; align-items: center; gap: 9px; padding: 0 8px; border: 0; border-radius: 3px; text-align: left; background: transparent; }
-.context-menu > button:hover:not(:disabled) { background: #3c3c3c; }
-.context-state { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; color: var(--muted); }
+.context-menu > button:hover:not(:disabled) { background: var(--hover); }
+.context-menu > button:disabled { opacity: 1; color: var(--quiet); }
+.context-menu-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-menu-trailing { display: flex; flex: none; align-items: center; }
 .context-separator { height: 1px; margin: 4px 3px; background: var(--line-strong); }
-.context-error { padding: 7px; color: #ef9a9a; background: #492626; }
+.context-error { padding: 7px; color: var(--danger-text); background: var(--danger-bg); }
 .context-loading { color: var(--muted); }

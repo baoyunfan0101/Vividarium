@@ -8,12 +8,25 @@ import {
 import { errorMessage, formatBytes } from "../../api/common";
 import { Busy, Button } from "../../shared/ui";
 import { PhotoStage } from "./PhotoMedia";
-import { formatPhotoModifiedAt } from "./photoFormatting";
 import { useViewState } from "../../shared/viewState";
 import { ResizablePanels } from "../../shared/ResizablePanels";
 import { usePhotoInteraction, type PhotoOpenHandlers } from "./PhotoInteraction";
+import { PhotoPaneHeader } from "./PhotoPaneHeader";
+import { usePublishedPhotoTaxonSummary, type PhotoTaxonDisplayState } from "./photoTaxonSummary";
 
-export function PhotoDetailView({ photo, handlers }: { photo: Photo; handlers: PhotoOpenHandlers }) {
+export function PhotoDetailView({
+  photo,
+  handlers,
+  active,
+  onPhotoTaxonDisplayState,
+  onStatus,
+}: {
+  photo: Photo;
+  handlers: PhotoOpenHandlers;
+  active: boolean;
+  onPhotoTaxonDisplayState: (state: PhotoTaxonDisplayState | null) => void;
+  onStatus: (message: string) => void;
+}) {
   const [metadata, setMetadata] = useViewState<PhotoMetadata | null>("photo-detail.metadata", null);
   const [detailScrollTop, setDetailScrollTop] = useViewState("photo-detail.scroll-top", 0);
   const [error, setError] = useState("");
@@ -23,6 +36,12 @@ export function PhotoDetailView({ photo, handlers }: { photo: Photo; handlers: P
     photos: [photo],
     handlers,
     stateKey: "photo-detail.interaction",
+    onStatus,
+  });
+  usePublishedPhotoTaxonSummary({
+    photoId: photo.photo_id,
+    active,
+    onChange: onPhotoTaxonDisplayState,
   });
 
   useEffect(() => {
@@ -49,9 +68,8 @@ export function PhotoDetailView({ photo, handlers }: { photo: Photo; handlers: P
 
   return (
     <div className="photo-detail-view">
-      <header className="two-line-heading">
-        <strong>{photo.filename}</strong>
-        <span>{formatBytes(photo.file_size)} {"\u00b7"} {formatPhotoModifiedAt(photo.modified_at_ns)}</span>
+      <header className="photo-pane-heading">
+        <PhotoPaneHeader photo={photo} />
       </header>
       <ResizablePanels
         className="photo-detail-content"

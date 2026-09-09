@@ -1,6 +1,6 @@
 import { call } from "./client";
 import type { Page } from "./common";
-import { getTaxonomyTemplate } from "./taxonomy";
+import { getTaxonomyTemplate, type TaxonInputRow } from "./taxonomy";
 
 export type OperationSummary = {
   operation_id: number;
@@ -24,6 +24,10 @@ export type OperationAuditRow = {
   succeeded: boolean;
   message: string;
 };
+export type OperationInput =
+  | { kind: "custom_sql"; sql: string }
+  | { kind: "formatted_update"; rows: TaxonInputRow[] }
+  | { kind: "taxonomy_action"; action: string; input: Record<string, unknown> };
 
 function demoSummaries(domain: "photo" | "taxonomy"): OperationSummary[] {
   return [1, 2, 3].map((operationId) => ({
@@ -86,6 +90,12 @@ export const listTaxonomyOperationAudit = (operationId: number, cursor: string |
     }],
     next_cursor: null,
   }));
+export const getTaxonomyOperationInput = (operationId: number) =>
+  call<OperationInput | null>("get_taxonomy_operation_input", { operationId }, () => (
+    operationId === 3
+      ? { kind: "custom_sql", sql: "UPDATE taxa SET geological_range = 'Recent';" }
+      : { kind: "formatted_update", rows: [{ kingdom: "Animalia" }] }
+  ));
 export const rollbackTaxonomyOperation = (operationId: number) =>
   call<void>("rollback_taxonomy_operation", { operationId }, () => undefined);
 export const exportTaxonomyOperationAudit = (operationId: number, destinationPath: string) =>

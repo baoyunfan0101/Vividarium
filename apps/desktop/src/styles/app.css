@@ -90,6 +90,12 @@
 .tab-panel.active { display: block; pointer-events: auto; }
 .status-bar { display: flex; align-items: center; gap: 7px; padding: 0 0 0 9px; border-top: 1px solid var(--line); color: var(--muted); background: var(--activity); }
 .status-title { min-width: 0; margin-left: auto; overflow: hidden; color: var(--quiet); text-overflow: ellipsis; white-space: nowrap; }
+.taxon-display-path { display: flex; min-width: 0; overflow: hidden; white-space: nowrap; }
+.taxon-display-segment { display: flex; min-width: 0; flex: 0 1 auto; align-items: center; overflow: hidden; }
+.taxon-display-segment:last-child { max-width: 100%; }
+.taxon-display-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.taxon-display-separator { flex: 0 0 auto; padding: 0 5px; color: var(--quiet); }
+.status-title.taxon-display-path { text-overflow: clip; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-bright); }
 
 .toolbar-navigation {
@@ -139,12 +145,21 @@
   box-shadow: 0 10px 30px var(--shadow);
 }
 .toolbar-popover > strong { display: block; padding: 6px 7px; color: var(--text); }
-.operations-popover { top: auto; right: 3px; bottom: 25px; width: 310px; max-height: min(70vh, 480px); overflow-y: auto; }
-.operations-popover > div { display: grid; gap: 3px; padding: 7px; border-top: 1px solid var(--line); }
-.operations-popover span, .operations-popover small { color: var(--muted); }
-.operations-popover progress { width: 100%; accent-color: var(--accent); }
-.operations-popover .operations-empty { display: block; padding: 7px; border-top: 1px solid var(--line); }
-.operations-popover .operation-error { color: var(--danger); overflow-wrap: anywhere; }
+.background-popover { top: auto; right: 3px; bottom: 25px; width: 360px; max-height: min(76vh, 560px); overflow-y: auto; }
+.background-empty { display: block; padding: 8px 7px; border-top: 1px solid var(--line); color: var(--muted); }
+.background-section { display: grid; }
+.background-section + .background-section { margin-top: 4px; }
+.background-section > h3 { margin: 0; padding: 6px 7px 4px; color: var(--quiet); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.background-task { display: grid; min-width: 0; gap: 4px; padding: 8px 7px; border-top: 1px solid var(--line); }
+.background-task-header { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
+.background-task-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.background-task-time { flex: none; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.background-task-stage,
+.background-task-count { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.background-task-progress { width: 100%; height: 7px; accent-color: var(--accent); }
+.background-task-error { color: var(--danger); overflow-wrap: anywhere; white-space: normal; }
+.background-task-completed .background-task-stage { color: var(--success); }
+.background-task-failed .background-task-stage { color: var(--danger); }
 
 .native-about-overlay {
   position: fixed;

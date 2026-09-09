@@ -8,6 +8,8 @@ import {
 } from "../../api/photos";
 import { errorMessage } from "../../api/common";
 import { Button, Modal } from "../../shared/ui";
+import { waitForOperation } from "../../api/tasks";
+import { formatPhotoRenameSummary, photoRenameSummaryFromOperation } from "./photoOperation";
 
 export function DirectoryContextMenu({
   directory,
@@ -34,7 +36,7 @@ export function DirectoryContextMenu({
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (renaming) return;
+    if (renaming || busy) return;
     const close = (event: MouseEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) onClose();
     };
@@ -47,7 +49,7 @@ export function DirectoryContextMenu({
       window.removeEventListener("mousedown", close);
       window.removeEventListener("keydown", closeKey);
     };
-  }, [onClose, renaming]);
+  }, [busy, onClose, renaming]);
 
   useEffect(() => {
     if (!renaming || !inputRef.current) return;
@@ -70,7 +72,10 @@ export function DirectoryContextMenu({
   async function renameDirectoryPhotos(includeDescendants: boolean) {
     onStatus(includeDescendants ? "Renaming directory photos recursively" : "Renaming directory photos", true);
     const started = await renamePhotosInDirectoryFromTaxa(directory.directory_id, includeDescendants);
-    onStatus(started.operation.task_id ? "Rename started in Background" : "Rename complete");
+    const completed = started.operation.task_id
+      ? await waitForOperation(started.operation.task_id)
+      : started.operation;
+    onStatus(formatPhotoRenameSummary(photoRenameSummaryFromOperation(completed)));
   }
 
   async function renameDirectoryOnly() {
@@ -129,10 +134,11 @@ export function DirectoryContextMenu({
       {renaming && (
         <Modal
           title="Rename folder"
+          dismissible={!busy}
           onClose={() => setRenaming(false)}
           actions={
             <>
-              <Button onClick={() => setRenaming(false)}>Cancel</Button>
+              <Button disabled={Boolean(busy)} onClick={() => setRenaming(false)}>Cancel</Button>
               <Button
                 variant="primary"
                 disabled={!newName.trim() || Boolean(busy)}

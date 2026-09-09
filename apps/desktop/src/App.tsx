@@ -12,6 +12,14 @@ export function App() {
   const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
+    const preventNativeContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+    document.addEventListener("contextmenu", preventNativeContextMenu);
+    return () => document.removeEventListener("contextmenu", preventNativeContextMenu);
+  }, []);
+
+  useEffect(() => {
     let active = true;
     void getGeneralSettings()
       .then((value) => {

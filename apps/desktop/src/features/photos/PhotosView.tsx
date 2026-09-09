@@ -2,7 +2,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 import { ChevronDown, ChevronRight, Folder, Images, Network } from "lucide-react";
 import maplibregl, { type Map as MapLibreMap } from "maplibre-gl";
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type RefObject } from "react";
 import {
   browsePhotoDirectory,
   getPhotoDirectoryCounts,
@@ -16,10 +16,23 @@ import {
 } from "../../api/photos";
 import { errorMessage } from "../../api/common";
 import { getMapPhotoBounds, getMapSettings, listMapPhotos, type MapBounds, type MapPhoto } from "../../api/map";
-import { browsePhotoTaxon, type PhotoTaxonItem, type PhotoTaxonUsage } from "../../api/mapping";
-import type { TaxonTreeNameParts } from "../../api/general";
+import {
+  browsePhotoTaxon,
+  getPhotoTaxonCounts,
+  type PhotoTaxonItem,
+  type PhotoTaxonUsage,
+} from "../../api/mapping";
+import type { TaxonNameParts } from "../../api/general";
+import { formatTaxonName } from "../taxonomy/taxonNameFormatting";
+import { useTaxonomyMutation } from "../taxonomy/taxonomyMutations";
 import type { OperationState } from "../../api/tasks";
-import { EmptyState, IconButton, SectionHeader, VirtualList } from "../../shared/ui";
+import {
+  EmptyState,
+  IconButton,
+  SectionHeader,
+  VirtualList,
+  type VirtualListHandle,
+} from "../../shared/ui";
 import { DirectoryContextMenu } from "./DirectoryContextMenu";
 import { PhotoStage } from "./PhotoMedia";
 import { usePhotoLibraryIdentity } from "./PhotoLibraryIdentity";
@@ -27,11 +40,19 @@ import { PhotoDisplay, PhotoDisplayToggle, usePhotoActivation, usePhotoDisplayMo
 import { usePhotoInteraction, type PhotoOpenHandlers } from "./PhotoInteraction";
 import { TaxonContextMenu } from "./TaxonContextMenu";
 import { emitPhotoMutation, useDeferredPhotoMutation, usePhotoMutation } from "./photoMutations";
-import { findTypeSelectIndex, nextListIndex, treeArrowAction } from "./photoListNavigation";
+import {
+  findTypeSelectIndex,
+  nextListIndex,
+  resolvePhotoListEntryIndex,
+  treeArrowAction,
+} from "./photoListNavigation";
 import { useCursorPage } from "../../shared/useCursorPage";
 import { useCursorTree, type CursorTreeNode } from "../../shared/useCursorTree";
 import { useViewState } from "../../shared/viewState";
 import { ResizablePanels } from "../../shared/ResizablePanels";
+import { usePublishedPhotoTaxonSummary, type PhotoTaxonDisplayState } from "./photoTaxonSummary";
+import { isPhotoFullscreenActive } from "./photoFullscreenState";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 type DirectoryTreeRow =
   | { kind: "directory"; directory: PhotoDirectory; depth: number }
@@ -42,6 +63,53 @@ type TaxonTreeRow =
   | { kind: "taxon"; taxon: PhotoTaxonUsage; depth: number }
   | { kind: "photo"; photo: Photo; depth: number }
   | { kind: "more"; parentId: number; depth: number; loading: boolean };
+
+function isProtectedTreeEntryTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return true;
+  if (target.closest(".virtual-viewport, input, textarea, select, [contenteditable=true], .modal-card, [role=dialog], .context-menu")) return true;
+  return Boolean(target.closest("button, a, [tabindex]")) && !target.closest(".breadcrumbs");
+}
+
+function hasBlockingTreeEntryOverlay(): boolean {
+  return Boolean(document.querySelector(".context-menu, [role='dialog'], .modal-card"));
+}
+
+function usePhotoTreeListEntry<T>({
+  active,
+  rows,
+  selectedPhotoId,
+  listRef,
+  getPhotoId,
+  selectRow,
+}: {
+  active: boolean;
+  rows: T[];
+  selectedPhotoId: number | null;
+  listRef: RefObject<VirtualListHandle | null>;
+  getPhotoId: (row: T) => number | null;
+  selectRow: (row: T) => void;
+}): void {
+  useEffect(() => {
+    if (!active) return;
+    const enterList = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+      if (isPhotoFullscreenActive()) return;
+      if (hasBlockingTreeEntryOverlay()) return;
+      if (isProtectedTreeEntryTarget(event.target)) return;
+      event.preventDefault();
+      listRef.current?.focus();
+      const index = resolvePhotoListEntryIndex({
+        rows,
+        selectedPhotoId,
+        direction: event.key === "ArrowDown" ? 1 : -1,
+        getPhotoId,
+      });
+      if (index >= 0) selectRow(rows[index]);
+    };
+    window.addEventListener("keydown", enterList);
+    return () => window.removeEventListener("keydown", enterList);
+  }, [active, getPhotoId, listRef, rows, selectRow, selectedPhotoId]);
+}
 
 function directoryTreeRowKey(item: DirectoryTreeRow) {
   if (item.kind === "directory") return `d:${item.directory.directory_id}`;
@@ -95,18 +163,6 @@ function flattenTaxonItems(
   });
 }
 
-function formatTaxonTreeName(taxon: PhotoTaxonUsage, parts: TaxonTreeNameParts) {
-  const selected = [
-    parts.sci_name ? taxon.names.sci_name : null,
-    parts.zh_name ? taxon.names.zh_name : null,
-    parts.en_name ? taxon.names.en_name : null,
-  ].filter(Boolean);
-  const names = selected.length > 0
-    ? selected
-    : [taxon.names.sci_name, taxon.names.zh_name, taxon.names.en_name].filter(Boolean);
-  return names.length > 0 ? names.join(" \u00b7 ") : `Taxon ${taxon.taxon_id}`;
-}
-
 function normalizeLongitude(value: number) {
   return ((value + 180) % 360 + 360) % 360 - 180;
 }
@@ -126,10 +182,14 @@ function readMapBounds(value: maplibregl.LngLatBounds): MapBounds {
 export function FolderPhotosView({
   handlers,
   onStatus,
+  active,
+  onPhotoTaxonDisplayState,
   backgroundOperation,
 }: {
   handlers: PhotoOpenHandlers;
   onStatus: (message: string, busy?: boolean) => void;
+  active: boolean;
+  onPhotoTaxonDisplayState: (state: PhotoTaxonDisplayState | null) => void;
   backgroundOperation?: OperationState | null;
 }) {
   const [library, setLibrary] = useViewState<PhotoLibrary | null>("folders.library", null);
@@ -170,17 +230,33 @@ export function FolderPhotosView({
     () => rows.flatMap((row) => row.kind === "photo" ? [row.photo] : []),
     [rows],
   );
+  const listRef = useRef<VirtualListHandle>(null);
+  const openFullscreen = useCallback((photo: Photo) => {
+    handlers.openFullscreen(photo, () => listRef.current?.focus());
+  }, [handlers]);
+  const viewHandlers = useMemo(() => ({ ...handlers, openFullscreen }), [handlers, openFullscreen]);
   const interaction = usePhotoInteraction({
     photos,
-    handlers,
+    handlers: viewHandlers,
     selectFirst: false,
     stateKey: "folders.interaction",
+    onStatus,
   });
-  const [displayMode, setDisplayMode] = usePhotoDisplayMode();
+  usePublishedPhotoTaxonSummary({
+    photoId: interaction.selectedId,
+    active,
+    onChange: onPhotoTaxonDisplayState,
+  });
+  const [displayMode, setDisplayMode] = usePhotoDisplayMode({
+    onEscapeToThumbnails: () => listRef.current?.focus(),
+    onEnterFullscreen: () => {
+      if (interaction.selected) openFullscreen(interaction.selected);
+    },
+  });
   const activation = usePhotoActivation({
     onSelect: selectDirectoryPhoto,
     onOpenImage: () => setDisplayMode("image"),
-    onOpenDetails: handlers.openDetails,
+    onOpenFullscreen: openFullscreen,
   });
   const resolvedActiveRowKey = activeRowKey ?? (interaction.selectedId === null ? null : `p:${interaction.selectedId}`);
   const activeRowIndex = rows.findIndex((row) => directoryTreeRowKey(row) === resolvedActiveRowKey);
@@ -220,6 +296,7 @@ export function FolderPhotosView({
   function enter(directory: PhotoDirectory) {
     tree.clear();
     setActiveRowKey(null);
+    interaction.clearSelection();
     setTrail((current) => [...current, directory]);
   }
 
@@ -293,17 +370,30 @@ export function FolderPhotosView({
     if (matchIndex >= 0) selectDirectoryRow(rows[matchIndex]);
   }
 
+  usePhotoTreeListEntry({
+    active: active && displayMode === "thumbnails",
+    rows,
+    selectedPhotoId: interaction.selectedId,
+    listRef,
+    getPhotoId: (item) => item.kind === "photo" ? item.photo.photo_id : null,
+    selectRow: selectDirectoryRow,
+  });
+
   return (
     <div className="folder-workbench">
       <header className="workbench-toolbar">
         <div className="breadcrumbs">
           <button type="button" onClick={() => {
             tree.clear();
+            setActiveRowKey(null);
+            interaction.clearSelection();
             setTrail([]);
           }}>Root</button>
           {trail.map((item, index) => (
             <span key={item.directory_id}><ChevronRight size={12} /><button type="button" onClick={() => {
               tree.clear();
+              setActiveRowKey(null);
+              interaction.clearSelection();
               setTrail(trail.slice(0, index + 1));
             }}>{item.name}</button></span>
           ))}
@@ -320,10 +410,10 @@ export function FolderPhotosView({
         stateKey="folders.columns"
         first={(<aside className="finder-pane" onContextMenu={openCurrentDirectoryContextMenu}>
           <VirtualList
+            ref={listRef}
             stateKey="folders.list"
             items={rows}
             activeIndex={activeRowIndex}
-            focusWhen={displayMode === "thumbnails"}
             rowHeight={28}
             itemKey={directoryTreeRowKey}
             onActivateActive={activateDirectoryRow}
@@ -346,22 +436,38 @@ export function FolderPhotosView({
                   >
                     {tree.nodes.get(item.directory.directory_id)?.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                   </IconButton>
-                  <button className="tree-node-button" type="button" onClick={() => enter(item.directory)}>
+                  <div
+                    className="tree-node-content selectable-content"
+                    onClick={(event) => {
+                      if (!selectionIntersectsElement(event.currentTarget)) enter(item.directory);
+                    }}
+                  >
                     <Folder size={14} />
                     <span className="tree-label">{item.directory.name}</span>
-                  </button>
+                  </div>
                 </div>
               ) : item.kind === "photo" ? (
-                <button
-                  className={`finder-row${directoryTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
+                <div
+                  className={`finder-row selectable-content${directoryTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
                   style={{ paddingLeft: 4 + item.depth * 14 }}
-                  type="button"
-                  onClick={() => activation.clickPhoto(item.photo)}
-                  onDoubleClick={() => activation.doubleClickPhoto(item.photo)}
+                  onClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) {
+                      activation.cancelPendingClick();
+                      return;
+                    }
+                    activation.clickPhoto(item.photo);
+                  }}
+                  onDoubleClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) {
+                      activation.cancelPendingClick();
+                      return;
+                    }
+                    activation.doubleClickPhoto(item.photo);
+                  }}
                   onContextMenu={(event) => openDirectoryPhotoContextMenu(event, item)}
                 >
                   <Images size={14} /><span>{item.photo.filename}</span>
-                </button>
+                </div>
               ) : (
                 <button
                   className={`finder-row tree-more${directoryTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
@@ -417,10 +523,16 @@ export function FolderPhotosView({
 export function TaxonPhotosView({
   handlers,
   nameParts,
+  active,
+  onStatus,
+  onPhotoTaxonDisplayState,
   backgroundOperation,
 }: {
   handlers: PhotoOpenHandlers;
-  nameParts: TaxonTreeNameParts;
+  nameParts: TaxonNameParts;
+  active: boolean;
+  onStatus: (message: string) => void;
+  onPhotoTaxonDisplayState: (state: PhotoTaxonDisplayState | null) => void;
   backgroundOperation?: OperationState | null;
 }) {
   const [trail, setTrail] = useViewState<PhotoTaxonUsage[]>("photo-taxonomy.trail", []);
@@ -451,17 +563,33 @@ export function TaxonPhotosView({
     () => rows.flatMap((row) => row.kind === "photo" ? [row.photo] : []),
     [rows],
   );
+  const listRef = useRef<VirtualListHandle>(null);
+  const openFullscreen = useCallback((photo: Photo) => {
+    handlers.openFullscreen(photo, () => listRef.current?.focus());
+  }, [handlers]);
+  const viewHandlers = useMemo(() => ({ ...handlers, openFullscreen }), [handlers, openFullscreen]);
   const interaction = usePhotoInteraction({
     photos,
-    handlers,
+    handlers: viewHandlers,
     selectFirst: false,
     stateKey: "photo-taxonomy.interaction",
+    onStatus,
   });
-  const [displayMode, setDisplayMode] = usePhotoDisplayMode();
+  usePublishedPhotoTaxonSummary({
+    photoId: interaction.selectedId,
+    active,
+    onChange: onPhotoTaxonDisplayState,
+  });
+  const [displayMode, setDisplayMode] = usePhotoDisplayMode({
+    onEscapeToThumbnails: () => listRef.current?.focus(),
+    onEnterFullscreen: () => {
+      if (interaction.selected) openFullscreen(interaction.selected);
+    },
+  });
   const activation = usePhotoActivation({
     onSelect: selectTaxonPhoto,
     onOpenImage: () => setDisplayMode("image"),
-    onOpenDetails: handlers.openDetails,
+    onOpenFullscreen: openFullscreen,
   });
   const resolvedActiveRowKey = activeRowKey ?? (interaction.selectedId === null ? null : `p:${interaction.selectedId}`);
   const activeRowIndex = rows.findIndex((row) => taxonTreeRowKey(row) === resolvedActiveRowKey);
@@ -470,9 +598,26 @@ export function TaxonPhotosView({
     void Promise.all([page.reload(), tree.reloadExpanded()]);
   });
 
+  const reportTaxonCounts = useCallback(async (taxonId: number | null) => {
+    try {
+      const counts = await getPhotoTaxonCounts(taxonId);
+      onStatus(`${counts.taxon_count} taxa, ${counts.photo_count} photos`);
+    } catch {}
+  }, [onStatus]);
+
+  useEffect(() => {
+    if (active) void reportTaxonCounts(currentId);
+  }, [active, currentId, reportTaxonCounts, page.items]);
+
+  useTaxonomyMutation(() => {
+    void Promise.all([page.reload(), tree.reloadExpanded()]);
+    if (active) void reportTaxonCounts(currentId);
+  });
+
   function enterTaxon(taxon: PhotoTaxonUsage) {
     tree.clear();
     setActiveRowKey(null);
+    interaction.clearSelection();
     setTrail((current) => [...current, taxon]);
   }
 
@@ -556,19 +701,32 @@ export function TaxonPhotosView({
     if (matchIndex >= 0) selectTaxonRow(rows[matchIndex]);
   }
 
+  usePhotoTreeListEntry({
+    active: active && displayMode === "thumbnails",
+    rows,
+    selectedPhotoId: interaction.selectedId,
+    listRef,
+    getPhotoId: (item) => item.kind === "photo" ? item.photo.photo_id : null,
+    selectRow: selectTaxonRow,
+  });
+
   return (
     <div className="folder-workbench">
       <header className="workbench-toolbar">
         <div className="breadcrumbs">
           <button type="button" onClick={() => {
             tree.clear();
+            setActiveRowKey(null);
+            interaction.clearSelection();
             setTrail([]);
           }}>Taxonomy</button>
           {trail.map((item, index) => (
             <span key={item.taxon_id}><ChevronRight size={12} /><button type="button" onClick={() => {
               tree.clear();
+              setActiveRowKey(null);
+              interaction.clearSelection();
               setTrail(trail.slice(0, index + 1));
-            }}>{item.names.sci_name ?? `Taxon ${item.taxon_id}`}</button></span>
+            }}>{formatTaxonName(item.names, nameParts, `Taxon ${item.taxon_id}`)}</button></span>
           ))}
         </div>
         <PhotoDisplayToggle mode={displayMode} onChange={setDisplayMode} />
@@ -583,10 +741,10 @@ export function TaxonPhotosView({
         stateKey="photo-taxonomy.columns"
         first={(<aside className="finder-pane" onContextMenu={openCurrentTaxonContextMenu}>
           <VirtualList
+            ref={listRef}
             stateKey="photo-taxonomy.list"
             items={rows}
             activeIndex={activeRowIndex}
-            focusWhen={displayMode === "thumbnails"}
             rowHeight={28}
             itemKey={taxonTreeRowKey}
             onActivateActive={activateTaxonRow}
@@ -606,15 +764,39 @@ export function TaxonPhotosView({
                   >
                     {tree.nodes.get(item.taxon.taxon_id)?.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                   </IconButton>
-                  <button className="tree-node-button" type="button" title={formatTaxonTreeName(item.taxon, nameParts)} onClick={() => enterTaxon(item.taxon)}>
+                  <div
+                    className="tree-node-content selectable-content"
+                    title={formatTaxonName(item.taxon.names, nameParts, `Taxon ${item.taxon.taxon_id}`)}
+                    onClick={(event) => {
+                      if (!selectionIntersectsElement(event.currentTarget)) enterTaxon(item.taxon);
+                    }}
+                  >
                     <Network size={14} />
-                    <span className="tree-label">{formatTaxonTreeName(item.taxon, nameParts)}</span>
-                  </button>
+                    <span className="tree-label">{formatTaxonName(item.taxon.names, nameParts, `Taxon ${item.taxon.taxon_id}`)}</span>
+                  </div>
                 </div>
               ) : item.kind === "photo" ? (
-                <button className={`finder-row${taxonTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`} style={{ paddingLeft: 4 + item.depth * 14 }} type="button" onClick={() => activation.clickPhoto(item.photo)} onDoubleClick={() => activation.doubleClickPhoto(item.photo)} onContextMenu={(event) => openTaxonPhotoContextMenu(event, item)}>
+                <div
+                  className={`finder-row selectable-content${taxonTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
+                  style={{ paddingLeft: 4 + item.depth * 14 }}
+                  onClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) {
+                      activation.cancelPendingClick();
+                      return;
+                    }
+                    activation.clickPhoto(item.photo);
+                  }}
+                  onDoubleClick={(event) => {
+                    if (selectionIntersectsElement(event.currentTarget)) {
+                      activation.cancelPendingClick();
+                      return;
+                    }
+                    activation.doubleClickPhoto(item.photo);
+                  }}
+                  onContextMenu={(event) => openTaxonPhotoContextMenu(event, item)}
+                >
                   <Images size={14} /><span>{item.photo.filename}</span>
-                </button>
+                </div>
               ) : (
                 <button
                   className={`finder-row tree-more${taxonTreeRowKey(item) === resolvedActiveRowKey ? " active" : ""}`}
@@ -665,10 +847,14 @@ export function TaxonPhotosView({
 export function PhotoMapView({
   active,
   handlers,
+  onStatus,
+  onPhotoTaxonDisplayState,
   backgroundOperation,
 }: {
   active: boolean;
   handlers: PhotoOpenHandlers;
+  onStatus: (message: string) => void;
+  onPhotoTaxonDisplayState: (state: PhotoTaxonDisplayState | null) => void;
   backgroundOperation?: OperationState | null;
 }) {
   const libraryUuid = usePhotoLibraryIdentity();
@@ -704,6 +890,12 @@ export function PhotoMapView({
     handlers,
     selectFirst: false,
     stateKey: "map.interaction",
+    onStatus,
+  });
+  usePublishedPhotoTaxonSummary({
+    photoId: interaction.selectedId,
+    active,
+    onChange: onPhotoTaxonDisplayState,
   });
   useDeferredPhotoMutation(active, () => {
     if (refitTimer.current) return;
@@ -814,6 +1006,10 @@ export function PhotoMapView({
     if (page.hasMore && !page.loading) void page.loadMore();
   }, [page.hasMore, page.loadMore, page.loading]);
 
+  useEffect(() => {
+    if (active) onStatus(`${page.items.length} photos in view`);
+  }, [active, onStatus, page.items.length]);
+
   return (
     <div
       className="map-view"
@@ -838,7 +1034,6 @@ export function PhotoMapView({
           <span>{interaction.selected.filename}</span>
         </button>
       )}
-      <span className="map-count">{page.items.length} photos in view{page.loading ? " loading" : ""}</span>
       {interaction.contextMenu}
     </div>
   );
@@ -855,15 +1050,17 @@ function PhotoIndexingNotice({
 }) {
   if (!operation || !["queued", "running"].includes(operation.state)) return null;
   if (operation.module === "mapping" && !showMapping) return null;
-  const stage = operation.progress?.stage ?? operation.message;
+  const stage = operation.progress?.stage ?? operation.operation ?? operation.module;
   const metadata = stage.toLowerCase().includes("metadata");
   const prefix = operation.module === "mapping"
     ? "Photo mapping is still running · results may be incomplete"
     : map && metadata
       ? "Location metadata is still being indexed"
       : "Photo Library indexing · results may be incomplete";
-  const progress = operation.total === null
+  const current = operation.progress?.current;
+  const total = operation.progress?.total;
+  const progress = current === null || current === undefined || total === null || total === undefined
     ? ""
-    : ` · ${operation.completed.toLocaleString()} / ${operation.total.toLocaleString()}`;
+    : ` · ${current.toLocaleString()} / ${total.toLocaleString()}`;
   return <div className="photo-indexing-notice" role="status">{prefix}{progress}</div>;
 }

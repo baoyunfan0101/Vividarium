@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::cleanup;
-use super::sql::{SqlDataSource, SqlSourceSchema, inspect_sql_data_source, is_safe_identifier};
+use super::sql_sources::{SqlDataSource, inspect_sql_data_source, is_safe_identifier};
+use super::sql_types::SqlSourceSchema;
 use crate::{CoreError, CoreResult, Database};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

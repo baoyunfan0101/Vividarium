@@ -189,7 +189,7 @@ export function PhotoStage({
             width: baseDisplaySize.width,
             height: baseDisplaySize.height,
             opacity: ready ? 1 : 0,
-            transform: `translate3d(-50%, -50%, 0) translate3d(${clampedPan.x}px, ${clampedPan.y}px, 0) scale3d(${zoom}, ${zoom}, 1)`,
+            transform: `translate(-50%, -50%) translate(${clampedPan.x}px, ${clampedPan.y}px) scale(${zoom})`,
           }}
         />
       </div>

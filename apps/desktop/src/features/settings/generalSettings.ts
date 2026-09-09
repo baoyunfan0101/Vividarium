@@ -6,7 +6,12 @@ export function normalizeGeneralSettings(value: Partial<GeneralSettings>): Gener
     restore_tabs: true,
     recent_searches_limit: 10,
     csv_delimiter: ",",
-    taxon_tree_name_parts: {
+    photos_taxon_name_parts: {
+      sci_name: true,
+      zh_name: true,
+      en_name: true,
+    },
+    taxonomy_taxon_name_parts: {
       sci_name: true,
       zh_name: true,
       en_name: true,
@@ -23,7 +28,14 @@ export function normalizeGeneralSettings(value: Partial<GeneralSettings>): Gener
     restore_tabs: typeof value.restore_tabs === "boolean" ? value.restore_tabs : fallback.restore_tabs,
     recent_searches_limit: recentSearchesLimit,
     csv_delimiter: isCsvDelimiter(value.csv_delimiter) ? value.csv_delimiter : fallback.csv_delimiter,
-    taxon_tree_name_parts: normalizeTaxonTreeNameParts(value.taxon_tree_name_parts, fallback.taxon_tree_name_parts),
+    photos_taxon_name_parts: normalizeTaxonNameParts(
+      value.photos_taxon_name_parts,
+      fallback.photos_taxon_name_parts,
+    ),
+    taxonomy_taxon_name_parts: normalizeTaxonNameParts(
+      value.taxonomy_taxon_name_parts,
+      fallback.taxonomy_taxon_name_parts,
+    ),
   };
 }
 
@@ -43,10 +55,10 @@ function isCsvDelimiter(value: unknown): value is GeneralSettings["csv_delimiter
   return value === "," || value === ";" || value === "\t" || value === "|";
 }
 
-function normalizeTaxonTreeNameParts(
-  value: Partial<GeneralSettings["taxon_tree_name_parts"]> | undefined,
-  fallback: GeneralSettings["taxon_tree_name_parts"],
-): GeneralSettings["taxon_tree_name_parts"] {
+function normalizeTaxonNameParts(
+  value: Partial<GeneralSettings["photos_taxon_name_parts"]> | undefined,
+  fallback: GeneralSettings["photos_taxon_name_parts"],
+): GeneralSettings["photos_taxon_name_parts"] {
   const next = {
     sci_name: typeof value?.sci_name === "boolean" ? value.sci_name : fallback.sci_name,
     zh_name: typeof value?.zh_name === "boolean" ? value.zh_name : fallback.zh_name,

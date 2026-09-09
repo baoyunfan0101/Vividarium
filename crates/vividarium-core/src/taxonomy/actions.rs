@@ -1,30 +1,14 @@
 use std::collections::HashSet;
 
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-use super::formatted::{start_taxonomy_session, validate_taxonomy};
-use super::view::load_taxon_summary;
-use super::{
-    TaxonInputRow, TaxonRank, TaxonRowStatus, TaxonomyNameType, TaxonomyOperationResult,
-    apply_rows, preview_rows,
-};
+use super::changeset::start_taxonomy_session;
+use super::validation::validate_taxonomy;
+use super::{TaxonRank, TaxonomyNameType};
 use crate::naming::normalize_taxonomy_name;
-use crate::operations::{self, NewAuditRow, NewOperation};
+use crate::operations::{self, NewAuditRow, NewOperation, OperationInput};
 use crate::{CoreError, CoreResult, Database};
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TaxonUpdateInput {
-    pub taxon_id: i64,
-    pub authority_year: Option<String>,
-    pub synonyms: Vec<String>,
-    pub zh_name: Option<String>,
-    pub zh_alias: Vec<String>,
-    pub en_name: Option<String>,
-    pub en_alias: Vec<String>,
-    pub geological_range: Option<String>,
-    pub source: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeleteTaxonNameInput {
@@ -60,45 +44,8 @@ pub struct SaveTaxonNameGroupInput {
     pub additions: Vec<NewTaxonNameInput>,
 }
 
-pub fn update_taxon(
-    database: &Database,
-    input: TaxonUpdateInput,
-) -> CoreResult<TaxonomyOperationResult> {
-    let connection = database.connect_taxonomy_metadata_context()?;
-    let summary = load_taxon_summary(&connection, input.taxon_id)?
-        .ok_or_else(|| CoreError::NotFound(format!("taxon {}", input.taxon_id)))?;
-    drop(connection);
-    let mut row = TaxonInputRow {
-        selected_taxon_id: Some(input.taxon_id),
-        authority_year: input.authority_year,
-        synonyms: input.synonyms,
-        zh_name: input.zh_name,
-        zh_alias: input.zh_alias,
-        en_name: input.en_name,
-        en_alias: input.en_alias,
-        geological_range: input.geological_range,
-        source: input.source,
-        ..TaxonInputRow::default()
-    };
-    for item in &summary.breadcrumb {
-        set_rank_locator(&mut row, item.rank, item.names.sci_name.clone())?;
-    }
-    set_rank_locator(&mut row, summary.rank, summary.names.sci_name)?;
-    let preview = preview_rows(database, std::slice::from_ref(&row))?;
-    if preview.rows[0].operation_types.iter().any(|value| {
-        matches!(
-            value,
-            TaxonRowStatus::Invalid
-                | TaxonRowStatus::NotMatched
-                | TaxonRowStatus::MultipleCandidates
-        )
-    }) {
-        return Err(CoreError::InvalidArgument(preview.rows[0].message.clone()));
-    }
-    apply_rows(database, &[row])
-}
-
 pub fn promote_taxon_name(database: &Database, input: PromoteTaxonNameInput) -> CoreResult<()> {
+    let action_input = taxonomy_action_input("promote_name", &input)?;
     let _guard = database.try_taxonomy_mutation()?;
     let mut connection = database.connect_taxonomy_metadata_context()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -165,6 +112,7 @@ pub fn promote_taxon_name(database: &Database, input: PromoteTaxonNameInput) -> 
             has_formatted_input: false,
         },
     )?;
+    operations::insert_operation_input(&transaction, operation_id, &action_input)?;
     transaction.execute(
         r#"
         INSERT INTO operation_changesets (operation_id, changeset_blob)
@@ -211,6 +159,7 @@ pub fn save_taxon_name_group(
     database: &Database,
     input: SaveTaxonNameGroupInput,
 ) -> CoreResult<()> {
+    let action_input = taxonomy_action_input("edit_name_group", &input)?;
     let _guard = database.try_taxonomy_mutation()?;
     let mut connection = database.connect_taxonomy_metadata_context()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -360,6 +309,7 @@ pub fn save_taxon_name_group(
             has_formatted_input: false,
         },
     )?;
+    operations::insert_operation_input(&transaction, operation_id, &action_input)?;
     transaction.execute(
         r#"
         INSERT INTO operation_changesets (operation_id, changeset_blob)
@@ -470,7 +420,7 @@ fn validate_name_group_additions(
     for addition in additions {
         let name = normalize_taxonomy_name(&addition.name)
             .ok_or_else(|| CoreError::InvalidArgument("taxonomy name must not be blank".into()))?;
-        if !seen_names.insert(name.to_lowercase()) {
+        if !seen_names.insert(name.clone()) {
             return Err(CoreError::InvalidArgument(format!(
                 "taxonomy name '{name}' is included more than once"
             )));
@@ -488,7 +438,7 @@ fn validate_name_group_additions(
                 SELECT 1 FROM taxon_names
                 WHERE taxon_id = ?
                   AND name_type IN (?, ?)
-                  AND normalized_name = lower(?)
+                  AND name = ? COLLATE BINARY
             )
             "#,
             params![taxon_id, accepted_type.code(), alias_type.code(), name],
@@ -510,7 +460,36 @@ fn normalized_optional(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn validate_taxon_name_deletion(
+    connection: &Connection,
+    taxon_id: i64,
+    name_type: TaxonomyNameType,
+) -> CoreResult<()> {
+    if name_type == TaxonomyNameType::SciName {
+        return Err(CoreError::InvalidArgument(
+            "the unique sci_name cannot be deleted".into(),
+        ));
+    }
+    let (alias_type, language) = match name_type {
+        TaxonomyNameType::ZhName => (TaxonomyNameType::ZhAlias, "Chinese"),
+        TaxonomyNameType::EnName => (TaxonomyNameType::EnAlias, "English"),
+        _ => return Ok(()),
+    };
+    let aliases_exist = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM taxon_names WHERE taxon_id = ? AND name_type = ?)",
+        params![taxon_id, alias_type.code()],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if aliases_exist {
+        return Err(CoreError::InvalidArgument(format!(
+            "{language} accepted name cannot be deleted while {language} aliases exist"
+        )));
+    }
+    Ok(())
+}
+
 pub fn delete_taxon_name(database: &Database, input: DeleteTaxonNameInput) -> CoreResult<()> {
+    let action_input = taxonomy_action_input("delete_taxonomy_name", &input)?;
     let _guard = database.try_taxonomy_mutation()?;
     let mut connection = database.connect_taxonomy_metadata_context()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -527,11 +506,11 @@ pub fn delete_taxon_name(database: &Database, input: DeleteTaxonNameInput) -> Co
                 input.name_id, input.taxon_id
             ))
         })?;
-    if TaxonomyNameType::from_code(name_type)? == TaxonomyNameType::SciName {
-        return Err(CoreError::InvalidArgument(
-            "the unique sci_name cannot be deleted".into(),
-        ));
-    }
+    validate_taxon_name_deletion(
+        &transaction,
+        input.taxon_id,
+        TaxonomyNameType::from_code(name_type)?,
+    )?;
     let mut session = start_taxonomy_session(&transaction)?;
     let deleted = transaction.execute(
         "DELETE FROM taxon_names WHERE taxon_id = ? AND name_id = ?",
@@ -559,6 +538,7 @@ pub fn delete_taxon_name(database: &Database, input: DeleteTaxonNameInput) -> Co
             has_formatted_input: false,
         },
     )?;
+    operations::insert_operation_input(&transaction, operation_id, &action_input)?;
     transaction.execute(
         r#"
         INSERT INTO operation_changesets (operation_id, changeset_blob)
@@ -591,6 +571,12 @@ pub fn delete_taxon_name(database: &Database, input: DeleteTaxonNameInput) -> Co
 }
 
 pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<()> {
+    let action_input = taxonomy_action_input(
+        "delete_taxon",
+        &serde_json::json!({
+            "taxon_id": taxon_id,
+        }),
+    )?;
     let _guard = database.try_taxonomy_mutation()?;
     let mut connection = database.connect_taxonomy_metadata_context()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -639,6 +625,7 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<()> {
             has_formatted_input: false,
         },
     )?;
+    operations::insert_operation_input(&transaction, operation_id, &action_input)?;
     transaction.execute(
         r#"
         INSERT INTO operation_changesets (operation_id, changeset_blob)
@@ -670,22 +657,13 @@ pub fn delete_taxon(database: &Database, taxon_id: i64) -> CoreResult<()> {
     Ok(())
 }
 
-fn set_rank_locator(
-    row: &mut TaxonInputRow,
-    rank: TaxonRank,
-    scientific_name: Option<String>,
-) -> CoreResult<()> {
-    let name = scientific_name.ok_or_else(|| {
-        CoreError::InvalidArgument(format!("{} taxon has no sci_name", rank.as_str()))
-    })?;
-    match rank {
-        TaxonRank::Kingdom => row.kingdom = Some(name),
-        TaxonRank::Order => row.order = Some(name),
-        TaxonRank::Family => row.family = Some(name),
-        TaxonRank::Genus => row.genus = Some(name),
-        TaxonRank::Species => row.species = Some(name),
-    }
-    Ok(())
+fn taxonomy_action_input<T: Serialize>(action: &str, input: &T) -> CoreResult<OperationInput> {
+    Ok(OperationInput::TaxonomyAction {
+        action: action.into(),
+        input: serde_json::to_value(input).map_err(|error| {
+            CoreError::InvalidArgument(format!("invalid taxonomy action input: {error}"))
+        })?,
+    })
 }
 
 #[cfg(test)]
@@ -693,6 +671,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::taxonomy::{TaxonInputRow, apply_rows};
 
     fn database() -> (TempDir, Database) {
         let directory = TempDir::new().unwrap();
@@ -806,6 +785,14 @@ mod tests {
             .remove(0);
         assert_eq!(operation.kind, "taxonomy_name_group_save");
         assert!(operation.rollbackable);
+        match crate::taxonomy::get_operation_input(&database, operation.operation_id).unwrap() {
+            Some(OperationInput::TaxonomyAction { action, input }) => {
+                assert_eq!(action, "edit_name_group");
+                assert_eq!(input["taxon_id"], taxon_id);
+                assert_eq!(input["name_type"], "synonym");
+            }
+            input => panic!("unexpected taxonomy action input: {input:?}"),
+        }
         crate::taxonomy::rollback_operation(&database, operation.operation_id).unwrap();
         let connection = database.connect_taxonomy_metadata_context().unwrap();
         assert_eq!(
@@ -832,6 +819,37 @@ mod tests {
     fn saving_a_name_group_validates_type_primary_and_species_names() {
         let (_directory, database) = database();
         let (taxon_id, sci_name_id, _synonym_id) = canis_species(&database);
+
+        let exact_duplicate = save_taxon_name_group(
+            &database,
+            SaveTaxonNameGroupInput {
+                taxon_id,
+                name_type: TaxonomyNameType::Synonym,
+                updates: vec![],
+                additions: vec![NewTaxonNameInput {
+                    name: "Canis lycaon".into(),
+                    authority_year: None,
+                    source: None,
+                }],
+            },
+        )
+        .unwrap_err();
+        assert!(exact_duplicate.to_string().contains("already exists"));
+
+        save_taxon_name_group(
+            &database,
+            SaveTaxonNameGroupInput {
+                taxon_id,
+                name_type: TaxonomyNameType::Synonym,
+                updates: vec![],
+                additions: vec![NewTaxonNameInput {
+                    name: "Canis Lycaon".into(),
+                    authority_year: None,
+                    source: None,
+                }],
+            },
+        )
+        .unwrap();
 
         let invalid_species = save_taxon_name_group(
             &database,
@@ -1025,6 +1043,163 @@ mod tests {
                 )
                 .unwrap(),
             TaxonomyNameType::Synonym.code()
+        );
+    }
+
+    #[test]
+    fn deleting_localized_accepted_names_without_aliases_succeeds() {
+        let (_directory, database) = database();
+        apply_rows(
+            &database,
+            &[TaxonInputRow {
+                kingdom: Some("Animalia".into()),
+                zh_name: Some("Animal".into()),
+                en_name: Some("Animal kingdom".into()),
+                ..TaxonInputRow::default()
+            }],
+        )
+        .unwrap();
+        let connection = database.connect_taxonomy_metadata_context().unwrap();
+        let taxon_id: i64 = connection
+            .query_row(
+                "SELECT taxon_id FROM taxon_names WHERE name = 'Animalia'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let zh_name_id: i64 = connection
+            .query_row(
+                "SELECT name_id FROM taxon_names WHERE taxon_id = ? AND name_type = ?",
+                params![taxon_id, TaxonomyNameType::ZhName.code()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let en_name_id: i64 = connection
+            .query_row(
+                "SELECT name_id FROM taxon_names WHERE taxon_id = ? AND name_type = ?",
+                params![taxon_id, TaxonomyNameType::EnName.code()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+
+        delete_taxon_name(
+            &database,
+            DeleteTaxonNameInput {
+                taxon_id,
+                name_id: zh_name_id,
+            },
+        )
+        .unwrap();
+        delete_taxon_name(
+            &database,
+            DeleteTaxonNameInput {
+                taxon_id,
+                name_id: en_name_id,
+            },
+        )
+        .unwrap();
+
+        let connection = database.connect_taxonomy_metadata_context().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM taxon_names WHERE taxon_id = ? AND name_type IN (?, ?)",
+                    params![
+                        taxon_id,
+                        TaxonomyNameType::ZhName.code(),
+                        TaxonomyNameType::EnName.code()
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        validate_taxonomy(&connection).unwrap();
+    }
+
+    #[test]
+    fn localized_aliases_block_accepted_name_deletion_until_removed() {
+        let (_directory, database) = database();
+        apply_rows(
+            &database,
+            &[TaxonInputRow {
+                kingdom: Some("Animalia".into()),
+                zh_name: Some("Animal".into()),
+                zh_alias: vec!["Creature".into()],
+                en_name: Some("Animal kingdom".into()),
+                en_alias: vec!["Animals".into()],
+                ..TaxonInputRow::default()
+            }],
+        )
+        .unwrap();
+        let connection = database.connect_taxonomy_metadata_context().unwrap();
+        let taxon_id: i64 = connection
+            .query_row(
+                "SELECT taxon_id FROM taxon_names WHERE name = 'Animalia'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let name_id = |name_type: TaxonomyNameType| {
+            connection
+                .query_row(
+                    "SELECT name_id FROM taxon_names WHERE taxon_id = ? AND name_type = ?",
+                    params![taxon_id, name_type.code()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let zh_name_id = name_id(TaxonomyNameType::ZhName);
+        let zh_alias_id = name_id(TaxonomyNameType::ZhAlias);
+        let en_name_id = name_id(TaxonomyNameType::EnName);
+        let en_alias_id = name_id(TaxonomyNameType::EnAlias);
+        drop(connection);
+
+        let zh_error = delete_taxon_name(
+            &database,
+            DeleteTaxonNameInput {
+                taxon_id,
+                name_id: zh_name_id,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            zh_error.to_string(),
+            "invalid argument: Chinese accepted name cannot be deleted while Chinese aliases exist"
+        );
+        let en_error = delete_taxon_name(
+            &database,
+            DeleteTaxonNameInput {
+                taxon_id,
+                name_id: en_name_id,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            en_error.to_string(),
+            "invalid argument: English accepted name cannot be deleted while English aliases exist"
+        );
+
+        for name_id in [zh_alias_id, zh_name_id, en_alias_id, en_name_id] {
+            delete_taxon_name(&database, DeleteTaxonNameInput { taxon_id, name_id }).unwrap();
+        }
+        let connection = database.connect_taxonomy_metadata_context().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM taxon_names WHERE taxon_id = ? AND name_type IN (?, ?, ?, ?)",
+                    params![
+                        taxon_id,
+                        TaxonomyNameType::ZhName.code(),
+                        TaxonomyNameType::ZhAlias.code(),
+                        TaxonomyNameType::EnName.code(),
+                        TaxonomyNameType::EnAlias.code()
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
         );
     }
 

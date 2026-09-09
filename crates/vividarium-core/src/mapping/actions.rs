@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{
-    PhotoMappingSummary, PhotoTaxonCandidate, PhotoTaxonStatus, apply_usage_deltas, candidates,
-    delete_queued_photo_ids, mapping_from_row, remap_photo_ids,
+    PhotoMappingDetail, PhotoMappingSummary, PhotoTaxonStatus, apply_usage_deltas, candidates,
+    delete_queued_photo_ids, mapping_from_row, matched_names, remap_photo_ids,
 };
 use crate::models::MappingMetadata;
+use crate::taxonomy::{TaxonDisplaySummary, load_taxon_display_summary};
 use crate::{CoreError, CoreResult, Database};
 
 pub fn get_metadata(database: &Database) -> CoreResult<MappingMetadata> {
@@ -48,6 +49,13 @@ pub fn get_metadata(database: &Database) -> CoreResult<MappingMetadata> {
 
 pub fn get_photo_mapping(database: &Database, photo_id: i64) -> CoreResult<PhotoMappingSummary> {
     let connection = database.connect()?;
+    get_photo_mapping_from_connection(&connection, photo_id)
+}
+
+fn get_photo_mapping_from_connection(
+    connection: &Connection,
+    photo_id: i64,
+) -> CoreResult<PhotoMappingSummary> {
     let stored = connection
         .query_row(
             "SELECT photo_id, taxon_id, status FROM photo_taxon_mapping WHERE photo_id = ?",
@@ -84,16 +92,54 @@ pub fn get_photo_mapping(database: &Database, photo_id: i64) -> CoreResult<Photo
     }
 }
 
-pub fn get_photo_mapping_candidates(
+pub fn get_photo_taxon_display_summary(
     database: &Database,
     photo_id: i64,
-) -> CoreResult<Vec<PhotoTaxonCandidate>> {
-    let mapping = get_photo_mapping(database, photo_id)?;
+) -> CoreResult<Option<TaxonDisplaySummary>> {
     let connection = database.connect()?;
-    Ok(if mapping.status == PhotoTaxonStatus::Ambiguous {
+    let taxon_id = connection
+        .query_row(
+            r#"
+            SELECT photo_taxon_mapping.taxon_id
+            FROM photo_taxon_mapping
+            WHERE photo_taxon_mapping.photo_id = ?
+              AND photo_taxon_mapping.status = 'matched'
+              AND photo_taxon_mapping.taxon_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM photo_mapping_queue
+                  WHERE photo_mapping_queue.photo_id = photo_taxon_mapping.photo_id
+              )
+            "#,
+            [photo_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    taxon_id
+        .map(|taxon_id| load_taxon_display_summary(&connection, taxon_id))
+        .transpose()
+        .map(Option::flatten)
+}
+
+pub fn get_photo_mapping_detail(
+    database: &Database,
+    photo_id: i64,
+) -> CoreResult<PhotoMappingDetail> {
+    let connection = database.connect()?;
+    let mapping = get_photo_mapping_from_connection(&connection, photo_id)?;
+    let matched_names = if mapping.status == PhotoTaxonStatus::Matched {
+        matched_names::load(&connection, photo_id)?
+    } else {
+        Vec::new()
+    };
+    let candidates = if mapping.status == PhotoTaxonStatus::Ambiguous {
         candidates::load(&connection, photo_id)?
     } else {
         Vec::new()
+    };
+    Ok(PhotoMappingDetail {
+        mapping,
+        matched_names,
+        candidates,
     })
 }
 
@@ -159,6 +205,10 @@ fn replace_photo_mapping(
     photo_id: i64,
     taxon_id: Option<i64>,
 ) -> CoreResult<PhotoMappingSummary> {
+    let selected_matched_names = taxon_id
+        .map(|taxon_id| candidates::load_matched_names(transaction, photo_id, taxon_id))
+        .transpose()?
+        .unwrap_or_default();
     let old_taxon_id = transaction
         .query_row(
             r#"
@@ -185,6 +235,7 @@ fn replace_photo_mapping(
         "#,
         params![photo_id, taxon_id, status.as_str()],
     )?;
+    matched_names::replace(transaction, photo_id, &selected_matched_names)?;
     candidates::clear(transaction, photo_id)?;
     if old_taxon_id != taxon_id {
         let mut deltas = BTreeMap::new();

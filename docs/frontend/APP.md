@@ -17,7 +17,10 @@ Parameters: none.
 
 Returns: the React application tree containing `DesktopShell`.
 
-`App` is the composition entry point and contains no page or domain logic.
+`App` is the composition entry point and contains no page or domain logic. It
+suppresses the native WebView context menu for the entire application
+lifecycle, including startup loading. Feature-owned custom context menus still
+receive their context-menu events and render normally.
 
 ### `DesktopShell(props)`
 
@@ -71,6 +74,20 @@ publishes incremental photo/index/metadata invalidations and successful
 completion invalidations. It registers `operation-progress` before relying on
 live updates and fetches a status snapshot only for startup, window-focus or
 visibility recovery; Background progress does not use a fixed polling loop.
+
+`BackgroundTasks` owns the bottom-right task popover. Active queued and running
+tasks appear before a Recent section containing at most ten completed or failed
+tasks ordered by finish time. Task titles, stage labels, progress units,
+determinate and indeterminate modes, byte counts, and elapsed or finished
+duration are defined by `backgroundPresentation`. Running elapsed time updates
+once per second in the frontend. The status-bar count includes only queued and
+running tasks.
+
+Foreground long-running workflows keep the exact operation handle returned by
+their command and wait by `task_id`. Custom SQL, Custom SQL export, Formatted
+Update preview and apply, SQL Import validation and apply, and Direct Import
+inspection and apply use this path. Owner cancellation remains tied to the tab
+while task lifecycle, progress, result, and error remain visible in Background.
 
 ### `useNativeMenu(handler)`
 

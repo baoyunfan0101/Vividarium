@@ -2,36 +2,77 @@ import { Link, Search, Sparkles, Unlink } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
   clearPhotoMapping,
-  getPhotoMapping,
-  getPhotoMappingCandidates,
+  getPhotoMappingDetail,
   setPhotoMapping,
   type PhotoMappingDetail,
 } from "../../api/mapping";
 import type { Photo } from "../../api/photos";
 import {
-  displayTaxonDetail,
   getTaxonDetail,
   type TaxonDetail,
 } from "../../api/taxonomy";
 import { errorMessage } from "../../api/common";
-import { Busy, Button, EmptyState, VirtualList } from "../../shared/ui";
+import { Busy, Button, EmptyState } from "../../shared/ui";
+import { VariableVirtualList } from "../../shared/VariableVirtualList";
 import { PhotoStage } from "../photos/PhotoMedia";
 import { TaxonCard } from "../taxonomy/TaxonCard";
+import { taxonMatchExplanations } from "../taxonomy/taxonMatchExplanation";
 import { MappingBadge } from "./MappingBadge";
 import { emitPhotoMutation, usePhotoMutation } from "../photos/photoMutations";
 import { useTaxonSearch } from "../taxonomy/useTaxonSearch";
 import { useViewState } from "../../shared/viewState";
 import { ResizablePanels } from "../../shared/ResizablePanels";
+import { PhotoPaneHeader } from "../photos/PhotoPaneHeader";
+import { usePublishedPhotoTaxonSummary, type PhotoTaxonDisplayState } from "../photos/photoTaxonSummary";
+import { usePhotoInteraction, type PhotoOpenHandlers } from "../photos/PhotoInteraction";
+
+const ignorePhotoTaxonDisplayState = (_state: PhotoTaxonDisplayState | null) => {};
+
+function StandaloneMappingPhotoPane({
+  photo,
+  handlers,
+  onStatus,
+}: {
+  photo: Photo;
+  handlers: PhotoOpenHandlers;
+  onStatus: (message: string) => void;
+}) {
+  const interaction = usePhotoInteraction({
+    photos: [photo],
+    handlers,
+    selectFirst: false,
+    stateKey: "mapping-editor.interaction",
+    onStatus,
+  });
+
+  return (
+    <>
+      <div className="editor-photo-column">
+        <div className="photo-pane-heading">
+          <PhotoPaneHeader photo={photo} />
+        </div>
+        <PhotoStage photo={photo} onContextMenu={interaction.openContextMenu} />
+      </div>
+      {interaction.contextMenu}
+    </>
+  );
+}
 
 export function MappingEditor({
   photo,
   embedded = false,
-  onOpenTaxon,
+  active = false,
+  onPhotoTaxonDisplayState = ignorePhotoTaxonDisplayState,
+  handlers,
+  onStatus,
   refreshKey = 0,
 }: {
   photo: Photo;
   embedded?: boolean;
-  onOpenTaxon: (taxonId: number) => void;
+  active?: boolean;
+  onPhotoTaxonDisplayState?: (state: PhotoTaxonDisplayState | null) => void;
+  handlers: PhotoOpenHandlers;
+  onStatus: (message: string) => void;
   refreshKey?: number;
 }) {
   const [match, setMatch] = useViewState<PhotoMappingDetail | null>("mapping-editor.match", null);
@@ -53,16 +94,17 @@ export function MappingEditor({
       setMappingRefresh((current) => current + 1);
     }
   });
+  usePublishedPhotoTaxonSummary({
+    photoId: embedded ? null : photo.photo_id,
+    active: active && !embedded,
+    onChange: onPhotoTaxonDisplayState,
+  });
 
   const reload = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [mapping, candidates] = await Promise.all([
-        getPhotoMapping(photo.photo_id),
-        getPhotoMappingCandidates(photo.photo_id),
-      ]);
-      const nextMatch = { mapping, candidates };
+      const nextMatch = await getPhotoMappingDetail(photo.photo_id);
       setMatch(nextMatch);
       if (nextMatch.mapping.status === "matched" && nextMatch.mapping.taxon_id !== null) {
         setMappedTaxon(await getTaxonDetail(nextMatch.mapping.taxon_id));
@@ -94,15 +136,7 @@ export function MappingEditor({
     }
   }
 
-  const photoPane = (
-    <div className="editor-photo-column">
-      <div className="two-line-heading">
-        <strong>{photo.filename}</strong>
-        <span>{mappedTaxon ? displayTaxonDetail(mappedTaxon) : match?.mapping.taxon_id ? `Taxon ${match.mapping.taxon_id}` : "No mapped taxon"}</span>
-      </div>
-      <PhotoStage photo={photo} />
-    </div>
-  );
+  const photoPane = <StandaloneMappingPhotoPane photo={photo} handlers={handlers} onStatus={onStatus} />;
   const currentTaxon = mappedTaxon ? {
     taxon_id: mappedTaxon.taxon_id,
     rank: mappedTaxon.rank,
@@ -124,6 +158,8 @@ export function MappingEditor({
         <TaxonCard
           compact
           taxon={currentTaxon}
+          matchExplanations={taxonMatchExplanations(match.matched_names)}
+          onClick={() => handlers.openTaxon(currentTaxon.taxon_id)}
           actions={(
             <Button
               size="small"
@@ -135,16 +171,19 @@ export function MappingEditor({
           )}
         />
       ) : match?.mapping.status === "ambiguous" ? (
-        <VirtualList
+        <VariableVirtualList
           stateKey="mapping-editor.candidates"
+          resetKey={`${photo.photo_id}:${refreshKey}:${mappingRefresh}`}
           className="candidate-stack"
           items={match.candidates}
-          rowHeight={60}
+          estimatedRowHeight={90}
           itemKey={(candidate) => candidate.summary.taxon_id}
           renderItem={(candidate) => (
             <TaxonCard
               compact
               taxon={candidate.summary}
+              matchExplanations={taxonMatchExplanations(candidate.matched_names)}
+              onClick={() => handlers.openTaxon(candidate.summary.taxon_id)}
               actions={
                 <Button
                   size="small"
@@ -168,18 +207,19 @@ export function MappingEditor({
         <Search size={14} />
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search taxonomy" />
       </label>
-      <VirtualList
+      <VariableVirtualList
         stateKey="mapping-editor.results"
         resetKey={query.trim()}
         className="mapping-search-results"
         items={taxonomySearch.results}
-        rowHeight={58}
+        estimatedRowHeight={90}
         itemKey={(item) => item.taxon_id}
         renderItem={(item) => (
           <TaxonCard
             compact
             taxon={item}
-            onClick={() => onOpenTaxon(item.taxon_id)}
+            matchExplanations={taxonMatchExplanations(item.matches)}
+            onClick={() => handlers.openTaxon(item.taxon_id)}
             actions={
               <Button size="small" disabled={Boolean(busy)} onClick={() => void mutate(`Mapping ${item.taxon_id}`, () => setPhotoMapping(photo.photo_id, item.taxon_id))}>
                 <Link size={12} /> {busy === `Mapping ${item.taxon_id}` ? "Mapping..." : "Map"}

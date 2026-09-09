@@ -34,7 +34,7 @@ fn thumbnails_are_isolated_between_photo_libraries() {
     let thumbnail_root = data.path().join("thumbnails");
     open_library(&database, root_a.path().to_str().unwrap()).unwrap();
     let library_a = database.active_photo_library().unwrap().unwrap();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     initial_index_photo_library(&database, &library_a.library_uuid, &mut progress).unwrap();
     let indexed_a = list_photos(&database).unwrap().remove(0);
     let thumbnail_a = get_or_create_thumbnail_for_library(
@@ -80,8 +80,8 @@ fn initial_index_is_durable_and_does_not_generate_thumbnails() {
     assert!(!is_initial_index_complete(&database, &library.library_uuid).unwrap());
     let mut updates = Vec::new();
     let indexed = {
-        let mut progress = |current, total, message: &str| {
-            updates.push((current, total, message.to_string()));
+        let mut progress = |progress: OperationProgress| {
+            updates.push(progress);
         };
         initial_index_photo_library(&database, &library.library_uuid, &mut progress)
             .unwrap()
@@ -92,12 +92,12 @@ fn initial_index_is_durable_and_does_not_generate_thumbnails() {
     assert!(is_initial_index_complete(&database, &library.library_uuid).unwrap());
     assert_eq!(list_photos(&database).unwrap()[0].thumbnail_path, None);
     assert_eq!(
-        updates.last().map(|update| update.2.as_str()),
-        Some("Initial photo index complete")
+        updates.last().map(|update| update.stage.as_str()),
+        Some("photo_index_complete")
     );
 
     fs::write(root.path().join("later.jpg"), b"later").unwrap();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     assert!(
         initial_index_photo_library(&database, &library.library_uuid, &mut progress)
             .unwrap()
@@ -114,7 +114,7 @@ fn repeat_photo_scan_skips_unchanged_files_and_queues_new_or_changed_files() {
     let database = Database::open(data.path().join("vividarium.db")).unwrap();
     open_library(&database, root.path().to_str().unwrap()).unwrap();
     let library = database.active_photo_library().unwrap().unwrap();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
 
     let initial = scan_photo_library(&database, &library.library_uuid, &mut progress).unwrap();
     assert_eq!(initial.inserted, 1);
@@ -145,21 +145,20 @@ fn metadata_index_skips_completed_photos_and_reports_progress() {
     let database = Database::open(data.path().join("vividarium.db")).unwrap();
     open_library(&database, root.path().to_str().unwrap()).unwrap();
     let library = database.active_photo_library().unwrap().unwrap();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     initial_index_photo_library(&database, &library.library_uuid, &mut progress).unwrap();
     assert!(has_pending_photo_metadata(&database, &library.library_uuid).unwrap());
 
     let mut updates = Vec::new();
-    let first = index_photo_metadata_for_library(
-        &database,
-        &library.library_uuid,
-        &mut |current, total, stage| updates.push((current, total, stage.to_string())),
-    )
-    .unwrap();
+    let first =
+        index_photo_metadata_for_library(&database, &library.library_uuid, &mut |progress| {
+            updates.push(progress)
+        })
+        .unwrap();
     assert_eq!(first.total, 1);
     assert_eq!(first.previously_indexed, 0);
     assert_eq!(first.indexed, 1);
-    assert_eq!(updates.last().map(|value| value.0), Some(1));
+    assert_eq!(updates.last().and_then(|value| value.current), Some(1));
     assert!(!has_pending_photo_metadata(&database, &library.library_uuid).unwrap());
 
     let second =
@@ -192,7 +191,7 @@ fn background_metadata_makes_gps_photo_queryable_without_opening_details() {
     let database = Database::open(data.path().join("vividarium.db")).unwrap();
     open_library(&database, root.path().to_str().unwrap()).unwrap();
     let library = database.active_photo_library().unwrap().unwrap();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     initial_index_photo_library(&database, &library.library_uuid, &mut progress).unwrap();
 
     assert!(
@@ -246,7 +245,7 @@ fn failed_initial_index_remains_retryable() {
     open_library(&database, root.path().to_str().unwrap()).unwrap();
     let library = database.active_photo_library().unwrap().unwrap();
     root.close().unwrap();
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
 
     assert!(initial_index_photo_library(&database, &library.library_uuid, &mut progress).is_err());
     assert!(!is_initial_index_complete(&database, &library.library_uuid).unwrap());
@@ -277,10 +276,26 @@ fn opens_and_refreshes_the_requested_directory_subtree() {
     fs::write(root.path().join("nested").join("second.jpg"), b"second").unwrap();
     let database = Database::open(data.path().join("vividarium.db")).unwrap();
     let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
-    let result = refresh_directory(&database, library.root_directory_id).unwrap();
+    let mut progress = Vec::new();
+    let result =
+        refresh_directory_with_progress(&database, library.root_directory_id, &mut |event| {
+            progress.push(event)
+        })
+        .unwrap();
     assert_eq!(result.inserted, 2);
     assert_eq!(result.directories_inserted, 1);
     assert_eq!(list_photos(&database).unwrap().len(), 2);
+    assert!(progress.iter().any(|event| event.stage == "scanning_files"));
+    assert!(
+        progress
+            .iter()
+            .any(|event| event.stage == "updating_photo_index")
+    );
+    assert!(
+        progress
+            .iter()
+            .all(|event| event.current.is_none() && event.total.is_none())
+    );
     let listing = browse_directory(&database, library.root_directory_id, None, 20).unwrap();
     assert_eq!(listing.items.len(), 2);
     match &listing.items[0] {
@@ -842,7 +857,7 @@ fn records_an_operation_when_every_rename_row_fails() {
 fn renames_a_matched_photo_with_its_accepted_scientific_name() {
     let data = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
-    fs::write(root.path().join("canis lupus.JPG"), b"photo").unwrap();
+    fs::write(root.path().join("Canis lupus.JPG"), b"photo").unwrap();
     let database = Database::open_test(data.path().join("vividarium.db")).unwrap();
     let connection = database.connect().unwrap();
     connection
@@ -862,7 +877,7 @@ fn renames_a_matched_photo_with_its_accepted_scientific_name() {
     let library = open_library(&database, root.path().to_str().unwrap()).unwrap();
     refresh_directory(&database, library.root_directory_id).unwrap();
     let photo = list_photos(&database).unwrap().remove(0);
-    let mut progress = |_: u64, _: Option<u64>, _: &str| {};
+    let mut progress = |_: OperationProgress| {};
     mapping::process_pending_photo_matches(&database, &mut progress).unwrap();
     mapping::set_photo_mapping(&database, photo.photo_id, taxon_id).unwrap();
     let mut taxonomy = database.connect_taxonomy().unwrap();

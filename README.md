@@ -32,41 +32,56 @@ Vividarium brings that work into one native desktop application:
 
 ## Product Tour
 
+Explore the photo and mapping workflows in the light theme, then the taxonomy
+and customization workbenches in the dark theme.
+
 <table>
   <tr>
     <td width="50%" valign="top">
-      <strong>Folders</strong><br>
-      Browse indexed photos in synchronized list and full-image views.<br><br>
-      <a href="assets/screenshots/folders-photo-view.png"><img src="assets/screenshots/folders-photo-view.png" alt="Folders workspace showing a photo list and full-image view" width="100%"></a>
+      <strong>Folders</strong> <em>- Light theme</em><br>
+      Browse indexed photos, open the photo context menu, and inspect the full image.<br><br>
+      <a href="assets/screenshots/folders-photo-view.png"><img src="assets/screenshots/folders-photo-view.png" alt="Vividarium Folders workspace in the light theme, showing a photo list, context menu, and full-image view" width="100%"></a>
     </td>
     <td width="50%" valign="top">
-      <strong>Taxon Tree</strong><br>
-      Navigate the taxonomy hierarchy alongside a virtual thumbnail grid.<br><br>
-      <a href="assets/screenshots/taxon-tree-grid.png"><img src="assets/screenshots/taxon-tree-grid.png" alt="Taxon Tree workspace showing taxonomy hierarchy and photo grid" width="100%"></a>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <strong>Custom SQL</strong><br>
-      Query accessible taxonomy and file data with structured results.<br><br>
-      <a href="assets/screenshots/custom-sql.png"><img src="assets/screenshots/custom-sql.png" alt="Custom SQL workspace showing a query and tabular results" width="100%"></a>
-    </td>
-    <td width="50%" valign="top">
-      <strong>Taxonomy Search</strong><br>
-      Search names, inspect the hierarchy, and maintain taxon records.<br><br>
-      <a href="assets/screenshots/taxonomy-search.png"><img src="assets/screenshots/taxonomy-search.png" alt="Taxonomy Search workspace showing search results and taxon details" width="100%"></a>
+      <strong>Taxon Tree</strong> <em>- Light theme</em><br>
+      Navigate photographed taxa alongside a virtual thumbnail grid.<br><br>
+      <a href="assets/screenshots/taxon-tree-grid.png"><img src="assets/screenshots/taxon-tree-grid.png" alt="Vividarium Taxon Tree workspace in the light theme, showing a taxonomy hierarchy and photo grid" width="100%"></a>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <strong>Mapping</strong><br>
+      <strong>Map</strong> <em>- Light theme</em><br>
+      Browse geotagged photos on an interactive map with an image preview.<br><br>
+      <a href="assets/screenshots/map.png"><img src="assets/screenshots/map.png" alt="Vividarium Map workspace in the light theme, showing geotagged photo markers and an image preview" width="100%"></a>
+    </td>
+    <td width="50%" valign="top">
+      <strong>Mapping</strong> <em>- Light theme</em><br>
       Review ambiguous filename matches and map photos directly to taxa.<br><br>
-      <a href="assets/screenshots/mapping-review.png"><img src="assets/screenshots/mapping-review.png" alt="Mapping workspace showing a photo and candidate taxa" width="100%"></a>
+      <a href="assets/screenshots/mapping-review.png"><img src="assets/screenshots/mapping-review.png" alt="Vividarium Mapping workspace in the light theme, showing a photo and candidate taxa" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <strong>Taxonomy Search</strong> <em>- Dark theme</em><br>
+      Search names, inspect the hierarchy, and maintain complete taxon records.<br><br>
+      <a href="assets/screenshots/taxonomy-search.png"><img src="assets/screenshots/taxonomy-search.png" alt="Vividarium Taxonomy Search workspace in the dark theme, showing search results and taxon details" width="100%"></a>
     </td>
     <td width="50%" valign="top">
-      <strong>Hooks</strong><br>
-      Customize parsers and validate their behavior with project tests.<br><br>
-      <a href="assets/screenshots/hooks-and-tests.png"><img src="assets/screenshots/hooks-and-tests.png" alt="Hooks settings showing a parser and passing project tests" width="100%"></a>
+      <strong>Custom SQL</strong> <em>- Dark theme</em><br>
+      Query accessible taxonomy and file data with structured, exportable results.<br><br>
+      <a href="assets/screenshots/custom-sql.png"><img src="assets/screenshots/custom-sql.png" alt="Vividarium Custom SQL workspace in the dark theme, showing a query and tabular results" width="100%"></a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <strong>SQL Import</strong> <em>- Dark theme</em><br>
+      Build, validate, and apply a replacement taxonomy from staged SQL sources.<br><br>
+      <a href="assets/screenshots/sql-import.png"><img src="assets/screenshots/sql-import.png" alt="Vividarium SQL Import settings in the dark theme, showing staged sources, SQL, and validation results" width="100%"></a>
+    </td>
+    <td width="50%" valign="top">
+      <strong>Hooks</strong> <em>- Dark theme</em><br>
+      Customize Rhai parsers and verify their behavior with project tests.<br><br>
+      <a href="assets/screenshots/hooks-and-tests.png"><img src="assets/screenshots/hooks-and-tests.png" alt="Vividarium Hooks settings in the dark theme, showing a Rhai parser and passing project tests" width="100%"></a>
     </td>
   </tr>
 </table>
@@ -132,7 +147,10 @@ OpenStreetMap is available without configuration. Tianditu can be selected under
 - Vividarium has no account system and no application cloud sync.
 - Network access is used only for selected map tiles, update checks, and links that the user explicitly opens.
 
-Database schema version `2` is required. Databases with another schema version are rejected; no migration interface is provided.
+Vividarium 3.0.0 databases use schema `2`. Vividarium 3.1.0 automatically
+upgrades supported schema-2 metadata, taxonomy, and Photo Library databases to
+schema `3`. The upgrade is forward-only: databases opened by 3.1.0 are not
+supported by Vividarium 3.0.0.
 
 <details>
 <summary><strong>Architecture</strong></summary>

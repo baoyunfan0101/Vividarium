@@ -12,7 +12,7 @@ export type AppUpdateEvent =
   | { event: "progress"; data: { chunk_length: number; downloaded: number } }
   | { event: "finished" };
 
-export const getAppVersion = () => call<string>("get_app_version", undefined, () => "3.0.0");
+export const getAppVersion = () => call<string>("get_app_version", undefined, () => "development");
 export const checkAppUpdate = () => call<AppUpdateInfo | null>("check_app_update", undefined, () => null);
 export async function installAppUpdate(onEvent: (event: AppUpdateEvent) => void): Promise<void> {
   if (!desktopRuntime) return;

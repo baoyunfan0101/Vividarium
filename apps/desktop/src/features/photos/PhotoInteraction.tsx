@@ -9,6 +9,7 @@ export type PhotoOpenHandlers = {
   openDetails: (photo: Photo) => void;
   openTaxon: (taxonId: number) => void;
   openMappingEditor: (photo: Photo) => void;
+  openFullscreen: (photo: Photo, onReturnFocus?: () => void) => void;
 };
 
 type PhotoContextState = {
@@ -25,12 +26,14 @@ export function usePhotoInteraction({
   knownMapping,
   selectFirst = true,
   stateKey,
+  onStatus,
 }: {
   photos: Photo[];
   handlers: PhotoOpenHandlers;
   knownMapping?: (photo: Photo) => PhotoMappingSummary | null | undefined;
   selectFirst?: boolean;
   stateKey?: string;
+  onStatus: (message: string) => void;
 }) {
   const [selectedId, setSelectedId] = useViewState<number | null>(
     stateKey ? `${stateKey}.selected-photo` : null,
@@ -73,7 +76,9 @@ export function usePhotoInteraction({
         emitPhotoMutation({ photoId: photo.photo_id, kind: "photo", photo });
       }}
       onMappingChanged={() => emitPhotoMutation({ photoId: context.photo.photo_id, kind: "mapping" })}
+      onStatus={onStatus}
       onOpenDetails={() => handlers.openDetails(context.photo)}
+      onOpenFullscreen={() => handlers.openFullscreen(context.photo)}
       onOpenTaxon={handlers.openTaxon}
       onOpenMappingEditor={() => handlers.openMappingEditor(context.photo)}
     />

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   acceptedTaxonNameGroup,
@@ -11,6 +12,10 @@ import {
   taxonNameGroupKinds,
   taxonNameGroupLabels,
 } from "../src/features/taxonomy/taxonEditing.ts";
+
+function source(path: string) {
+  return readFileSync(new URL(path, import.meta.url), "utf8");
+}
 
 test("defines the six visible groups and their primary relationships", () => {
   assert.deepEqual(taxonNameGroupKinds, [
@@ -42,18 +47,33 @@ test("defines the six visible groups and their primary relationships", () => {
   );
 });
 
-test("shows promote and delete only for non-primary names", () => {
+test("uses family state for accepted-name deletion", () => {
   assert.deepEqual(
-    taxonNameGroupKinds.map((kind) => [kind, canPromoteTaxonName(kind), canDeleteTaxonName(kind)]),
+    taxonNameGroupKinds.map((kind) => [
+      kind,
+      canPromoteTaxonName(kind),
+      canDeleteTaxonName(kind, false),
+      canDeleteTaxonName(kind, true),
+    ]),
     [
-      ["sci_name", false, false],
-      ["synonym", true, true],
-      ["zh_name", false, false],
-      ["zh_alias", true, true],
-      ["en_name", false, false],
-      ["en_alias", true, true],
+      ["sci_name", false, false, false],
+      ["synonym", true, true, true],
+      ["zh_name", false, true, false],
+      ["zh_alias", true, true, true],
+      ["en_name", false, true, false],
+      ["en_alias", true, true, true],
     ],
   );
+});
+
+test("renders name actions from independent promote and delete decisions", () => {
+  const editor = source("../src/features/taxonomy/TaxonNameGroupEditor.tsx");
+  const hierarchy = source("../src/features/taxonomy/TaxonomyHierarchyPage.tsx");
+  assert.match(editor, /promoteAllowed \|\| deleteAllowed \? \(\s*<div className="taxonomy-name-actions">/);
+  assert.match(editor, /\{deleteAllowed \? \(/);
+  assert.match(hierarchy, /zh_name: canDeleteTaxonName\("zh_name", detail\.names\.zh_aliases\.length > 0\)/);
+  assert.match(hierarchy, /en_name: canDeleteTaxonName\("en_name", detail\.names\.en_aliases\.length > 0\)/);
+  assert.match(hierarchy, /deleteAllowed=\{deleteAllowed\[group\.kind\]\}/);
 });
 
 test("creates editable metadata rows while keeping existing names immutable", () => {

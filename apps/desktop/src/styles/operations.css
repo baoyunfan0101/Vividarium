@@ -122,8 +122,8 @@
   transition: none;
 }
 
-button.operation-summary-main:hover:not(:disabled),
-button.operation-summary-main:active:not(:disabled) {
+.operation-summary-main:hover,
+.operation-summary-main:active {
   background-color: transparent;
   filter: none;
   transform: none;
@@ -145,6 +145,43 @@ button.operation-summary-main:active:not(:disabled) {
   padding: 8px;
   overflow: auto;
 }
+
+.history-detail-section { min-width: 0; }
+.history-detail-section > h2 {
+  margin: 0 0 8px;
+  color: var(--quiet);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.history-input-section {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.history-input-sql { height: min(320px, 42vh); border: 1px solid var(--line); }
+.history-input-unavailable { padding: 10px; color: var(--muted); }
+.history-input-table-scroll { width: 100%; overflow-x: auto; }
+.history-input-table { min-width: max-content; border-collapse: collapse; }
+.history-input-table th,
+.history-input-table td {
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+.history-input-table th { background: var(--panel-2); }
+.history-action-input { display: grid; gap: 8px; }
+.history-action-input dl { display: grid; gap: 5px; margin: 0; }
+.history-action-input dl > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr);
+  gap: 10px;
+}
+.history-action-input dt { color: var(--muted); }
+.history-action-input dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 
 .audit-row {
   display: grid;

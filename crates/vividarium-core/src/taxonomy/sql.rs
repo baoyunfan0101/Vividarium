@@ -1,41 +1,44 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::ffi::{CStr, CString};
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::ptr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+use std::time::Duration;
 
 use rusqlite::ffi;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params, params_from_iter};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
-use super::formatted::{
-    affected_taxon_ids_from_changeset, start_taxonomy_session, validate_taxonomy,
-};
+use super::changeset::{affected_taxon_ids_from_changeset, start_taxonomy_session};
 #[cfg(test)]
 use super::sql_inputs::SqlInputKind;
 use super::sql_inputs::{
     self, AddSqlInputRequest, AddSqlInputResult, PersistentSqlInput, RemoveSqlInputRequest,
     RemoveSqlInputResult, SqlInputScope,
 };
+use super::sql_sources::{
+    detach_sources, inspect_sqlite_source, prepare_sources, prepare_sources_with_progress,
+};
 use super::sql_support::{
-    RawStatement, execute_preview_statement_raw, sqlite_error, statement_columns, statement_row,
+    CUSTOM_SQL_STATEMENT_TIMEOUT, SqlStatementExecutionContext, SqlStatementExecutionLimits,
+    count_sql_statements, execute_preview_statement_guarded, prepare_statement_raw, sqlite_error,
+    statement_columns, statement_row, with_sql_statement_guard,
+};
+use super::sql_types::{SqlColumn, SqlSourceSchema, SqlStatementMessage, SqlValue};
+use super::validation::{
+    TaxonomyValidationScope, taxonomy_validation_scope_with_cancellation,
+    validate_taxonomy_changes_with_cancellation, validate_taxonomy_with_progress_and_cancellation,
 };
 use crate::metadata::{self, MetadataKey};
-use crate::operations::{self, NewAuditRow, NewOperation};
-use crate::{CoreError, CoreResult, Database};
+use crate::operations::{self, NewAuditRow, NewOperation, OperationInput};
+use crate::{
+    CancellationToken, CoreError, CoreResult, Database, OperationProgress, OperationProgressUnit,
+};
 
 pub const DEFAULT_SQL_RESULT_ROW_LIMIT: usize = 1000;
+const INCREMENTAL_VALIDATION_TAXON_LIMIT: usize = 5_000;
 static CUSTOM_SQL_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(super) enum SqlDataSource {
-    Csv { alias: String, path: PathBuf },
-    Sqlite { alias: String, path: PathBuf },
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustomTaxonomySqlRequest {
@@ -46,6 +49,7 @@ pub struct CustomTaxonomySqlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustomTaxonomySqlExportRequest {
     pub sql: String,
+    pub statement_index: usize,
     pub destination_path: PathBuf,
 }
 
@@ -68,72 +72,41 @@ pub struct SqlResultSet {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SqlColumn {
-    pub name: String,
-    pub declared_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-pub enum SqlValue {
-    Null,
-    Integer(i64),
-    Real(f64),
-    Text(String),
-    Blob(String),
-}
-
-impl SqlValue {
-    fn csv_value(&self) -> String {
-        match self {
-            Self::Null => String::new(),
-            Self::Integer(value) => value.to_string(),
-            Self::Real(value) => value.to_string(),
-            Self::Text(value) | Self::Blob(value) => value.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SqlStatementMessage {
-    pub statement_index: usize,
-    pub affected_rows: Option<u64>,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SqlExportResult {
     pub path: String,
     pub row_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SqlSourceSchema {
-    pub alias: String,
-    pub objects: Vec<SqlSourceObject>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SqlSourceObject {
-    pub name: String,
-    pub object_type: SqlObjectType,
-    pub columns: Vec<SqlColumn>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SqlObjectType {
-    Table,
-    View,
-    VirtualTable,
 }
 
 pub fn execute_custom_taxonomy_sql(
     database: &Database,
     request: &CustomTaxonomySqlRequest,
 ) -> CoreResult<CustomSqlExecutionResult> {
+    execute_custom_taxonomy_sql_with_cancellation(database, request, &CancellationToken::new())
+}
+
+pub fn execute_custom_taxonomy_sql_with_cancellation(
+    database: &Database,
+    request: &CustomTaxonomySqlRequest,
+    cancellation: &CancellationToken,
+) -> CoreResult<CustomSqlExecutionResult> {
+    execute_custom_taxonomy_sql_with_progress_and_cancellation(
+        database,
+        request,
+        &mut |_| {},
+        cancellation,
+    )
+}
+
+pub fn execute_custom_taxonomy_sql_with_progress_and_cancellation(
+    database: &Database,
+    request: &CustomTaxonomySqlRequest,
+    progress: &mut (dyn FnMut(OperationProgress) + Send),
+    cancellation: &CancellationToken,
+) -> CoreResult<CustomSqlExecutionResult> {
+    cancellation.check()?;
     let sql_mutex = custom_sql_mutex(database)?;
     let _sql_guard = lock_custom_sql(&sql_mutex)?;
+    cancellation.check()?;
     let _guard = database.try_taxonomy_mutation()?;
     let sql = require_sql(&request.sql)?;
     let maximum_result_rows = request
@@ -141,43 +114,91 @@ pub fn execute_custom_taxonomy_sql(
         .unwrap_or(DEFAULT_SQL_RESULT_ROW_LIMIT)
         .min(DEFAULT_SQL_RESULT_ROW_LIMIT);
     let mut connection = database.connect_taxonomy()?;
+    cancellation.install_sqlite_progress_handler(&connection);
+    report_custom_sql_progress(progress, "preparing_sql_sources", None, None, None);
     let sources = sql_inputs::stored_sources(database, SqlInputScope::CustomSql)?;
     let delimiter = crate::general::get_csv_delimiter_byte(database)?;
-    let attached = prepare_sources(&mut connection, &sources, delimiter)?;
+    let attached = prepare_sources_with_progress(
+        &mut connection,
+        &sources,
+        delimiter,
+        cancellation,
+        progress,
+    )?;
     let execution: CoreResult<CustomSqlExecutionResult> = (|| {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut session = start_taxonomy_session(&transaction)?;
-        let mut result = execute_custom_script(
+        let mut result = execute_custom_script_guarded(
             &transaction,
             sql,
             maximum_result_rows,
             custom_sql_authorizer,
+            progress,
+            cancellation,
+            CUSTOM_SQL_STATEMENT_TIMEOUT,
         )?;
+        if session.is_empty() {
+            drop(session);
+            cancellation.check()?;
+            report_custom_sql_progress(progress, "committing_custom_sql", None, None, None);
+            transaction.commit()?;
+            report_custom_sql_progress(progress, "finalizing_custom_sql", None, None, None);
+            return Ok(result);
+        }
+        report_custom_sql_progress(
+            progress,
+            "generating_custom_sql_changeset",
+            None,
+            None,
+            None,
+        );
         let mut changeset_blob = Vec::new();
         session.changeset_strm(&mut changeset_blob)?;
         drop(session);
         result.changeset_size = changeset_blob.len();
-        if changeset_blob.is_empty() {
-            transaction.commit()?;
-            return Ok(result);
-        }
-        validate_taxonomy(&transaction)?;
         let affected_taxon_ids = affected_taxon_ids_from_changeset(&transaction, &changeset_blob)?;
+        let validation_scope = taxonomy_validation_scope_with_cancellation(
+            &transaction,
+            &affected_taxon_ids,
+            INCREMENTAL_VALIDATION_TAXON_LIMIT,
+            cancellation,
+        )?;
+        report_custom_sql_progress(progress, "validating_custom_sql_changes", None, None, None);
+        match validation_scope {
+            TaxonomyValidationScope::Incremental(scope) => {
+                validate_taxonomy_changes_with_cancellation(&transaction, &scope, cancellation)?;
+            }
+            TaxonomyValidationScope::Full => {
+                validate_taxonomy_with_progress_and_cancellation(
+                    &transaction,
+                    |_| {},
+                    cancellation,
+                )?;
+            }
+        }
         let full_remap_required = affected_taxon_ids.len() > 5000;
-        let operation_id =
-            insert_custom_sql_operation(&transaction, &changeset_blob, &affected_taxon_ids)?;
+        report_custom_sql_progress(progress, "recording_custom_sql_operation", None, None, None);
+        let operation_id = insert_custom_sql_operation(
+            &transaction,
+            &request.sql,
+            &changeset_blob,
+            &affected_taxon_ids,
+        )?;
         super::sync::record_event(
             &transaction,
             Some(operation_id),
             affected_taxon_ids,
             full_remap_required,
         )?;
+        cancellation.check()?;
+        report_custom_sql_progress(progress, "committing_custom_sql", None, None, None);
         transaction.commit()?;
+        report_custom_sql_progress(progress, "finalizing_custom_sql", None, None, None);
         result.operation_id = Some(operation_id);
         Ok(result)
     })();
     let detach = detach_sources(&connection, &attached);
-    let mut result = match (execution, detach) {
+    let mut result = cancellation.normalize(match (execution, detach) {
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(mut result), Err(error)) => {
@@ -186,7 +207,8 @@ pub fn execute_custom_taxonomy_sql(
             ));
             Ok(result)
         }
-    }?;
+    })?;
+    cancellation.check()?;
     match database.connect_metadata().and_then(|connection| {
         metadata::set_raw(&connection, MetadataKey::CustomTaxonomySql, &request.sql)
     }) {
@@ -202,8 +224,18 @@ pub fn export_custom_taxonomy_query(
     database: &Database,
     request: &CustomTaxonomySqlExportRequest,
 ) -> CoreResult<SqlExportResult> {
+    export_custom_taxonomy_query_with_cancellation(database, request, &CancellationToken::new())
+}
+
+pub fn export_custom_taxonomy_query_with_cancellation(
+    database: &Database,
+    request: &CustomTaxonomySqlExportRequest,
+    cancellation: &CancellationToken,
+) -> CoreResult<SqlExportResult> {
+    cancellation.check()?;
     let sql_mutex = custom_sql_mutex(database)?;
     let _sql_guard = lock_custom_sql(&sql_mutex)?;
+    cancellation.check()?;
     let sql = require_sql(&request.sql)?;
     if !request.destination_path.is_absolute() {
         return Err(CoreError::InvalidArgument(
@@ -211,27 +243,31 @@ pub fn export_custom_taxonomy_query(
         ));
     }
     let mut connection = database.connect_taxonomy()?;
+    cancellation.install_sqlite_progress_handler(&connection);
     let sources = sql_inputs::stored_sources(database, SqlInputScope::CustomSql)?;
     let delimiter = crate::general::get_csv_delimiter_byte(database)?;
     let attached = prepare_sources(&mut connection, &sources, delimiter)?;
-    let export = export_single_query(&connection, sql, &request.destination_path, delimiter);
+    let mut output_guard = PartialExportGuard::new(&request.destination_path);
+    let export = export_query_statement(
+        &connection,
+        sql,
+        request.statement_index,
+        &request.destination_path,
+        delimiter,
+        cancellation,
+        CUSTOM_SQL_STATEMENT_TIMEOUT,
+        &mut output_guard,
+    );
     let detach = detach_sources(&connection, &attached);
-    match (export, detach) {
+    let result = cancellation.normalize(match (export, detach) {
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    });
+    if result.is_ok() {
+        output_guard.disarm();
     }
-}
-
-pub(super) fn inspect_sql_data_source(
-    source: &SqlDataSource,
-    delimiter: u8,
-) -> CoreResult<SqlSourceSchema> {
-    validate_sources(std::slice::from_ref(source))?;
-    match source {
-        SqlDataSource::Csv { alias, path } => inspect_csv_source(alias, path, delimiter),
-        SqlDataSource::Sqlite { alias, path } => inspect_sqlite_source(alias, path),
-    }
+    result
 }
 
 pub fn get_custom_taxonomy_sql(database: &Database) -> CoreResult<String> {
@@ -285,29 +321,61 @@ fn custom_sql_mutex(database: &Database) -> CoreResult<Arc<Mutex<()>>> {
 }
 
 fn lock_custom_sql(mutex: &Mutex<()>) -> CoreResult<std::sync::MutexGuard<'_, ()>> {
-    mutex
-        .lock()
-        .map_err(|_| CoreError::Consistency("Custom SQL workspace lock is poisoned".into()))
+    match mutex.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::WouldBlock) => Err(CoreError::InvalidArgument(
+            "Another Custom SQL operation is already running.".into(),
+        )),
+        Err(TryLockError::Poisoned(_)) => Err(CoreError::Consistency(
+            "Custom SQL workspace lock is poisoned".into(),
+        )),
+    }
 }
 
-fn execute_custom_script<F, A>(
+fn execute_custom_script_guarded<F, A>(
     connection: &Connection,
     sql: &str,
     maximum_result_rows: usize,
     mut authorizer_factory: F,
+    progress: &mut (dyn FnMut(OperationProgress) + Send),
+    cancellation: &CancellationToken,
+    statement_timeout: Duration,
 ) -> CoreResult<CustomSqlExecutionResult>
 where
     F: FnMut() -> A,
     A: for<'a> FnMut(AuthContext<'a>) -> Authorization + Send + 'static,
 {
     let mut offset = 0;
-    let mut statement_index = 0;
+    let mut statement_index = 0_usize;
+    let statement_total = count_sql_statements(sql)?;
     let mut result_sets = Vec::new();
     let mut messages = Vec::new();
     while offset < sql.len() {
+        cancellation.check()?;
+        let active_statement = statement_index as u64 + 1;
+        report_custom_sql_progress(
+            progress,
+            "executing_custom_sql",
+            Some(active_statement),
+            Some(statement_total),
+            Some(OperationProgressUnit::Statements),
+        );
         connection.authorizer(Some(authorizer_factory()));
         let execution = unsafe {
-            execute_preview_statement_raw(connection, &sql[offset..], maximum_result_rows)
+            execute_preview_statement_guarded(
+                connection,
+                &sql[offset..],
+                maximum_result_rows,
+                &SqlStatementExecutionContext {
+                    cancellation,
+                    limits: SqlStatementExecutionLimits {
+                        timeout: statement_timeout,
+                    },
+                    statement_index: active_statement,
+                    statement_total,
+                    workflow: "Custom SQL",
+                },
+            )
         };
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
         let execution = execution?;
@@ -342,9 +410,9 @@ where
             message,
         });
     }
-    if statement_index != 1 {
+    if statement_index == 0 {
         return Err(CoreError::InvalidArgument(
-            "custom taxonomy SQL requires exactly one statement".into(),
+            "custom taxonomy SQL requires at least one executable statement".into(),
         ));
     }
     Ok(CustomSqlExecutionResult {
@@ -357,43 +425,110 @@ where
     })
 }
 
-fn export_single_query(
+#[cfg(test)]
+fn execute_custom_script<F, A>(
     connection: &Connection,
     sql: &str,
+    maximum_result_rows: usize,
+    authorizer_factory: F,
+) -> CoreResult<CustomSqlExecutionResult>
+where
+    F: FnMut() -> A,
+    A: for<'a> FnMut(AuthContext<'a>) -> Authorization + Send + 'static,
+{
+    execute_custom_script_guarded(
+        connection,
+        sql,
+        maximum_result_rows,
+        authorizer_factory,
+        &mut |_| {},
+        &CancellationToken::new(),
+        CUSTOM_SQL_STATEMENT_TIMEOUT,
+    )
+}
+
+fn report_custom_sql_progress(
+    progress: &mut (dyn FnMut(OperationProgress) + Send),
+    stage: &str,
+    current: Option<u64>,
+    total: Option<u64>,
+    unit: Option<OperationProgressUnit>,
+) {
+    progress(OperationProgress {
+        stage: stage.into(),
+        current,
+        total,
+        unit,
+    });
+}
+
+fn export_query_statement(
+    connection: &Connection,
+    sql: &str,
+    statement_index: usize,
     destination_path: &Path,
     delimiter: u8,
+    cancellation: &CancellationToken,
+    statement_timeout: Duration,
+    output_guard: &mut PartialExportGuard,
 ) -> CoreResult<SqlExportResult> {
+    let statement_total = count_sql_statements(sql)?;
     connection.authorizer(Some(custom_sql_authorizer()));
-    let result = unsafe { export_single_query_raw(connection, sql, destination_path, delimiter) };
+    let result = unsafe {
+        export_query_statement_raw(
+            connection,
+            sql,
+            statement_index,
+            destination_path,
+            delimiter,
+            cancellation,
+            statement_timeout,
+            statement_total,
+            output_guard,
+        )
+    };
     connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
     result
 }
 
-unsafe fn export_single_query_raw(
+unsafe fn export_query_statement_raw(
     connection: &Connection,
     sql: &str,
+    target_statement_index: usize,
     destination_path: &Path,
     delimiter: u8,
+    cancellation: &CancellationToken,
+    statement_timeout: Duration,
+    statement_total: u64,
+    output_guard: &mut PartialExportGuard,
 ) -> CoreResult<SqlExportResult> {
-    let database = unsafe { connection.handle() };
-    let sql = CString::new(sql)
-        .map_err(|error| CoreError::InvalidArgument(format!("invalid sql: {error}")))?;
-    let mut statement = ptr::null_mut();
-    let mut tail = ptr::null();
-    let code =
-        unsafe { ffi::sqlite3_prepare_v2(database, sql.as_ptr(), -1, &mut statement, &mut tail) };
-    if code != ffi::SQLITE_OK {
-        return Err(sqlite_error(database, code));
-    }
-    if statement.is_null() {
+    if target_statement_index == 0 {
         return Err(CoreError::InvalidArgument(
-            "sql export requires one query statement".into(),
+            "sql export statement index must be at least 1".into(),
         ));
     }
-    let statement = RawStatement(statement);
+    let database = unsafe { connection.handle() };
+    let mut offset = 0;
+    let mut statement_index = 0;
+    let statement = loop {
+        if offset >= sql.len() {
+            return Err(CoreError::InvalidArgument(format!(
+                "sql export statement {target_statement_index} does not exist"
+            )));
+        }
+        let prepared = unsafe { prepare_statement_raw(connection, &sql[offset..]) }?;
+        offset += prepared.tail_offset;
+        let Some(statement) = prepared.statement else {
+            continue;
+        };
+        statement_index += 1;
+        if statement_index == target_statement_index {
+            break statement;
+        }
+    };
     if unsafe { ffi::sqlite3_stmt_readonly(statement.0) } == 0 {
         return Err(CoreError::InvalidArgument(
-            "sql export only accepts a read-only query".into(),
+            "sql export target must be a read-only query".into(),
         ));
     }
     let column_count = unsafe { ffi::sqlite3_column_count(statement.0) as usize };
@@ -402,37 +537,42 @@ unsafe fn export_single_query_raw(
             "sql export query has no result columns".into(),
         ));
     }
-    let tail = if tail.is_null() {
-        ""
-    } else {
-        unsafe { CStr::from_ptr(tail) }.to_str().map_err(|error| {
-            CoreError::InvalidArgument(format!("invalid sql after query: {error}"))
-        })?
-    };
-    if !tail.trim().is_empty() {
-        return Err(CoreError::InvalidArgument(
-            "sql export accepts exactly one query statement".into(),
-        ));
-    }
     let file = File::create(destination_path)?;
+    output_guard.arm();
     let mut writer = csv::WriterBuilder::new()
         .delimiter(delimiter)
         .from_writer(BufWriter::new(file));
     let columns = unsafe { statement_columns(statement.0, column_count) };
     writer.write_record(columns.iter().map(|column| column.name.as_str()))?;
     let mut row_count = 0_u64;
-    loop {
-        let step = unsafe { ffi::sqlite3_step(statement.0) };
-        match step {
-            ffi::SQLITE_ROW => {
-                let row = unsafe { statement_row(statement.0, column_count) };
-                writer.write_record(row.iter().map(SqlValue::csv_value))?;
-                row_count += 1;
+    let execution = with_sql_statement_guard(
+        connection,
+        &SqlStatementExecutionContext {
+            cancellation,
+            limits: SqlStatementExecutionLimits {
+                timeout: statement_timeout,
+            },
+            statement_index: target_statement_index as u64,
+            statement_total,
+            workflow: "Custom SQL Export",
+        },
+        || {
+            loop {
+                let step = unsafe { ffi::sqlite3_step(statement.0) };
+                match step {
+                    ffi::SQLITE_ROW => {
+                        let row = unsafe { statement_row(statement.0, column_count) };
+                        writer.write_record(row.iter().map(SqlValue::csv_value))?;
+                        row_count += 1;
+                    }
+                    ffi::SQLITE_DONE => break,
+                    code => return Err(sqlite_error(database, code)),
+                }
             }
-            ffi::SQLITE_DONE => break,
-            code => return Err(sqlite_error(database, code)),
-        }
-    }
+            Ok(())
+        },
+    );
+    execution?;
     writer.flush()?;
     Ok(SqlExportResult {
         path: destination_path.to_string_lossy().into_owned(),
@@ -440,285 +580,34 @@ unsafe fn export_single_query_raw(
     })
 }
 
-pub(super) fn prepare_sources(
-    connection: &mut Connection,
-    sources: &[SqlDataSource],
-    delimiter: u8,
-) -> CoreResult<Vec<String>> {
-    validate_sources(sources)?;
-    let mut attached = Vec::new();
-    for source in sources {
-        match source {
-            SqlDataSource::Csv { alias, path } => {
-                load_csv_table(connection, alias, path, delimiter)?;
-            }
-            SqlDataSource::Sqlite { alias, path } => {
-                attach_read_only_sqlite(connection, alias, path)?;
-                attached.push(alias.clone());
-            }
+struct PartialExportGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PartialExportGuard {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            armed: false,
         }
     }
-    Ok(attached)
-}
 
-pub(super) fn attach_read_only_sqlite(
-    connection: &Connection,
-    alias: &str,
-    path: &Path,
-) -> CoreResult<()> {
-    let path = std::fs::canonicalize(path)?;
-    let uri = sqlite_read_only_uri(&path);
-    connection.execute(
-        &format!("ATTACH DATABASE ? AS {}", quote_identifier(alias)),
-        [uri],
-    )?;
-    Ok(())
-}
-
-pub(super) fn detach_sources(connection: &Connection, aliases: &[String]) -> CoreResult<()> {
-    for alias in aliases.iter().rev() {
-        connection.execute_batch(&format!("DETACH DATABASE {}", quote_identifier(alias)))?;
+    fn arm(&mut self) {
+        self.armed = true;
     }
-    Ok(())
-}
 
-fn load_csv_table(
-    connection: &mut Connection,
-    alias: &str,
-    path: &Path,
-    delimiter: u8,
-) -> CoreResult<()> {
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(true)
-        .flexible(false)
-        .from_path(path)?;
-    let columns = validated_columns(reader.headers()?.iter())?;
-    let definitions = columns
-        .iter()
-        .map(|column| format!("{} TEXT", quote_identifier(column)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let transaction = connection.transaction()?;
-    transaction.execute_batch(&format!(
-        "CREATE TEMP TABLE {} ({definitions})",
-        quote_identifier(alias)
-    ))?;
-    let column_list = columns
-        .iter()
-        .map(|column| quote_identifier(column))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let placeholders = std::iter::repeat_n("?", columns.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "INSERT INTO temp.{} ({column_list}) VALUES ({placeholders})",
-        quote_identifier(alias)
-    );
-    let mut insert = transaction.prepare(&sql)?;
-    for (index, record) in reader.records().enumerate() {
-        let row_number = index + 2;
-        let record = record.map_err(|error| {
-            CoreError::InvalidArgument(format!("CSV row {row_number} could not be read: {error}"))
-        })?;
-        insert
-            .execute(params_from_iter(record.iter()))
-            .map_err(|error| {
-                CoreError::InvalidArgument(format!(
-                    "CSV row {row_number} could not be inserted: {error}"
-                ))
-            })?;
+    fn disarm(&mut self) {
+        self.armed = false;
     }
-    drop(insert);
-    transaction.commit()?;
-    Ok(())
 }
 
-fn validate_sources(sources: &[SqlDataSource]) -> CoreResult<()> {
-    let mut aliases = HashSet::new();
-    for source in sources {
-        let alias = match source {
-            SqlDataSource::Csv { alias, path } | SqlDataSource::Sqlite { alias, path } => {
-                if !path.is_file() {
-                    return Err(CoreError::NotFound(format!(
-                        "sql data source {}",
-                        path.display()
-                    )));
-                }
-                alias
-            }
-        };
-        if !is_safe_identifier(alias) {
-            return Err(CoreError::InvalidArgument(format!(
-                "invalid sql data source alias: {alias}"
-            )));
-        }
-        let normalized = alias.to_ascii_lowercase();
-        if matches!(
-            normalized.as_str(),
-            "main"
-                | "temp"
-                | "base"
-                | "metadata"
-                | "taxonomy"
-                | "taxonomy_base"
-                | "active_photo_library"
-        ) {
-            return Err(CoreError::InvalidArgument(format!(
-                "reserved sql data source alias: {alias}"
-            )));
-        }
-        if !aliases.insert(normalized) {
-            return Err(CoreError::InvalidArgument(format!(
-                "duplicate sql data source alias: {alias}"
-            )));
+impl Drop for PartialExportGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
-    Ok(())
-}
-
-fn inspect_csv_source(alias: &str, path: &Path, delimiter: u8) -> CoreResult<SqlSourceSchema> {
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(true)
-        .flexible(false)
-        .from_path(path)?;
-    let columns = validated_columns(reader.headers()?.iter())?
-        .into_iter()
-        .map(|name| SqlColumn {
-            name,
-            declared_type: Some("TEXT".into()),
-        })
-        .collect();
-    Ok(SqlSourceSchema {
-        alias: alias.into(),
-        objects: vec![SqlSourceObject {
-            name: alias.into(),
-            object_type: SqlObjectType::Table,
-            columns,
-        }],
-    })
-}
-
-pub(super) fn inspect_sqlite_source(alias: &str, path: &Path) -> CoreResult<SqlSourceSchema> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    let mut statement = connection.prepare(
-        r#"
-        SELECT name, type, sql
-        FROM sqlite_schema
-        WHERE type IN ('table', 'view')
-          AND name NOT LIKE 'sqlite_%'
-        ORDER BY name
-        "#,
-    )?;
-    let objects = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|(name, object_type, sql)| {
-            let object_type = if sql.as_deref().is_some_and(|sql| {
-                sql.trim_start()
-                    .to_ascii_uppercase()
-                    .starts_with("CREATE VIRTUAL TABLE")
-            }) {
-                SqlObjectType::VirtualTable
-            } else if object_type == "view" {
-                SqlObjectType::View
-            } else {
-                SqlObjectType::Table
-            };
-            let columns = inspect_object_columns(&connection, &name)?;
-            Ok(SqlSourceObject {
-                name,
-                object_type,
-                columns,
-            })
-        })
-        .collect::<CoreResult<Vec<_>>>()?;
-    Ok(SqlSourceSchema {
-        alias: alias.into(),
-        objects,
-    })
-}
-
-fn inspect_object_columns(connection: &Connection, object: &str) -> CoreResult<Vec<SqlColumn>> {
-    let mut statement =
-        connection.prepare(&format!("PRAGMA table_xinfo({})", quote_identifier(object)))?;
-    statement
-        .query_map([], |row| {
-            let declared_type = row.get::<_, String>(2)?;
-            Ok(SqlColumn {
-                name: row.get(1)?,
-                declared_type: (!declared_type.is_empty()).then_some(declared_type),
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-pub(super) fn validated_columns<'a>(
-    columns: impl Iterator<Item = &'a str>,
-) -> CoreResult<Vec<String>> {
-    let mut seen = BTreeSet::new();
-    let mut output = Vec::new();
-    for column in columns {
-        if column.trim().is_empty() || column.contains('\0') {
-            return Err(CoreError::InvalidArgument(format!(
-                "invalid sql source column: {column}"
-            )));
-        }
-        if !seen.insert(column.to_ascii_lowercase()) {
-            return Err(CoreError::InvalidArgument(format!(
-                "duplicate sql source column: {column}"
-            )));
-        }
-        output.push(column.to_string());
-    }
-    if output.is_empty() {
-        return Err(CoreError::InvalidArgument(
-            "sql source requires at least one column".into(),
-        ));
-    }
-    Ok(output)
-}
-
-pub(super) fn is_safe_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
-}
-
-pub(super) fn quote_identifier(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
-fn sqlite_read_only_uri(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    let encoded = path
-        .bytes()
-        .flat_map(|byte| match byte {
-            b'%' | b'?' | b'#' => {
-                let hex = b"0123456789ABCDEF";
-                vec![b'%', hex[(byte >> 4) as usize], hex[(byte & 0x0f) as usize]]
-            }
-            _ => vec![byte],
-        })
-        .collect::<Vec<_>>();
-    format!("file:{}?mode=ro", String::from_utf8_lossy(&encoded))
 }
 
 fn require_sql(sql: &str) -> CoreResult<&str> {
@@ -795,6 +684,7 @@ fn custom_sql_authorizer() -> impl for<'a> FnMut(AuthContext<'a>) -> Authorizati
 
 fn insert_custom_sql_operation(
     transaction: &Transaction<'_>,
+    sql: &str,
     changeset_blob: &[u8],
     affected_taxon_ids: &BTreeSet<i64>,
 ) -> CoreResult<i64> {
@@ -810,6 +700,11 @@ fn insert_custom_sql_operation(
             rollbackable: true,
             has_formatted_input: false,
         },
+    )?;
+    operations::insert_operation_input(
+        transaction,
+        operation_id,
+        &OperationInput::CustomSql { sql: sql.into() },
     )?;
     transaction.execute(
         r#"
@@ -847,7 +742,7 @@ fn insert_custom_sql_operation(
                     action: "custom_sql",
                     before_json: None,
                     after_json: Some(serde_json::json!({
-                        "changeset_size": changeset_blob.len(),
+                        "taxon_id": taxon_id,
                     })),
                     succeeded: true,
                     message: "custom SQL changed taxonomy data",

@@ -7,9 +7,11 @@ registration. The application uses three database roles:
 - one independently located taxonomy database;
 - one or more independently located photo library databases.
 
-The application version is `3.0.0` and every database role uses schema `2`.
-Any other schema version is rejected. There is no migration or compatibility
-interface.
+Vividarium 3.0.0 databases use schema `2`. Vividarium 3.1.0 upgrades supported
+schema-2 metadata, taxonomy, and Photo Library databases directly to schema
+`3`. Fresh databases use schema `3`; other versions are rejected. The upgrade
+is forward-only, so databases opened by 3.1.0 are not supported by Vividarium
+3.0.0.
 
 ## Types
 
@@ -35,7 +37,7 @@ interface.
 
 | Interface | Parameters | Return | Description |
 | --- | --- | --- | --- |
-| `Database::open` | `metadata_path` | `CoreResult<Database>` | Open or initialize metadata and taxonomy storage. No photo library is created automatically, and an unavailable registered photo library does not block startup. |
+| `Database::open` | `metadata_path` | `CoreResult<Database>` | Open or initialize metadata and taxonomy storage, then upgrade an online active Photo Library before application work resumes. No photo library is created automatically, and an unavailable registered photo library does not block startup. |
 | `Database::metadata_path` | none | `PathBuf` | Return the metadata database path. |
 | `Database::taxonomy_path` | none | `CoreResult<PathBuf>` | Return the configured taxonomy database path. |
 | `Database::locations` | none | `CoreResult<DatabaseLocations>` | Return all current and default locations. |
@@ -48,7 +50,7 @@ interface.
 | `Database::rebind_photo_library_root` | `library_uuid: &str`, `root_path: &Path` | `CoreResult<PhotoLibraryRegistration>` | Bind a copied library DB to a new local photo root and mark its initial index incomplete. |
 | `Database::rebind_photo_library_database` | `library_uuid: &str`, `existing_database_path: &Path` | `CoreResult<PhotoLibraryRegistration>` | Point an existing registration at an existing DB without copying or moving it. The schema and persisted library UUID must match. A taxonomy identity or synchronization watermark mismatch creates a full-remap request. |
 | `Database::relocate_photo_library_database` | `library_uuid: &str`, `destination: &Path` | `CoreResult<PhotoLibraryRegistration>` | Safely move one library database and update its registered path. |
-| `Database::open_taxonomy_database` | `existing_database: &Path` | `CoreResult<DatabaseLocations>` | Validate and select an existing schema-2 taxonomy database without moving it. A changed taxonomy identity resets the dispatch cursor and marks every registered Photo Library for a full remap. |
+| `Database::open_taxonomy_database` | `existing_database: &Path` | `CoreResult<DatabaseLocations>` | Upgrade a schema-2 taxonomy database when needed, validate it, and select it without moving it. A changed taxonomy identity resets the dispatch cursor and marks every registered Photo Library for a full remap. |
 | `Database::relocate_taxonomy_database` | `destination: &Path` | `CoreResult<DatabaseLocations>` | Safely move taxonomy storage and update its configured path. |
 | `Database::set_default_taxonomy_directory` | `directory: &Path` | `CoreResult<DatabaseLocations>` | Set the default taxonomy creation directory. |
 | `Database::set_default_photo_library_directory` | `directory: &Path` | `CoreResult<DatabaseLocations>` | Set the default photo library creation directory. |

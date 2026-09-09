@@ -14,14 +14,9 @@ function operation(overrides: Partial<OperationState> = {}): OperationState {
     task_kind: "photo_scan",
     task_scope: "library-a",
     state: "running",
-    operation: "initial_index",
-    running: true,
+    operation: "photo_scan",
     started_at: "2026-08-09 22:00:00",
     finished_at: null,
-    message: "Indexing Photo Library",
-    completed: 0,
-    processed: 0,
-    total: null,
     progress: null,
     result: null,
     error: null,
@@ -39,20 +34,19 @@ test("a Photo Library card switches only when it is inactive and the settings vi
 test("photo operation progress presents known totals", () => {
   const value = operation({
     progress: {
-      stage: "Indexing photos",
+      stage: "indexing_photo_metadata",
       current: 1200,
       total: 5000,
-      statement_index: null,
-      statement_total: null,
+      unit: "photos",
     },
   });
-  assert.equal(describePhotoOperation(value), "Indexing photos: 1,200 / 5,000");
+  assert.equal(describePhotoOperation(value), "Reading photo metadata: 1,200 / 5,000");
   assert.deepEqual(photoOperationProgress(value), { value: 1200, max: 5000 });
 });
 
 test("photo operation progress supports phase-only updates", () => {
   const value = operation();
-  assert.equal(describePhotoOperation(value), "Indexing Photo Library");
+  assert.equal(describePhotoOperation(value), "Starting");
   assert.equal(photoOperationProgress(value), null);
 });
 
@@ -74,12 +68,10 @@ test("photo media cache identity includes the active Photo Library", () => {
 });
 
 test("a photo operation completed between recovery snapshots still invalidates photo views", () => {
-  const idle = operation({ task_id: null, operation: null, state: "completed", running: false });
+  const idle = operation({ task_id: null, operation: null, state: "completed" });
   const completed = operation({
     state: "completed",
-    running: false,
     finished_at: "2026-08-09 22:00:01",
-    message: "completed",
   });
   assert.equal(observedSuccessfulCompletion(idle, completed), true);
   assert.equal(observedSuccessfulCompletion(completed, completed), false);
@@ -87,7 +79,7 @@ test("a photo operation completed between recovery snapshots still invalidates p
 });
 
 test("background status resolves exact tasks without collapsing module history", () => {
-  const older = operation({ task_id: "task-1", state: "completed", running: false });
+  const older = operation({ task_id: "task-1", state: "completed" });
   const newer = operation({ task_id: "task-2", started_at: "2026-08-09 22:01:00" });
   const operations = { "task-1": older, "task-2": newer };
   assert.equal(operationByTaskId(operations, "task-1"), older);
@@ -98,14 +90,12 @@ test("an active queued task is preferred over completed module history", () => {
   const completed = operation({
     task_id: "task-complete",
     state: "completed",
-    running: false,
     started_at: "2026-08-09 22:02:00",
     finished_at: "2026-08-09 22:03:00",
   });
   const queued = operation({
     task_id: "task-queued",
     state: "queued",
-    running: false,
     started_at: null,
     finished_at: null,
   });
@@ -121,11 +111,11 @@ test("reads the completed bulk rename result from the photo operation", () => {
     failed: 0,
   };
   assert.deepEqual(
-    photoRenameSummaryFromOperation(operation({ running: false, result })),
+    photoRenameSummaryFromOperation(operation({ state: "completed", result })),
     result,
   );
   assert.throws(
-    () => photoRenameSummaryFromOperation(operation({ running: false, error: "rename failed" })),
+    () => photoRenameSummaryFromOperation(operation({ state: "failed", error: "rename failed" })),
     /rename failed/,
   );
 });

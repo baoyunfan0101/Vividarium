@@ -1,6 +1,6 @@
 use rusqlite::{OptionalExtension, params};
 
-use super::{PhotoTaxonItem, PhotoTaxonNode, PhotoTaxonUsage};
+use super::{PhotoTaxonEntryCounts, PhotoTaxonItem, PhotoTaxonNode, PhotoTaxonUsage};
 use crate::models::{Photo, PhotoPage};
 use crate::photos::{
     PhotoCursor, PhotoPageSection, decode_photo_cursor, encode_photo_cursor, invalid_photo_cursor,
@@ -34,6 +34,41 @@ pub fn get_photo_taxon_node(
     Ok(PhotoTaxonNode {
         taxon: Some(taxon),
         subtree_photo_count,
+    })
+}
+
+pub fn get_photo_taxon_counts(
+    database: &Database,
+    taxon_id: Option<i64>,
+) -> CoreResult<PhotoTaxonEntryCounts> {
+    let connection = database.connect()?;
+    if let Some(taxon_id) = taxon_id {
+        load_usage_taxon(&connection, taxon_id, false)?
+            .ok_or_else(|| CoreError::NotFound(format!("photo taxon node {taxon_id}")))?;
+    }
+    let taxon_count = connection.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM taxa
+        LEFT JOIN current_photo_taxon_usage AS photo_taxon_usage USING (taxon_id)
+        WHERE ((?1 IS NULL AND taxa.parent_taxon_id IS NULL)
+               OR taxa.parent_taxon_id = ?1)
+          AND COALESCE(photo_taxon_usage.subtree_photo_count, 0) > 0
+        "#,
+        [taxon_id],
+        |row| row.get(0),
+    )?;
+    let photo_count = match taxon_id {
+        Some(taxon_id) => connection.query_row(
+            "SELECT COUNT(*) FROM current_photo_taxon_mapping WHERE taxon_id = ?",
+            [taxon_id],
+            |row| row.get(0),
+        )?,
+        None => 0,
+    };
+    Ok(PhotoTaxonEntryCounts {
+        taxon_count,
+        photo_count,
     })
 }
 

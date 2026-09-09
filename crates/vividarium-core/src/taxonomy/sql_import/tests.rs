@@ -23,12 +23,19 @@ CREATE TABLE sql_import.taxon_names (
     normalized_name TEXT,
     authority_year TEXT,
     source TEXT,
-    UNIQUE (taxon_id, name_type, name),
     CHECK (name_type BETWEEN 1 AND 6),
     CHECK (length(trim(name)) > 0),
     FOREIGN KEY (taxon_id)
         REFERENCES taxa(taxon_id) ON DELETE CASCADE
 );
+CREATE UNIQUE INDEX sql_import.idx_taxon_names_scientific_family_name
+    ON taxon_names(taxon_id, name) WHERE name_type IN (1, 2);
+CREATE UNIQUE INDEX sql_import.idx_taxon_names_chinese_family_name
+    ON taxon_names(taxon_id, name) WHERE name_type IN (3, 4);
+CREATE UNIQUE INDEX sql_import.idx_taxon_names_english_family_name
+    ON taxon_names(taxon_id, name) WHERE name_type IN (5, 6);
+CREATE INDEX sql_import.idx_taxon_names_taxon_type
+    ON taxon_names(taxon_id, name_type);
 INSERT INTO sql_import.taxa
 SELECT CAST(taxon_id AS INTEGER), NULL, CAST(rank AS INTEGER), geological_range
 FROM source_taxa;
@@ -119,6 +126,97 @@ fn sql_import_staging_schemas_follow_the_staging_database() {
             .objects
             .iter()
             .any(|object| object.name == "taxon_names")
+    );
+}
+
+#[test]
+fn staging_schema_indexes_scientific_name_validation_by_taxon_and_type() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = Database::open(directory.path().join("metadata.db")).unwrap();
+    add_simple_input(&directory, &database);
+    execute_simple(&database);
+    let connection =
+        Connection::open(workspace(&database).unwrap().join(STAGING_DATABASE)).unwrap();
+    let columns = connection
+        .prepare("PRAGMA index_info('idx_taxon_names_taxon_type')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(2))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(columns, ["taxon_id", "name_type"]);
+    let plan = connection
+        .prepare(
+            r#"
+            EXPLAIN QUERY PLAN
+            SELECT taxa.taxon_id
+            FROM taxa
+            LEFT JOIN taxon_names
+              ON taxon_names.taxon_id = taxa.taxon_id
+             AND taxon_names.name_type = 1
+            GROUP BY taxa.taxon_id
+            HAVING COUNT(taxon_names.name_id) != 1
+            ORDER BY taxa.taxon_id
+            "#,
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_taxon_names_taxon_type"))
+    );
+    assert!(
+        plan.iter()
+            .all(|detail| !detail.to_ascii_uppercase().contains("AUTOMATIC"))
+    );
+}
+
+#[test]
+fn staging_access_index_preserves_name_family_uniqueness() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = Database::open(directory.path().join("metadata.db")).unwrap();
+    add_simple_input(&directory, &database);
+    execute_simple(&database);
+    let connection =
+        Connection::open(workspace(&database).unwrap().join(STAGING_DATABASE)).unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO taxon_names (taxon_id, name_type, name) VALUES (101, 2, 'Animalia')",
+                [],
+            )
+            .is_err()
+    );
+    connection
+        .execute(
+            "INSERT INTO taxon_names (taxon_id, name_type, name) VALUES (101, 3, 'Animal')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO taxon_names (taxon_id, name_type, name) VALUES (101, 5, 'Animal')",
+            [],
+        )
+        .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO taxon_names (taxon_id, name_type, name) VALUES (101, 4, 'Animal')",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO taxon_names (taxon_id, name_type, name) VALUES (101, 6, 'Animal')",
+                [],
+            )
+            .is_err()
     );
 }
 
@@ -247,11 +345,23 @@ fn validate_reports_real_stages_and_sql_statement_progress() {
     let expected = [
         PREPARING_INPUT_SOURCES,
         EXECUTING_SQL,
-        BUILDING_STAGING_DATABASE,
+        FINALIZING_STAGING_DATABASE,
+        FINGERPRINTING_STAGING,
+        CHECKING_STAGING_DATABASE,
+        INSPECTING_STAGING_SCHEMA,
         NORMALIZING_NAMES,
+        VALIDATING_STAGING_TAXONOMY,
+        "loading_taxonomy_structure",
+        "checking_parent_cycles",
+        "checking_parent_relationships",
+        "checking_scientific_names",
+        "checking_localized_names",
+        "checking_orphan_names",
         BUILDING_CANDIDATE_TAXA,
         BUILDING_CANDIDATE_NAMES,
-        VALIDATING_TAXONOMY,
+        VALIDATING_CANDIDATE_DATABASE,
+        "checking_duplicate_names",
+        "checking_normalized_names",
         READY_TO_APPLY,
     ];
     let mut previous = 0;
@@ -268,13 +378,91 @@ fn validate_reports_real_stages_and_sql_statement_progress() {
         .filter(|event| event.stage == EXECUTING_SQL)
         .collect::<Vec<_>>();
     assert!(!sql_events.is_empty());
-    assert_eq!(sql_events[0].statement_index, Some(1));
+    assert_eq!(sql_events[0].current, Some(1));
     assert_eq!(
-        sql_events[0].statement_total,
+        sql_events[0].total,
         Some(result.execution.statements_executed as u64)
     );
+    assert_eq!(sql_events[0].unit, Some(OperationProgressUnit::Statements));
+    assert_eq!(sql_events.last().unwrap().current, sql_events[0].total);
+    for stage in ["checking_parent_cycles", "checking_parent_relationships"] {
+        let events = progress
+            .iter()
+            .filter(|event| event.stage == stage)
+            .collect::<Vec<_>>();
+        let mut start = 0;
+        for index in 1..=events.len() {
+            if index == events.len() || events[index - 1].current > events[index].current {
+                let run = &events[start..index];
+                assert!(
+                    run.windows(2)
+                        .all(|events| events[0].current <= events[1].current)
+                );
+                let final_event = run.last().unwrap();
+                assert_eq!(final_event.current, final_event.total);
+                assert_eq!(final_event.unit, Some(OperationProgressUnit::Taxa));
+                start = index;
+            }
+        }
+    }
+    assert!(
+        progress
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.stage.as_str(),
+                    "checking_scientific_names"
+                        | "checking_localized_names"
+                        | "checking_orphan_names"
+                )
+            })
+            .all(|event| event.current.is_none() && event.total.is_none() && event.unit.is_none())
+    );
+    for stage in ["checking_duplicate_names", "checking_normalized_names"] {
+        assert_eq!(
+            progress.iter().filter(|event| event.stage == stage).count(),
+            1,
+            "candidate validation stage {stage} should run once"
+        );
+    }
+    let fingerprint_events = progress
+        .iter()
+        .filter(|event| event.stage == FINGERPRINTING_STAGING)
+        .collect::<Vec<_>>();
+    assert!(!fingerprint_events.is_empty());
+    assert_eq!(fingerprint_events[0].current, Some(0));
+    assert!(
+        fingerprint_events
+            .iter()
+            .all(|event| event.unit == Some(OperationProgressUnit::Bytes))
+    );
+    assert!(fingerprint_events.windows(2).all(|events| {
+        events[0].current.unwrap() <= events[1].current.unwrap()
+            && events[0].total == events[1].total
+    }));
+    let fingerprint_final = fingerprint_events.last().unwrap();
+    assert_eq!(fingerprint_final.current, fingerprint_final.total);
+    let normalization_events = progress
+        .iter()
+        .filter(|event| event.stage == NORMALIZING_NAMES)
+        .collect::<Vec<_>>();
+    assert!(normalization_events.windows(2).all(|events| {
+        events[0].current.unwrap() <= events[1].current.unwrap()
+            && events[0].total == events[1].total
+    }));
     assert!(progress.iter().any(|event| {
         event.stage == NORMALIZING_NAMES && event.current == event.total && event.total == Some(1)
+    }));
+    assert!(progress.iter().any(|event| {
+        event.stage == BUILDING_CANDIDATE_TAXA
+            && event.current.is_none()
+            && event.total.is_none()
+            && event.unit == Some(OperationProgressUnit::Taxa)
+    }));
+    assert!(progress.iter().any(|event| {
+        event.stage == BUILDING_CANDIDATE_TAXA
+            && event.current == event.total
+            && event.total == Some(1)
     }));
     assert!(progress.iter().any(|event| {
         event.stage == BUILDING_CANDIDATE_NAMES
@@ -290,15 +478,45 @@ fn sql_statement_count_uses_sqlite_statement_boundaries() {
 }
 
 #[test]
+fn sql_statement_progress_reports_each_statement_before_execution() {
+    for (sql, expected) in [("SELECT 1;", vec![1]), ("SELECT 1; SELECT 2;", vec![1, 2])] {
+        let connection = Connection::open_in_memory().unwrap();
+        let mut progress = Vec::new();
+        let messages = execute_sql_import_script(
+            &connection,
+            sql,
+            "unused.db",
+            &mut |event| progress.push(event),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(messages.len(), expected.len());
+        assert_eq!(
+            progress
+                .iter()
+                .map(|event| event.current.unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(progress.iter().all(|event| {
+            event.total == Some(messages.len() as u64)
+                && event.unit == Some(OperationProgressUnit::Statements)
+        }));
+    }
+}
+
+#[test]
 fn validate_stops_after_sql_execution_failure() {
     let directory = tempfile::tempdir().unwrap();
     let database = Database::open(directory.path().join("metadata.db")).unwrap();
 
-    let error = validate_sql_import(
+    let mut progress = Vec::new();
+    let error = validate_sql_import_with_progress(
         &database,
         &ValidateSqlImportRequest {
             sql: "SELECT * FROM missing_source;".into(),
         },
+        &mut |event| progress.push(event),
     )
     .unwrap_err();
 
@@ -306,6 +524,11 @@ fn validate_stops_after_sql_execution_failure() {
     let workspace = workspace(&database).unwrap();
     assert!(!workspace.join(CANDIDATE_DATABASE).exists());
     assert!(!workspace.join(VALIDATION_STATE).exists());
+    assert!(
+        progress
+            .iter()
+            .all(|event| event.stage != FINALIZING_STAGING_DATABASE)
+    );
 }
 
 #[test]
@@ -331,11 +554,48 @@ fn persistent_inputs_and_successful_sql_survive_apply_and_reopen() {
     assert!(execution.warnings.is_empty());
     let validation = validate_sql_import_candidate(&database).unwrap();
     assert!(validation.can_apply, "{:?}", validation.errors);
-    let result = apply_sql_import(&database).unwrap();
+    let mut progress = Vec::new();
+    let result = apply_sql_import_with_progress_and_cancellation(
+        &database,
+        &mut |event| {
+            if event.stage == APPLYING_SQL_IMPORT {
+                assert_eq!(database.taxonomy_identity().unwrap(), old_identity);
+            }
+            progress.push(event);
+        },
+        &CancellationToken::new(),
+    )
+    .unwrap();
 
     assert_eq!(result.metadata.taxa_count, 1);
     assert!(result.warnings.is_empty());
     assert_ne!(database.taxonomy_identity().unwrap(), old_identity);
+    let stages = progress
+        .iter()
+        .map(|event| event.stage.as_str())
+        .collect::<Vec<_>>();
+    let validating = stages
+        .iter()
+        .position(|stage| *stage == VALIDATING_SQL_IMPORT_CANDIDATE)
+        .unwrap();
+    let fingerprinting = stages
+        .iter()
+        .position(|stage| *stage == FINGERPRINTING_STAGING)
+        .unwrap();
+    let applying = stages
+        .iter()
+        .position(|stage| *stage == APPLYING_SQL_IMPORT)
+        .unwrap();
+    assert!(validating < fingerprinting && fingerprinting < applying);
+    let fingerprint = progress
+        .iter()
+        .filter(|event| event.stage == FINGERPRINTING_STAGING)
+        .collect::<Vec<_>>();
+    assert_eq!(fingerprint.first().unwrap().current, Some(0));
+    assert_eq!(
+        fingerprint.last().unwrap().current,
+        fingerprint.last().unwrap().total
+    );
     assert_eq!(
         get_taxon_detail(&database, 101)
             .unwrap()
@@ -417,6 +677,7 @@ COMMIT;"#,
     assert!(!result.validation.can_apply);
     assert!(!result.can_apply);
     assert_eq!(result.validation.total_error_count, 1);
+    assert_eq!(result.validation.errors.len(), 1);
     assert_eq!(result.validation.errors[0].code, "kingdom_has_parent");
     assert_eq!(result.validation.errors[0].taxon_id, Some(202));
     assert_eq!(result.validation.errors[0].related_taxon_id, Some(101));
@@ -427,9 +688,33 @@ COMMIT;"#,
     assert!(
         progress
             .iter()
-            .any(|event| event.stage == VALIDATING_TAXONOMY)
+            .any(|event| event.stage == VALIDATING_STAGING_TAXONOMY)
     );
     assert_eq!(progress.last().unwrap().stage, VALIDATION_FAILED);
+}
+
+#[test]
+fn exact_family_name_conflicts_are_reported_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = Database::open(directory.path().join("metadata.db")).unwrap();
+    add_simple_input(&directory, &database);
+    let invalid_sql = SIMPLE_IMPORT_SQL.replace(
+        "COMMIT;",
+        r#"
+DROP INDEX sql_import.idx_taxon_names_scientific_family_name;
+INSERT INTO sql_import.taxon_names (name_id, taxon_id, name_type, name)
+VALUES (2, 101, 2, 'Animalia');
+COMMIT;"#,
+    );
+
+    let result =
+        validate_sql_import(&database, &ValidateSqlImportRequest { sql: invalid_sql }).unwrap();
+
+    assert!(!result.validation.valid);
+    assert_eq!(result.validation.total_error_count, 1);
+    assert_eq!(result.validation.errors.len(), 1);
+    assert_eq!(result.validation.errors[0].code, "duplicate_canonical_name");
+    assert_eq!(result.validation.errors[0].taxon_id, Some(101));
 }
 
 #[test]
@@ -450,6 +735,31 @@ COMMIT;"#,
         validate_sql_import(&database, &ValidateSqlImportRequest { sql: invalid_sql }).unwrap();
 
     assert!(!result.validation.valid);
+    assert_eq!(result.validation.total_error_count, 1);
+    assert_eq!(result.validation.errors.len(), 1);
+    assert_eq!(result.validation.errors[0].code, "duplicate_canonical_name");
+    assert_eq!(result.validation.errors[0].taxon_id, Some(101));
+}
+
+#[test]
+fn accepted_and_alias_canonical_name_conflicts_are_validation_results() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = Database::open(directory.path().join("metadata.db")).unwrap();
+    add_simple_input(&directory, &database);
+    let invalid_sql = SIMPLE_IMPORT_SQL.replace(
+        "COMMIT;",
+        r#"
+INSERT INTO sql_import.taxon_names (name_id, taxon_id, name_type, name)
+VALUES (2, 101, 2, 'Animalia ');
+COMMIT;"#,
+    );
+
+    let result =
+        validate_sql_import(&database, &ValidateSqlImportRequest { sql: invalid_sql }).unwrap();
+
+    assert!(!result.validation.valid);
+    assert_eq!(result.validation.total_error_count, 1);
+    assert_eq!(result.validation.errors.len(), 1);
     assert_eq!(result.validation.errors[0].code, "duplicate_canonical_name");
     assert_eq!(result.validation.errors[0].taxon_id, Some(101));
 }
@@ -489,6 +799,54 @@ fn failed_execution_restores_existing_staging_and_validation() {
     )
     .unwrap_err();
 
+    assert!(validate_sql_import_candidate(&database).unwrap().can_apply);
+    assert_eq!(get_sql_import_sql(&database).unwrap(), SIMPLE_IMPORT_SQL);
+}
+
+#[test]
+fn sql_import_timeout_restores_all_previous_artifacts() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = Database::open(directory.path().join("metadata.db")).unwrap();
+    add_simple_input(&directory, &database);
+    execute_simple(&database);
+    assert!(validate_sql_import_candidate(&database).unwrap().can_apply);
+    let workspace = workspace(&database).unwrap();
+    let artifacts = [STAGING_DATABASE, CANDIDATE_DATABASE, VALIDATION_STATE]
+        .map(|filename| (filename, fs::read(workspace.join(filename)).unwrap()));
+    let mut progress = Vec::new();
+    let request = ValidateSqlImportRequest {
+        sql: r#"
+            ATTACH DATABASE 'vividarium_sql_import.db' AS sql_import;
+            WITH RECURSIVE loop(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM loop
+            )
+            SELECT COUNT(*) FROM loop;
+        "#
+        .into(),
+    };
+
+    let error = execute_sql_import_sql_in_workspace_with_timeout(
+        &database,
+        &request,
+        &workspace,
+        &mut |event| progress.push(event),
+        &CancellationToken::new(),
+        Duration::from_millis(10),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("SQL Import statement 2 of 2"));
+    assert!(error.to_string().contains("10 ms execution limit"));
+    assert!(
+        progress
+            .iter()
+            .all(|event| event.stage != FINALIZING_STAGING_DATABASE)
+    );
+    for (filename, expected) in artifacts {
+        assert_eq!(fs::read(workspace.join(filename)).unwrap(), expected);
+    }
     assert!(validate_sql_import_candidate(&database).unwrap().can_apply);
     assert_eq!(get_sql_import_sql(&database).unwrap(), SIMPLE_IMPORT_SQL);
 }
@@ -665,7 +1023,10 @@ fn built_in_sql_reads_a_named_sqlite_input() {
             INSERT INTO taxa VALUES
                 (10, NULL, 0, 60, 'Animalia', NULL, 'Recent', 'Animals'),
                 (11, 10, 0, 601, 'Fallback species', NULL, 'Recent', NULL);
-            INSERT INTO synonyms VALUES (10, 0, 'Metazoa', NULL);
+            INSERT INTO synonyms VALUES
+                (10, 0, 'Animalia', 'self authority'),
+                (10, 0, 'Metazoa', '1758'),
+                (10, 0, 'Metazoa', '1900');
             INSERT INTO chinese VALUES
                 (10, 1, 'Animals zh', 'test'),
                 (11, 1, '   ', 'ignored'),
@@ -693,6 +1054,41 @@ fn built_in_sql_reads_a_named_sqlite_input() {
     )
     .unwrap();
     let staging = Connection::open(workspace(&database).unwrap().join(STAGING_DATABASE)).unwrap();
+    let animalia_names = staging
+        .prepare(
+            r#"
+            SELECT name_type, name, authority_year, source
+            FROM taxon_names
+            WHERE taxon_id = 10
+            ORDER BY name_type, name
+            "#,
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        animalia_names,
+        vec![
+            (1, "Animalia".into(), None, Some("biolib".into())),
+            (
+                2,
+                "Metazoa".into(),
+                Some("1900".into()),
+                Some("biolib".into())
+            ),
+            (3, "Animals zh".into(), None, Some("test".into())),
+            (5, "Animals".into(), None, Some("biolib".into())),
+        ]
+    );
     let fallback_names = staging
         .prepare(
             "SELECT name_type, name FROM taxon_names WHERE taxon_id = 11 ORDER BY name_type, name",

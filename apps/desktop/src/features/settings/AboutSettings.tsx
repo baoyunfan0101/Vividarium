@@ -15,7 +15,7 @@ import {
 import { Button, SectionHeader } from "../../shared/ui";
 
 export function AboutSettings() {
-  const [version, setVersion] = useState("3.0.0");
+  const [version, setVersion] = useState("Loading...");
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMessage, setUpdateMessage] = useState("Updates are delivered from GitHub Releases.");
@@ -67,7 +67,7 @@ export function AboutSettings() {
       <div className="about-settings">
         <strong>Vividarium</strong>
         <AboutValue label="Version" value={version} />
-        <AboutValue label="Database schema" value="2" />
+        <AboutValue label="Database schema" value="3" />
         <AboutValue label="Author" value="Yunfan Bao" />
         <div className="setting-row">
           <span>Email</span>

@@ -8,6 +8,7 @@
 .mapping-summary-button > span:last-child { min-width: 1.5em; text-align: right; }
 .mapping-three-columns, .mapping-content-columns { min-height: 0; }
 .mapping-photo-list, .mapping-photo-stage { height: 100%; min-height: 0; }
+.mapping-photo-stage.with-header { display: grid; grid-template-rows: var(--photo-pane-header-height) minmax(0, 1fr); }
 .mapping-photo-list { position: relative; }
 .mapping-editor-pane { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
 .mapping-badge { display: inline-flex; align-items: center; padding: 2px 6px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; line-height: 1.2; text-transform: capitalize; }
@@ -17,7 +18,7 @@
 .mapping-badge.processing { color: var(--purple); }
 .mapping-editor { width: 100%; height: 100%; min-height: 0; }
 .mapping-editor.embedded { display: block; overflow: hidden; }
-.editor-photo-column { display: grid; height: 100%; min-height: 0; grid-template-rows: 52px minmax(0, 1fr); }
+.editor-photo-column { display: grid; height: 100%; min-height: 0; grid-template-rows: var(--photo-pane-header-height) minmax(0, 1fr); }
 .editor-mapping-column { position: relative; width: 100%; height: 100%; min-height: 0; }
 .editor-mapping-split { width: 100%; height: 100%; min-height: 0; }
 .mapping-current, .mapping-search { height: 100%; min-height: 0; padding: 10px; }

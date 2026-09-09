@@ -3,8 +3,11 @@ import type { Page } from "./common";
 import { demoPhotos, type Photo } from "./photos";
 import {
   demoTaxa,
+  demoTaxonDisplaySummary,
   demoTaxonSummary,
+  type TaxonDisplaySummary,
   type TaxonDisplayNames,
+  type TaxonomyNameType,
   type TaxonRank,
   type TaxonSummary,
 } from "./taxonomy";
@@ -13,13 +16,17 @@ import { demoOperation, type OperationState } from "./tasks";
 export type PhotoTaxonStatus = "matched" | "ambiguous" | "unmatched" | "processing";
 export type PhotoMappingSummary = { photo_id: number; taxon_id: number | null; status: PhotoTaxonStatus };
 export type PhotoMappingListItem = { photo: Photo; mapping: PhotoMappingSummary };
-export type PhotoMatchedName = { name_id: number; name_type: string; name: string };
+export type PhotoMatchedName = { name_id: number; name_type: TaxonomyNameType; name: string };
 export type PhotoTaxonCandidate = {
   summary: TaxonSummary;
   matched_names: PhotoMatchedName[];
   accepted_names: TaxonDisplayNames;
 };
-export type PhotoMappingDetail = { mapping: PhotoMappingSummary; candidates: PhotoTaxonCandidate[] };
+export type PhotoMappingDetail = {
+  mapping: PhotoMappingSummary;
+  matched_names: PhotoMatchedName[];
+  candidates: PhotoTaxonCandidate[];
+};
 export type MappingMetadata = {
   mapped_photo_count: number;
   unmatched_photo_count: number;
@@ -35,6 +42,7 @@ export type PhotoTaxonUsage = {
   subtree_photo_count: number;
 };
 export type PhotoTaxonNode = { taxon: PhotoTaxonUsage | null; subtree_photo_count: number };
+export type PhotoTaxonEntryCounts = { taxon_count: number; photo_count: number };
 export type PhotoTaxonItem =
   | { kind: "taxon"; taxon: PhotoTaxonUsage }
   | { kind: "photo"; photo: Photo };
@@ -55,16 +63,28 @@ export const startPhotoMapping = () =>
 export const getPhotoMapping = (photoId: number) =>
   call<PhotoMappingSummary>("get_photo_mapping", { photoId }, () =>
     demoMappings.get(photoId) ?? { photo_id: photoId, taxon_id: null, status: "unmatched" });
-export const getPhotoMappingCandidates = (photoId: number) =>
-  call<PhotoTaxonCandidate[]>("get_photo_mapping_candidates", { photoId }, () => {
+export const getPhotoTaxonDisplaySummary = (photoId: number) =>
+  call<TaxonDisplaySummary | null>("get_photo_taxon_display_summary", { photoId }, () => {
     const mapping = demoMappings.get(photoId);
-    return mapping?.status === "ambiguous"
+    return mapping?.status === "matched" && mapping.taxon_id !== null
+      ? demoTaxonDisplaySummary(mapping.taxon_id)
+      : null;
+  });
+export const getPhotoMappingDetail = (photoId: number) =>
+  call<PhotoMappingDetail>("get_photo_mapping_detail", { photoId }, () => {
+    const mapping = demoMappings.get(photoId);
+    const candidates = mapping?.status === "ambiguous"
       ? demoTaxa.slice(0, 3).map((taxon) => ({
           summary: demoTaxonSummary(taxon),
           matched_names: taxon.matches,
           accepted_names: taxon.names,
         }))
       : [];
+    return {
+      mapping: mapping ?? { photo_id: photoId, taxon_id: null, status: "unmatched" },
+      matched_names: [],
+      candidates,
+    };
   });
 export const clearPhotoMapping = (photoId: number) =>
   call<PhotoMappingSummary>("clear_photo_mapping", { photoId }, () => {
@@ -114,6 +134,11 @@ export const getPhotoTaxonNode = (taxonId: number | null, showEmpty = false) =>
       ? { taxon_id: taxonId, rank: "species", names: demoTaxa[0].names, direct_photo_count: 12, subtree_photo_count: 12 }
       : null,
     subtree_photo_count: demoPhotos.length,
+  }));
+export const getPhotoTaxonCounts = (taxonId: number | null) =>
+  call<PhotoTaxonEntryCounts>("get_photo_taxon_counts", { taxonId }, () => ({
+    taxon_count: taxonId === null ? demoTaxa.length : 0,
+    photo_count: taxonId === null ? 0 : demoPhotos.filter((photo) => demoMappings.get(photo.photo_id)?.taxon_id === taxonId).length,
   }));
 export const browsePhotoTaxon = (
   taxonId: number | null,

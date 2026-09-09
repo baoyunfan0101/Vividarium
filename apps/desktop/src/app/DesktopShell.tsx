@@ -20,12 +20,15 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getWorkspaceState,
   saveWorkspaceState,
   type GeneralSettings,
 } from "../api/general";
 import type { OperationState } from "../api/tasks";
+import { errorMessage } from "../api/common";
+import { cancelActiveTabTasks } from "../api/activeTasks";
 import {
   getPhoto,
   type Photo,
@@ -60,6 +63,8 @@ import {
   trimRecentSearches,
 } from "../features/photos/search/recentSearchStorage";
 import type { PhotoOpenHandlers } from "../features/photos/PhotoInteraction";
+import { PhotoFullscreenPresentation } from "../features/photos/PhotoFullscreenPresentation";
+import { setPhotoFullscreenActive } from "../features/photos/photoFullscreenState";
 import { emitPhotoMutation, usePhotoMutation } from "../features/photos/photoMutations";
 import {
   FolderPhotosView,
@@ -76,6 +81,8 @@ import { TaxonomyHierarchyPage } from "../features/taxonomy/TaxonomyHierarchyPag
 import { CustomSqlView } from "../features/taxonomy/CustomSqlView";
 import { OperationHistoryView } from "../features/operations/OperationHistoryView";
 import { useOperationObserver } from "./useOperationObserver";
+import { BackgroundTasks } from "./BackgroundTasks";
+import { backgroundActiveCount } from "./backgroundPresentation";
 import { ViewStateProvider, type ViewStateStore } from "../shared/viewState";
 import {
   dependsOnReplacedTaxonomy,
@@ -92,6 +99,12 @@ import {
 import { nativeMenuActions, useNativeMenu } from "./nativeMenu";
 import { NativeAboutOverlay } from "./NativeAboutOverlay";
 import { getTaxonDetail } from "../api/taxonomy";
+import { TaxonDisplayPath } from "../features/taxonomy/TaxonDisplayPath";
+import { MappingBadge } from "../features/mapping/MappingBadge";
+import {
+  statusBarMappingStatus,
+  type PhotoTaxonDisplayState,
+} from "../features/photos/photoTaxonDisplayState";
 import {
   restoreWorkspaceState,
   serializeWorkspaceState,
@@ -169,17 +182,22 @@ export function DesktopShell({
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [operationsOpen, setOperationsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [fullscreenPhoto, setFullscreenPhoto] = useState<Photo | null>(null);
+  const fullscreenReturnFocusRef = useRef<(() => void) | null>(null);
+  const fullscreenRequestRef = useRef(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [recentSearches, setRecentSearches] = useState(() => (
     loadRecentSearches(undefined, generalSettings.recent_searches_limit)
   ));
   const [tabStatuses, setTabStatuses] = useState<TabStatusMap>({});
+  const [photoTaxonDisplayStates, setPhotoTaxonDisplayStates] = useState<Record<string, PhotoTaxonDisplayState | null>>({});
   const [startedPhotoOperation, setStartedPhotoOperation] = useState<OperationState | null>(null);
   const startedPhotoOperationTabId = useRef<string | null>(null);
   const emptySearchInputRef = useRef<HTMLInputElement>(null);
   const operationsMenuRef = useRef<HTMLDivElement>(null);
   const activeIdRef = useRef<string | null>(null);
   const viewStateStores = useRef(new globalThis.Map<string, ViewStateStore>());
+  const taskOwnerIds = useRef(new globalThis.Map<string, string>());
   const [navigationHistory, setNavigationHistory] = useState(
     createNavigationHistory(null),
   );
@@ -192,6 +210,7 @@ export function DesktopShell({
   const runningOperations = Object.values(operations).filter((operation) => (
     operation.state === "queued" || operation.state === "running"
   ));
+  const activeOperationCount = backgroundActiveCount(operations);
   const latestPhotoOperation = latestOperationForModule(operations, "photos");
   const latestMappingOperation = latestOperationForModule(operations, "mapping");
   const observedStartedPhotoOperation = operationByTaskId(
@@ -207,7 +226,7 @@ export function DesktopShell({
         ? latestMappingOperation
         : null;
   const photoLibraryOperationError = latestPhotoOperation
-    && ["initial_index", "photo_library_index", "photo_scan", "metadata_index"].includes(latestPhotoOperation.operation ?? "")
+    && ["photo_scan", "metadata_index"].includes(latestPhotoOperation.operation ?? "")
     && latestPhotoOperation.error
     ? `Photo Library indexing failed: ${latestPhotoOperation.error}. Retry the active library or reopen it.`
     : "";
@@ -221,9 +240,18 @@ export function DesktopShell({
   const backTarget = findNavigationTarget(navigationHistory, existingTabIds, -1);
   const forwardTarget = findNavigationTarget(navigationHistory, existingTabIds, 1);
   const status = getCurrentTabStatus(tabStatuses, activeId);
+  const activePhotoTaxonDisplayState = activeId === null ? null : photoTaxonDisplayStates[activeId] ?? null;
+  const activePhotoTaxonSummary = activePhotoTaxonDisplayState?.summary ?? null;
+  const activePhotoMappingStatus = statusBarMappingStatus(activePhotoTaxonDisplayState);
 
   const reportTabStatus = useCallback((tabId: string, message: string) => {
     setTabStatuses((current) => updateTabStatus(current, tabId, message));
+  }, []);
+
+  const reportPhotoTaxonDisplayState = useCallback((tabId: string, state: PhotoTaxonDisplayState | null) => {
+    setPhotoTaxonDisplayStates((current) => current[tabId] === state
+      ? current
+      : { ...current, [tabId]: state });
   }, []);
 
   const reportActiveStatus = useCallback((message: string) => {
@@ -385,6 +413,20 @@ export function DesktopShell({
     focusTab(tab.id);
   }
 
+  function taskOwnerId(tabId: string) {
+    const existing = taskOwnerIds.current.get(tabId);
+    if (existing) return existing;
+    const ownerId = `${tabId}:${crypto.randomUUID()}`;
+    taskOwnerIds.current.set(tabId, ownerId);
+    return ownerId;
+  }
+
+  function cancelTabTasks(tabId: string) {
+    const ownerId = taskOwnerIds.current.get(tabId);
+    taskOwnerIds.current.delete(tabId);
+    if (ownerId) void cancelActiveTabTasks(ownerId).catch(() => undefined);
+  }
+
   function focusTab(id: string | null, record = true) {
     setActiveId(id);
     if (record && id !== null) {
@@ -424,17 +466,91 @@ export function DesktopShell({
       : null;
     const next = closeTabState(tabs, activeId, id, previousActiveId);
     if (next.tabs === tabs) return;
+    cancelTabTasks(id);
     viewStateStores.current.delete(id);
     setTabs(next.tabs);
     if (activeId !== next.activeId) focusTab(next.activeId);
     if (next.activeId === null) setSearchOpen(false);
   }
 
+  const openPhotoFullscreen = useCallback((photo: Photo, onReturnFocus?: () => void) => {
+    fullscreenReturnFocusRef.current = onReturnFocus ?? null;
+    const requestId = ++fullscreenRequestRef.current;
+    setFullscreenPhoto(photo);
+    setPhotoFullscreenActive(true);
+    window.requestAnimationFrame(() => {
+      if (requestId !== fullscreenRequestRef.current) return;
+      void getCurrentWindow().setFullscreen(true).catch((nextError) => {
+        if (requestId !== fullscreenRequestRef.current) return;
+        setPhotoFullscreenActive(false);
+        setFullscreenPhoto(null);
+        fullscreenReturnFocusRef.current = null;
+        reportActiveStatus(errorMessage(nextError));
+      });
+    });
+  }, [reportActiveStatus]);
+
+  const exitPhotoFullscreen = useCallback(async () => {
+    const requestId = fullscreenRequestRef.current;
+    const appWindow = getCurrentWindow();
+    let unlisten: (() => void) | null = null;
+    let completed = false;
+    const cleanup = () => {
+      unlisten?.();
+      unlisten = null;
+    };
+    const restoreAfterExit = () => {
+      if (completed || requestId !== fullscreenRequestRef.current) {
+        cleanup();
+        return;
+      }
+      completed = true;
+      cleanup();
+      setPhotoFullscreenActive(false);
+      setFullscreenPhoto(null);
+      ++fullscreenRequestRef.current;
+      window.requestAnimationFrame(() => {
+        const restore = fullscreenReturnFocusRef.current;
+        fullscreenReturnFocusRef.current = null;
+        restore?.();
+      });
+    };
+    try {
+      unlisten = await appWindow.onResized(() => {
+        void appWindow.isFullscreen()
+          .then((fullscreen) => {
+            if (fullscreen) return;
+            restoreAfterExit();
+          })
+          .catch((nextError) => {
+            if (completed || requestId !== fullscreenRequestRef.current) {
+              cleanup();
+              return;
+            }
+            completed = true;
+            cleanup();
+            reportActiveStatus(errorMessage(nextError));
+          });
+      });
+      if (completed || requestId !== fullscreenRequestRef.current) {
+        cleanup();
+        return;
+      }
+      await appWindow.setFullscreen(false);
+    } catch (nextError) {
+      cleanup();
+      if (requestId !== fullscreenRequestRef.current) return;
+      completed = true;
+      reportActiveStatus(errorMessage(nextError));
+    }
+  }, [reportActiveStatus]);
+
   const handlers: PhotoOpenHandlers = useMemo(() => ({
     openDetails: (photo) => openTab({ id: `photo:${photo.photo_id}`, kind: "photo-detail", title: photo.filename, photo }),
     openTaxon: (taxonId) => openTab({ id: `taxon-detail:${crypto.randomUUID()}`, kind: "taxon-detail", title: String(taxonId), taxonId }),
     openMappingEditor: (photo) => openTab({ id: `mapping:${photo.photo_id}`, kind: "mapping-editor", title: photo.filename, photo }),
-  }), [tabs]);
+    openFullscreen: (photo, onReturnFocus) => openPhotoFullscreen(photo, onReturnFocus),
+  }), [openPhotoFullscreen, tabs]);
 
   async function submitSearch(query: string) {
     const value = normalizeSearchQuery(query);
@@ -481,7 +597,10 @@ export function DesktopShell({
       : initialTab.id;
     setTabs((current) => {
       const remaining = current.filter((tab) => !photoTabKinds.has(tab.kind));
-      current.filter((tab) => photoTabKinds.has(tab.kind)).forEach((tab) => viewStateStores.current.delete(tab.id));
+      current.filter((tab) => photoTabKinds.has(tab.kind)).forEach((tab) => {
+        cancelTabTasks(tab.id);
+        viewStateStores.current.delete(tab.id);
+      });
       if (remaining.length === 0 || (active !== null && photoTabKinds.has(active.kind))) {
         const folders = { ...initialTab };
         setActiveId(folders.id);
@@ -530,6 +649,7 @@ export function DesktopShell({
 
   function closeAllTabs() {
     const next = closeAllTabsState<AppTab>();
+    tabs.forEach((tab) => cancelTabTasks(tab.id));
     viewStateStores.current.clear();
     setTabStatuses({});
     setTabs(next.tabs);
@@ -541,7 +661,10 @@ export function DesktopShell({
 
   function resetTaxonomyResources(message = "Taxonomy database replaced successfully. Photo mappings are being rebuilt in the background.") {
     tabs.filter((tab) => dependsOnReplacedTaxonomy(tab.kind))
-      .forEach((tab) => viewStateStores.current.delete(tab.id));
+      .forEach((tab) => {
+        cancelTabTasks(tab.id);
+        viewStateStores.current.delete(tab.id);
+      });
     const remaining = retainTabsAfterTaxonomyReplacement(tabs);
     const nextTabs = remaining.length > 0 ? remaining : [{ ...initialTab }];
     const nextActiveId = nextTabs.some((tab) => tab.id === activeId)
@@ -656,8 +779,10 @@ export function DesktopShell({
                     <TabBody
                       active={isActive}
                       tab={tab}
+                      taskOwnerId={taskOwnerId(tab.id)}
                       handlers={handlers}
                       onTabStatus={reportTabStatus}
+                      onPhotoTaxonDisplayState={reportPhotoTaxonDisplayState}
                       openTab={openTab}
                       updateTaxonTab={updateTaxonTab}
                       updateSettingsTab={updateSettingsTab}
@@ -686,29 +811,25 @@ export function DesktopShell({
         <footer className="status-bar">
           <span className="status-dot" />
           {status}
-          <span className="status-title">{active?.title ?? ""}</span>
+          {activePhotoTaxonSummary ? (
+            <TaxonDisplayPath
+              className="status-title"
+              summary={activePhotoTaxonSummary}
+              nameParts={generalSettings.photos_taxon_name_parts}
+            />
+          ) : activePhotoMappingStatus ? (
+            <span className="status-title"><MappingBadge status={activePhotoMappingStatus} /></span>
+          ) : (
+            <span className="status-title">{active?.title ?? ""}</span>
+          )}
           <div className="status-operations" ref={operationsMenuRef}>
-            <IconButton aria-label="Background" className={runningOperations.length > 0 ? "running" : ""} title="Background" onClick={() => {
+            <IconButton aria-label="Background" className={activeOperationCount > 0 ? "running" : ""} title="Background" onClick={() => {
               setOperationsOpen((current) => !current);
             }}>
-              <Activity size={12} /><span>{runningOperations.length}</span>
+              <Activity size={12} /><span>{activeOperationCount}</span>
             </IconButton>
             {operationsOpen && (
-              <div className="toolbar-popover operations-popover">
-                <strong>Background</strong>
-                {Object.values(operations).length === 0 && <span className="operations-empty">No background tasks</span>}
-                {Object.values(operations).sort(compareBackgroundOperations).map((operation) => (
-                  <div key={operation.task_id ?? `${operation.module}-${operation.started_at}`}>
-                    <b>{backgroundTaskName(operation)}</b>
-                    <span>{backgroundTaskStage(operation)}</span>
-                    {operation.state === "running" && operation.total !== null && (
-                      <progress value={operation.completed} max={operation.total} />
-                    )}
-                    {operation.state === "running" && operation.total === null && <progress />}
-                    {operation.error && <small className="operation-error">{operation.error}</small>}
-                  </div>
-                ))}
-              </div>
+              <BackgroundTasks operations={operations} />
             )}
           </div>
         </footer>
@@ -721,49 +842,25 @@ export function DesktopShell({
         />
       )}
       {aboutOpen && <NativeAboutOverlay onClose={() => setAboutOpen(false)} />}
+      {fullscreenPhoto && (
+        <PhotoLibraryIdentityProvider libraryUuid={activeLibrary?.library_uuid ?? null}>
+          <PhotoFullscreenPresentation
+            photo={fullscreenPhoto}
+            onExit={exitPhotoFullscreen}
+          />
+        </PhotoLibraryIdentityProvider>
+      )}
     </div>
   );
-}
-
-function compareBackgroundOperations(left: OperationState, right: OperationState) {
-  const leftActive = left.state === "queued" || left.state === "running";
-  const rightActive = right.state === "queued" || right.state === "running";
-  if (leftActive !== rightActive) return leftActive ? -1 : 1;
-  return (right.started_at ?? "").localeCompare(left.started_at ?? "");
-}
-
-function backgroundTaskName(operation: OperationState) {
-  const names: Record<string, string> = {
-    photo_scan: "Photo scan",
-    metadata_index: "Photo metadata index",
-    photo_mapping: "Photo mapping",
-    initial_index: "Photo Library indexing",
-    photo_library_index: "Photo Library indexing",
-    refresh: "Photo Library refresh",
-    rename_from_taxonomy: "Rename photos",
-    rename_directory_from_taxonomy: "Rename photos recursively",
-    taxonomy_sync: "Photo mapping",
-    match: "Photo mapping",
-    apply_sql_import: "SQL import",
-    apply_direct_import: "Direct import",
-  };
-  return names[operation.operation ?? ""] ?? operation.operation?.split("_").join(" ") ?? operation.module;
-}
-
-function backgroundTaskStage(operation: OperationState) {
-  const stage = operation.progress?.stage ?? operation.message;
-  if (operation.state === "queued") return "Queued";
-  if (operation.state === "running" && operation.total !== null) {
-    return `${stage} · ${operation.completed.toLocaleString()} / ${operation.total.toLocaleString()}`;
-  }
-  return stage;
 }
 
 function TabBody({
   active,
   tab,
+  taskOwnerId,
   handlers,
   onTabStatus,
+  onPhotoTaxonDisplayState,
   openTab,
   updateTaxonTab,
   updateSettingsTab,
@@ -782,8 +879,10 @@ function TabBody({
 }: {
   active: boolean;
   tab: AppTab;
+  taskOwnerId: string;
   handlers: PhotoOpenHandlers;
   onTabStatus: (tabId: string, message: string, busy?: boolean) => void;
+  onPhotoTaxonDisplayState: (tabId: string, state: PhotoTaxonDisplayState | null) => void;
   openTab: (tab: AppTab, singleton?: boolean) => void;
   updateTaxonTab: (id: string, taxonId: number, title: string) => void;
   updateSettingsTab: (id: string, section: SettingsSection) => void;
@@ -804,6 +903,10 @@ function TabBody({
     (message: string, busy?: boolean) => onTabStatus(tab.id, message, busy),
     [onTabStatus, tab.id],
   );
+  const onCurrentPhotoTaxonDisplayState = useCallback(
+    (state: PhotoTaxonDisplayState | null) => onPhotoTaxonDisplayState(tab.id, state),
+    [onPhotoTaxonDisplayState, tab.id],
+  );
   if (photoTabKinds.has(tab.kind) && !workspaceAvailable) {
     return (
       <EmptyState
@@ -821,21 +924,21 @@ function TabBody({
       />
     );
   }
-  if (tab.kind === "folders") return <FolderPhotosView handlers={handlers} onStatus={onStatus} backgroundOperation={photoLibraryOperation} />;
-  if (tab.kind === "photo-taxonomy") return <TaxonPhotosView handlers={handlers} nameParts={generalSettings.taxon_tree_name_parts} backgroundOperation={photoLibraryOperation} />;
-  if (tab.kind === "map") return <PhotoMapView active={active} handlers={handlers} backgroundOperation={photoLibraryOperation} />;
+  if (tab.kind === "folders") return <FolderPhotosView active={active} handlers={handlers} onStatus={onStatus} onPhotoTaxonDisplayState={onCurrentPhotoTaxonDisplayState} backgroundOperation={photoLibraryOperation} />;
+  if (tab.kind === "photo-taxonomy") return <TaxonPhotosView active={active} handlers={handlers} nameParts={generalSettings.photos_taxon_name_parts} onStatus={onStatus} onPhotoTaxonDisplayState={onCurrentPhotoTaxonDisplayState} backgroundOperation={photoLibraryOperation} />;
+  if (tab.kind === "map") return <PhotoMapView active={active} handlers={handlers} onStatus={onStatus} onPhotoTaxonDisplayState={onCurrentPhotoTaxonDisplayState} backgroundOperation={photoLibraryOperation} />;
   if (tab.kind === "photo-history") return <OperationHistoryView domain="photo" onStatus={onStatus} />;
-  if (tab.kind === "mapping") return <MappingView active={active} onStatus={onStatus} handlers={handlers} />;
-  if (tab.kind === "taxonomy-search") return <TaxonomySearchView mutationDisabled={taxonomyMutationLocked} onOpenPhotos={(taxonId, label) => openTab({ id: `taxon-photos:${taxonId}`, kind: "taxon-photos", title: label, taxonId })} />;
-  if (tab.kind === "taxon-detail" && tab.taxonId !== undefined) return <TaxonomyHierarchyPage initialTaxonId={tab.taxonId} mutationDisabled={taxonomyMutationLocked} onTaxonChange={(taxonId, label) => updateTaxonTab(tab.id, taxonId, label)} onOpenPhotos={(taxonId, label) => openTab({ id: `taxon-photos:${taxonId}`, kind: "taxon-photos", title: label, taxonId })} />;
-  if (tab.kind === "formatted-update") return <FormattedUpdateView onStatus={onStatus} mutationDisabled={taxonomyMutationLocked} />;
-  if (tab.kind === "custom-sql") return <CustomSqlView onStatus={onStatus} mutationDisabled={taxonomyMutationLocked} />;
+  if (tab.kind === "mapping") return <MappingView active={active} onStatus={onStatus} onPhotoTaxonDisplayState={onCurrentPhotoTaxonDisplayState} handlers={handlers} />;
+  if (tab.kind === "taxonomy-search") return <TaxonomySearchView nameParts={generalSettings.taxonomy_taxon_name_parts} mutationDisabled={taxonomyMutationLocked} onStatus={onStatus} onOpenPhotos={(taxonId, label) => openTab({ id: `taxon-photos:${taxonId}`, kind: "taxon-photos", title: label, taxonId })} />;
+  if (tab.kind === "taxon-detail" && tab.taxonId !== undefined) return <TaxonomyHierarchyPage initialTaxonId={tab.taxonId} nameParts={generalSettings.taxonomy_taxon_name_parts} mutationDisabled={taxonomyMutationLocked} onTaxonChange={(taxonId, label) => updateTaxonTab(tab.id, taxonId, label)} onOpenPhotos={(taxonId, label) => openTab({ id: `taxon-photos:${taxonId}`, kind: "taxon-photos", title: label, taxonId })} />;
+  if (tab.kind === "formatted-update") return <FormattedUpdateView onStatus={onStatus} taskOwnerId={taskOwnerId} mutationDisabled={taxonomyMutationLocked} />;
+  if (tab.kind === "custom-sql") return <CustomSqlView onStatus={onStatus} taskOwnerId={taskOwnerId} mutationDisabled={taxonomyMutationLocked} />;
   if (tab.kind === "taxonomy-history") return <OperationHistoryView domain="taxonomy" onStatus={onStatus} />;
-  if (tab.kind === "settings") return <SettingsView section={tab.settingsSection ?? "General"} onSectionChange={(section) => updateSettingsTab(tab.id, section)} onTaxonomyImported={onTaxonomyImported} onWorkspaceChanged={onWorkspaceChanged} onOpenPhotoLibrary={onOpenPhotoLibrary} onPhotoOperationStarted={onPhotoOperationStarted} photoLibraryOperation={photoLibraryOperation} photoLibraryOperationError={photoLibraryOperationError} generalSettings={generalSettings} generalSettingsLoadError={generalSettingsLoadError} onGeneralSettingsChange={onGeneralSettingsChange} />;
-  if (tab.kind === "photo-detail" && tab.photo) return <PhotoDetailView photo={tab.photo} handlers={handlers} />;
-  if (tab.kind === "mapping-editor" && tab.photo) return <MappingEditor photo={tab.photo} onOpenTaxon={handlers.openTaxon} />;
-  if (tab.kind === "search-photos" && tab.query) return <PhotoSet query={tab.query} refreshKey={tab.refreshKey} handlers={handlers} />;
-  if (tab.kind === "taxon-photos" && tab.taxonId !== undefined) return <PhotoSet taxonId={tab.taxonId} handlers={handlers} />;
+  if (tab.kind === "settings") return <SettingsView section={tab.settingsSection ?? "General"} taskOwnerId={taskOwnerId} onStatus={onStatus} onSectionChange={(section) => updateSettingsTab(tab.id, section)} onTaxonomyImported={onTaxonomyImported} onWorkspaceChanged={onWorkspaceChanged} onOpenPhotoLibrary={onOpenPhotoLibrary} onPhotoOperationStarted={onPhotoOperationStarted} photoLibraryOperation={photoLibraryOperation} photoLibraryOperationError={photoLibraryOperationError} generalSettings={generalSettings} generalSettingsLoadError={generalSettingsLoadError} onGeneralSettingsChange={onGeneralSettingsChange} />;
+  if (tab.kind === "photo-detail" && tab.photo) return <PhotoDetailView active={active} photo={tab.photo} handlers={handlers} onStatus={onStatus} onPhotoTaxonDisplayState={onCurrentPhotoTaxonDisplayState} />;
+  if (tab.kind === "mapping-editor" && tab.photo) return <MappingEditor active={active} photo={tab.photo} onStatus={onStatus} onPhotoTaxonDisplayState={onCurrentPhotoTaxonDisplayState} handlers={handlers} />;
+  if (tab.kind === "search-photos" && tab.query) return <PhotoSet active={active} query={tab.query} refreshKey={tab.refreshKey} handlers={handlers} onStatus={onStatus} onPhotoTaxonDisplayState={onCurrentPhotoTaxonDisplayState} />;
+  if (tab.kind === "taxon-photos" && tab.taxonId !== undefined) return <PhotoSet active={active} taxonId={tab.taxonId} handlers={handlers} onStatus={onStatus} onPhotoTaxonDisplayState={onCurrentPhotoTaxonDisplayState} />;
   return null;
 }
 

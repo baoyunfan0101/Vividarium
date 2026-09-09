@@ -55,6 +55,36 @@ pub(super) fn clear(transaction: &Transaction<'_>, photo_id: i64) -> CoreResult<
     Ok(())
 }
 
+pub(super) fn load_matched_names(
+    connection: &Connection,
+    photo_id: i64,
+    taxon_id: i64,
+) -> CoreResult<Vec<PhotoMatchedName>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT name_id, name_type, name
+        FROM photo_taxon_candidate_names
+        WHERE photo_id = ? AND taxon_id = ?
+        ORDER BY name_type, name_id
+        "#,
+    )?;
+    let rows = statement.query_map(params![photo_id, taxon_id], |row| {
+        let name_type = TaxonomyNameType::from_code(row.get(1)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?;
+        Ok(PhotoMatchedName {
+            name_id: row.get(0)?,
+            name_type,
+            name: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub(super) fn load(connection: &Connection, photo_id: i64) -> CoreResult<Vec<PhotoTaxonCandidate>> {
     let taxon_ids = {
         let mut statement = connection.prepare(

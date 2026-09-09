@@ -38,8 +38,8 @@
       "icons/icon.ico"
     ],
     "category": "Photography",
-    "shortDescription": "Local plant photo index",
-    "longDescription": "Index, browse, map, and classify local plant photos."
+    "shortDescription": "Local biological photo library workbench",
+    "longDescription": "Index, browse, map, classify, and maintain local biological photo libraries and taxonomy."
   },
   "plugins": {
     "updater": {

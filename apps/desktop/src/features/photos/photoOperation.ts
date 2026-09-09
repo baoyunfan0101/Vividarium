@@ -1,17 +1,18 @@
 import type { PhotoRenameOperationSummary } from "../../api/photos";
 import type { OperationState } from "../../api/tasks";
+import { backgroundStageLabel } from "../../app/backgroundPresentation.ts";
 
 export function describePhotoOperation(operation: OperationState): string {
-  const stage = operation.progress?.stage || operation.message || "Loading Photo Library";
-  const current = operation.progress?.current ?? operation.completed;
-  const total = operation.progress?.total ?? operation.total;
+  const stage = backgroundStageLabel(operation);
+  const current = operation.progress?.current ?? 0;
+  const total = operation.progress?.total ?? null;
   if (total === null || total <= 0) return stage;
   return `${stage}: ${current.toLocaleString("en-US")} / ${total.toLocaleString("en-US")}`;
 }
 
 export function photoOperationProgress(operation: OperationState): { value: number; max: number } | null {
-  const value = operation.progress?.current ?? operation.completed;
-  const max = operation.progress?.total ?? operation.total;
+  const value = operation.progress?.current ?? 0;
+  const max = operation.progress?.total ?? null;
   if (max === null || max <= 0) return null;
   return { value: Math.min(value, max), max };
 }
@@ -37,4 +38,8 @@ export function photoRenameSummaryFromOperation(
     no_change: result.no_change,
     failed: result.failed,
   };
+}
+
+export function formatPhotoRenameSummary(summary: PhotoRenameOperationSummary): string {
+  return `Renamed ${summary.applied} photos, ${summary.no_change} unchanged, ${summary.failed} failed`;
 }

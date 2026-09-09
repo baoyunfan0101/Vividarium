@@ -34,7 +34,8 @@ export function TaxonConfirmationModal({
   return (
     <Modal
       title={content.title}
-      onClose={() => !busy && onClose()}
+      dismissible={!busy}
+      onClose={onClose}
       actions={(
         <>
           <Button disabled={busy} onClick={onClose}>Cancel</Button>

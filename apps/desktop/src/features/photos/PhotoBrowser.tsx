@@ -1,9 +1,10 @@
 import { Image as ImageIcon, Rows3 } from "lucide-react";
-import { useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import type { Photo } from "../../api/photos";
 import {
   Busy,
   VirtualList,
+  type VirtualListHandle,
 } from "../../shared/ui";
 import { usePhotoInteraction, type PhotoOpenHandlers } from "./PhotoInteraction";
 import { usePhotoMutation } from "./photoMutations";
@@ -11,7 +12,12 @@ import { findTypeSelectIndex, nextListIndex } from "./photoListNavigation";
 import type { CursorPageController } from "../../shared/useCursorPage";
 import { ResizablePanels } from "../../shared/ResizablePanels";
 import { PhotoDisplay, PhotoDisplayToggle, usePhotoActivation, usePhotoDisplayMode } from "./PhotoDisplay";
-import { formatPhotoSummary } from "./photoFormatting";
+import { PhotoPaneHeader } from "./PhotoPaneHeader";
+import {
+  usePublishedPhotoTaxonSummary,
+  type PhotoTaxonDisplayState,
+} from "./photoTaxonSummary";
+import { selectionIntersectsElement } from "../../shared/selectableSurface";
 
 export function PhotoBrowser({
   title,
@@ -19,24 +25,45 @@ export function PhotoBrowser({
   loadingLabel = "Loading photos...",
   page,
   handlers,
+  active,
+  onPhotoTaxonDisplayState,
+  onStatus,
 }: {
   title: string;
   detail?: string;
   loadingLabel?: string;
   page: CursorPageController<Photo>;
   handlers: PhotoOpenHandlers;
+  active: boolean;
+  onPhotoTaxonDisplayState: (state: PhotoTaxonDisplayState | null) => void;
+  onStatus: (message: string) => void;
 }) {
   const photos = page.items;
-  const [mode, setMode] = usePhotoDisplayMode();
+  const listRef = useRef<VirtualListHandle>(null);
+  const openFullscreen = useCallback((photo: Photo) => {
+    handlers.openFullscreen(photo, () => listRef.current?.focus());
+  }, [handlers]);
+  const viewHandlers = useMemo(() => ({ ...handlers, openFullscreen }), [handlers, openFullscreen]);
   const interaction = usePhotoInteraction({
     photos,
-    handlers,
+    handlers: viewHandlers,
     stateKey: "photo-browser.interaction",
+    onStatus,
+  });
+  const [mode, setMode] = usePhotoDisplayMode({
+    onEnterFullscreen: () => {
+      if (interaction.selected) openFullscreen(interaction.selected);
+    },
+  });
+  usePublishedPhotoTaxonSummary({
+    photoId: interaction.selectedId,
+    active,
+    onChange: onPhotoTaxonDisplayState,
   });
   const activation = usePhotoActivation({
     onSelect: interaction.selectPhoto,
     onOpenImage: () => setMode("image"),
-    onOpenDetails: handlers.openDetails,
+    onOpenFullscreen: openFullscreen,
   });
   usePhotoMutation(() => {
     void page.reload();
@@ -79,6 +106,7 @@ export function PhotoBrowser({
             <Rows3 size={14} />
           </header>
           <VirtualList
+            ref={listRef}
             stateKey="photo-browser.list"
             items={photos}
             activeIndex={activeIndex}
@@ -92,22 +120,33 @@ export function PhotoBrowser({
             onMoveActive={moveSelection}
             onTypeSelect={typeSelect}
             renderItem={(photo) => (
-              <button
-                className={`photo-list-row${interaction.selectedId === photo.photo_id ? " active" : ""}`}
-                type="button"
-                onClick={() => activation.clickPhoto(photo)}
-                onDoubleClick={() => activation.doubleClickPhoto(photo)}
+              <div
+                className={`photo-list-row selectable-content${interaction.selectedId === photo.photo_id ? " active" : ""}`}
+                onClick={(event) => {
+                  if (selectionIntersectsElement(event.currentTarget)) {
+                    activation.cancelPendingClick();
+                    return;
+                  }
+                  activation.clickPhoto(photo);
+                }}
+                onDoubleClick={(event) => {
+                  if (selectionIntersectsElement(event.currentTarget)) {
+                    activation.cancelPendingClick();
+                    return;
+                  }
+                  activation.doubleClickPhoto(photo);
+                }}
                 onContextMenu={(event) => interaction.openContextMenu(event, photo)}
               >
                 <ImageIcon size={14} />
                 <span>{photo.filename}</span>
-              </button>
+              </div>
             )}
           />
         </aside>)}
         second={(<main className="photo-browser-main">
-          <header className="pane-header">
-            <div><strong>{interaction.selected?.filename ?? "Photos"}</strong><span>{interaction.selected ? formatPhotoSummary(interaction.selected) : status}</span></div>
+          <header className="pane-header photo-pane-heading">
+            {interaction.selected ? <PhotoPaneHeader photo={interaction.selected} /> : <div><strong>Photos</strong><span>{status}</span></div>}
             {page.loading && photos.length > 0 && <small className="pane-loading-label">Loading...</small>}
             <PhotoDisplayToggle mode={mode} onChange={setMode} />
           </header>

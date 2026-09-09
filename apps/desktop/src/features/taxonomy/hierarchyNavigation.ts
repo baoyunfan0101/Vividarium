@@ -1,4 +1,5 @@
-import type { TaxonNameMatch, TaxonSearchResult } from "../../api/taxonomy";
+import type { TaxonSearchResult } from "../../api/taxonomy";
+import { taxonMatchExplanations } from "./taxonMatchExplanation.ts";
 
 export type HierarchyPositions = Record<string, number>;
 
@@ -62,23 +63,6 @@ export function reconcileSelectedRoot(
   return resultTaxonIds[0] ?? null;
 }
 
-const nonAcceptedNameLabels: Partial<Record<TaxonNameMatch["name_type"], string>> = {
-  synonym: "Matched synonym",
-  zh_alias: "Matched Chinese alias",
-  en_alias: "Matched English alias",
-};
-
-export function taxonSearchMatchExplanation(result: TaxonSearchResult): string | null {
-  if (result.matches.some((match) => (
-    match.name_type === "sci_name"
-    || match.name_type === "zh_name"
-    || match.name_type === "en_name"
-  ))) {
-    return null;
-  }
-  const explanations = result.matches.flatMap((match) => {
-    const label = nonAcceptedNameLabels[match.name_type];
-    return label ? [`${label}: ${match.name}`] : [];
-  });
-  return explanations.length > 0 ? [...new Set(explanations)].join("; ") : null;
+export function taxonSearchMatchExplanations(result: TaxonSearchResult) {
+  return taxonMatchExplanations(result.matches);
 }

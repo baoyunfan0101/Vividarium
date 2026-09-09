@@ -11,22 +11,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
 use crate::error::{CoreError, CoreResult};
-use crate::models::Photo;
+use crate::models::{OperationProgress, OperationProgressUnit, Photo};
 use crate::naming::PhotoFilenameParser;
 use crate::taxonomy::{
     TaxonDisplayNames, TaxonRank, TaxonSummary, TaxonomyNameType, load_taxon_summaries,
+    match_exact_taxonomy_name,
 };
 
 mod actions;
 mod candidates;
+mod matched_names;
 mod name_match;
 mod navigation;
 mod status;
 mod tree;
 
 pub use actions::{
-    clear_photo_mapping, get_metadata, get_photo_mapping, get_photo_mapping_candidates,
-    remap_photo, set_photo_mapping,
+    clear_photo_mapping, get_metadata, get_photo_mapping, get_photo_mapping_detail,
+    get_photo_taxon_display_summary, remap_photo, set_photo_mapping,
 };
 pub use name_match::{
     PhotoNameField, PhotoNameMatchSettings, get_photo_name_match_settings,
@@ -34,7 +36,7 @@ pub use name_match::{
 };
 pub use navigation::{list_taxon_photos, search_photo_taxa, suggest_photo_taxa};
 pub use status::{list_photos_by_mapping_status, search_photos_by_mapping_status};
-pub use tree::{browse_photo_taxon, get_photo_taxon_node};
+pub use tree::{browse_photo_taxon, get_photo_taxon_counts, get_photo_taxon_node};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +78,13 @@ pub struct PhotoMappingSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhotoMappingDetail {
+    pub mapping: PhotoMappingSummary,
+    pub matched_names: Vec<PhotoMatchedName>,
+    pub candidates: Vec<PhotoTaxonCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PhotoMatchedName {
     pub name_id: i64,
     pub name_type: TaxonomyNameType,
@@ -102,6 +111,12 @@ pub struct PhotoTaxonUsage {
 pub struct PhotoTaxonNode {
     pub taxon: Option<PhotoTaxonUsage>,
     pub subtree_photo_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhotoTaxonEntryCounts {
+    pub taxon_count: i64,
+    pub photo_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -147,7 +162,7 @@ pub struct PhotoMappingRunResult {
 const PHOTO_TAXON_CANDIDATE_LIMIT: usize = 500;
 const PHOTO_MAPPING_BATCH_SIZE: usize = 200;
 
-pub type MappingProgressCallback<'a> = dyn FnMut(u64, Option<u64>, &str) + Send + 'a;
+pub type MappingProgressCallback<'a> = dyn FnMut(OperationProgress) + Send + 'a;
 
 pub(crate) fn queue_photo_ids(
     transaction: &Transaction<'_>,
@@ -184,7 +199,12 @@ pub fn process_pending_photo_matches(
 
     let mut processed = 0usize;
     let mut changed = 0usize;
-    progress(0, Some(total as u64), "Matching photo names");
+    progress(OperationProgress {
+        stage: "mapping_photos".into(),
+        current: Some(0),
+        total: Some(total as u64),
+        unit: Some(OperationProgressUnit::Photos),
+    });
     loop {
         let mut connection = database.connect()?;
         let transaction = connection.transaction()?;
@@ -211,7 +231,12 @@ pub fn process_pending_photo_matches(
         delete_queued_photo_ids(&transaction, &photo_ids)?;
         transaction.commit()?;
         processed += photo_ids.len();
-        progress(processed as u64, Some(total as u64), "Matching photo names");
+        progress(OperationProgress {
+            stage: "mapping_photos".into(),
+            current: Some(processed as u64),
+            total: Some(total as u64),
+            unit: Some(OperationProgressUnit::Photos),
+        });
         std::thread::yield_now();
     }
     let connection = database.connect()?;
@@ -300,6 +325,23 @@ fn remap_photo_ids_with(
             )?;
             changed += 1;
         }
+        let stable_matched_names: &[PhotoMatchedName] = if new_status == PhotoTaxonStatus::Matched {
+            let taxon_id = new_taxon_id.ok_or_else(|| {
+                CoreError::Consistency(format!("matched photo {photo_id} has no resolved taxon"))
+            })?;
+            &results
+                .iter()
+                .find(|result| result.summary.taxon_id == taxon_id)
+                .ok_or_else(|| {
+                    CoreError::Consistency(format!(
+                        "matched photo {photo_id} has no candidate for taxon {taxon_id}"
+                    ))
+                })?
+                .matched_names
+        } else {
+            &[]
+        };
+        matched_names::replace(transaction, photo_id, stable_matched_names)?;
         if new_status == PhotoTaxonStatus::Ambiguous {
             candidates::replace(transaction, photo_id, &results)?;
         } else {
@@ -393,77 +435,31 @@ fn find_photo_name_candidates(
     field: PhotoNameField,
     name: &str,
 ) -> CoreResult<Vec<PhotoTaxonCandidate>> {
-    let [first_name_type, second_name_type] = field.name_types();
-    let mut statement = connection.prepare(
-        r#"
-        WITH candidate_taxa AS (
-            SELECT DISTINCT taxa.taxon_id
-            FROM taxa
-            JOIN taxon_names USING (taxon_id)
-            WHERE taxa.rank = ?
-              AND taxon_names.name_type IN (?, ?)
-              AND taxon_names.normalized_name = lower(?)
-            ORDER BY taxa.taxon_id
-            LIMIT ?
-        )
-        SELECT candidate_taxa.taxon_id, taxon_names.name_id,
-               taxon_names.name_type, taxon_names.name
-        FROM candidate_taxa
-        JOIN taxon_names USING (taxon_id)
-        WHERE taxon_names.name_type IN (?, ?)
-          AND taxon_names.normalized_name = lower(?)
-        ORDER BY candidate_taxa.taxon_id, taxon_names.name_type,
-                 taxon_names.name_id
-        "#,
-    )?;
-    let rows = statement
-        .query_map(
-            params![
-                field.rank().code(),
-                first_name_type.code(),
-                second_name_type.code(),
-                name,
-                PHOTO_TAXON_CANDIDATE_LIMIT as i64,
-                first_name_type.code(),
-                second_name_type.code(),
-                name
-            ],
-            |row| {
-                let name_type_code = row.get::<_, i64>(2)?;
-                let name_type = TaxonomyNameType::from_code(name_type_code).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Integer,
-                        Box::new(error),
-                    )
-                })?;
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    PhotoMatchedName {
-                        name_id: row.get(1)?,
-                        name_type,
-                        name: row.get(3)?,
-                    },
-                ))
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut matched_names_by_taxon = BTreeMap::<i64, Vec<PhotoMatchedName>>::new();
-    for (taxon_id, matched_name) in rows {
-        matched_names_by_taxon
-            .entry(taxon_id)
-            .or_default()
-            .push(matched_name);
+    let mut matches =
+        match_exact_taxonomy_name(connection, name, field.rank(), field.accepted_name_type())?;
+    if matches.is_empty() {
+        matches =
+            match_exact_taxonomy_name(connection, name, field.rank(), field.alias_name_type())?;
     }
-    let taxon_ids = matched_names_by_taxon.keys().copied().collect::<Vec<_>>();
-    let summaries = load_taxon_summaries(connection, &taxon_ids)?;
-    Ok(summaries
+    let matches = matches
         .into_iter()
-        .map(|summary| PhotoTaxonCandidate {
+        .take(PHOTO_TAXON_CANDIDATE_LIMIT)
+        .collect::<Vec<_>>();
+    let taxon_ids = matches
+        .iter()
+        .map(|matched| matched.taxon_id)
+        .collect::<Vec<_>>();
+    let summaries = load_taxon_summaries(connection, &taxon_ids)?;
+    Ok(matches
+        .into_iter()
+        .zip(summaries)
+        .map(|(matched, summary)| PhotoTaxonCandidate {
             accepted_names: summary.names.clone(),
-            matched_names: matched_names_by_taxon
-                .remove(&summary.taxon_id)
-                .unwrap_or_default(),
+            matched_names: vec![PhotoMatchedName {
+                name_id: matched.name_id,
+                name_type: matched.name_type,
+                name: matched.name,
+            }],
             summary,
         })
         .collect())
