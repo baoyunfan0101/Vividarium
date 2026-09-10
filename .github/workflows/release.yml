@@ -150,7 +150,8 @@ jobs:
         run: |
           mkdir release-assets
           gh release download "$GITHUB_REF_NAME" --dir release-assets
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" > release-assets/release.json
+          RELEASE_ID="$(gh release view "$GITHUB_REF_NAME" --json databaseId --jq .databaseId)"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release-assets/release.json
           VERSION="${GITHUB_REF_NAME#v}"
           node scripts/validate-updater-json.mjs release-assets/latest.json "$VERSION"
           find release-assets -type f -name '*.dmg' -print -quit | grep -q . || { echo "::error::macOS DMG is missing"; exit 1; }
